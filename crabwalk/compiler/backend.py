@@ -5,6 +5,7 @@ import importlib.util
 import subprocess
 from textwrap import dedent
 import hashlib
+import ast
 from .ir import ModuleIR, TypeIR
 
 def ir_to_rust_type(typ: TypeIR) -> str:
@@ -71,11 +72,44 @@ def compile_module(module_ir: ModuleIR, module_obj, package_root: str):
             lib_rs += f"    #[pyo3(get, set)]\n    pub {field_name}: {ir_to_rust_type(field_type)},\n"
         lib_rs += "}\n\n"
         
-        # Add basic #[new]
-        args_str = ", ".join(f"{n}: {ir_to_rust_type(t)}" for n, t in struct_ir.fields)
-        init_str = ", ".join(n for n, _ in struct_ir.fields)
         lib_rs += f"#[pymethods]\nimpl {struct_ir.name} {{\n"
-        lib_rs += f"    #[new]\n    pub fn new({args_str}) -> Self {{\n        Self {{ {init_str} }}\n    }}\n"
+        if struct_ir.is_class and struct_ir.methods:
+            for method in struct_ir.methods:
+                if method.name == "__init__":
+                    args_str = ", ".join(f"{name}: {ir_to_rust_type(typ)}" for name, typ in method.args)
+                    lib_rs += f"    #[new]\n    pub fn new({args_str}) -> Self {{\n"
+                    generator = RustCodeGenerator(symbol_table=module_ir.crates)
+                    init_fields = []
+                    for stmt in method.body:
+                        if isinstance(stmt, ast.Assign) and isinstance(stmt.targets[0], ast.Attribute) and stmt.targets[0].value.id == "self":
+                            field = stmt.targets[0].attr
+                            val = generator.get_expr(stmt.value)
+                            init_fields.append(f"{field}: {val}")
+                        else:
+                            generator.visit(stmt)
+                    lib_rs += "\n".join("        " + line for line in generator.code)
+                    if init_fields:
+                        lib_rs += f"\n        Self {{ {', '.join(init_fields)} }}\n"
+                    else:
+                        # Fallback to zero-arg initialization if possible
+                        lib_rs += f"\n        Self {{ }}\n"
+                    lib_rs += "    }\n\n"
+                else:
+                    args_str = ", ".join(f"{name}: {ir_to_rust_type(typ)}" for name, typ in method.args)
+                    ret_str = ir_to_rust_type(method.returns)
+                    sig_args = f"&mut self, {args_str}" if args_str else "&mut self"
+                    
+                    lib_rs += f"    pub fn {method.name}({sig_args}) -> {ret_str} {{\n"
+                    generator = RustCodeGenerator(symbol_table=module_ir.crates)
+                    for stmt in method.body:
+                        generator.visit(stmt)
+                    lib_rs += "\n".join("        " + line for line in generator.code)
+                    lib_rs += "\n    }\n\n"
+        else:
+            # Add basic #[new]
+            args_str = ", ".join(f"{n}: {ir_to_rust_type(t)}" for n, t in struct_ir.fields)
+            init_str = ", ".join(n for n, _ in struct_ir.fields)
+            lib_rs += f"    #[new]\n    pub fn new({args_str}) -> Self {{\n        Self {{ {init_str} }}\n    }}\n"
         lib_rs += "}\n\n"
         
     for enum_ir in module_ir.enums:

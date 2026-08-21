@@ -49,6 +49,20 @@ class RustCrate:
 def crate(name, version="*", features=None):
     pass
 
+def pyclass(derive=None):
+    def decorator(cls):
+        cls._is_crabwalk_class = True
+        cls._rust_derives = derive or []
+        return cls
+    
+    # if it was called without parentheses: @rust.pyclass
+    if callable(derive):
+        cls = derive
+        derive = None
+        return decorator(cls)
+        
+    return decorator
+
 def struct(derive=None):
     def decorator(cls):
         cls._is_crabwalk_struct = True

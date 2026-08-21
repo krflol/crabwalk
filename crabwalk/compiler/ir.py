@@ -31,6 +31,12 @@ class StructIR:
     name: str
     fields: List[tuple[str, TypeIR]]
     derives: List[str]
+    methods: List[FunctionIR] = None
+    is_class: bool = False
+    
+    def __post_init__(self):
+        if self.methods is None:
+            self.methods = []
 
 @dataclass
 class EnumIR:

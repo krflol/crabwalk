@@ -49,6 +49,7 @@ def parse_module(module_name: str, tree: ast.Module) -> ModuleIR:
         elif isinstance(node, ast.ClassDef):
             is_rust_struct = False
             is_rust_enum = False
+            is_rust_class = False
             derives = []
             
             for d in node.decorator_list:
@@ -58,21 +59,40 @@ def parse_module(module_name: str, tree: ast.Module) -> ModuleIR:
                 elif isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr == "enum":
                     is_rust_enum = True
                     derives = extract_derives(d)
+                elif isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr in ("class_", "pyclass"):
+                    is_rust_class = True
+                    derives = extract_derives(d)
                 # handle non-call decorators
                 elif isinstance(d, ast.Attribute):
                     if d.attr == "struct": is_rust_struct = True
                     if d.attr == "enum": is_rust_enum = True
+                    if d.attr in ("class_", "pyclass"): is_rust_class = True
             
             if is_rust_enum:
                 variants = [stmt.targets[0].id for stmt in node.body if isinstance(stmt, ast.Assign)]
                 enums.append(EnumIR(name=node.name, variants=variants, derives=derives))
                 
-            elif is_rust_struct:
+            elif is_rust_struct or is_rust_class:
                 fields = []
+                methods = []
                 for stmt in node.body:
                     if isinstance(stmt, ast.AnnAssign):
                         fields.append((stmt.target.id, parse_type(stmt.annotation)))
-                structs.append(StructIR(name=node.name, fields=fields, derives=derives))
+                    elif isinstance(stmt, ast.FunctionDef) and is_rust_class:
+                        # Parse method
+                        args = [(arg.arg, parse_type(arg.annotation) if arg.annotation else TypeIR(name="Any")) for arg in stmt.args.args if arg.arg != "self"]
+                        # We must adjust node.args.args since stmt is the FunctionDef
+                        m_args = []
+                        for arg in stmt.args.args:
+                            if arg.arg == "self":
+                                continue
+                            m_args.append((arg.arg, parse_type(arg.annotation) if arg.annotation else TypeIR(name="Any")))
+                            
+                        returns = parse_type(stmt.returns) if stmt.returns else TypeIR(name="()")
+                        body = stmt.body
+                        methods.append(FunctionIR(name=stmt.name, args=m_args, returns=returns, body=body, detach=False))
+                
+                structs.append(StructIR(name=node.name, fields=fields, derives=derives, methods=methods, is_class=is_rust_class))
                 
         elif isinstance(node, ast.FunctionDef):
             is_rust_fn = False
