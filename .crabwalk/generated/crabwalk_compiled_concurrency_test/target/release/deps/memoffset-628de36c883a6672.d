@@ -1,0 +1,10 @@
+C:\Users\keena\Documents\obsidian\crabwalk\.crabwalk\generated\crabwalk_compiled_concurrency_test\target\release\deps\memoffset-628de36c883a6672.d: C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\lib.rs C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\raw_field.rs C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\offset_of.rs C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\span_of.rs
+
+C:\Users\keena\Documents\obsidian\crabwalk\.crabwalk\generated\crabwalk_compiled_concurrency_test\target\release\deps\libmemoffset-628de36c883a6672.rlib: C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\lib.rs C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\raw_field.rs C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\offset_of.rs C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\span_of.rs
+
+C:\Users\keena\Documents\obsidian\crabwalk\.crabwalk\generated\crabwalk_compiled_concurrency_test\target\release\deps\libmemoffset-628de36c883a6672.rmeta: C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\lib.rs C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\raw_field.rs C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\offset_of.rs C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\span_of.rs
+
+C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\lib.rs:
+C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\raw_field.rs:
+C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\offset_of.rs:
+C:\Users\keena\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\memoffset-0.9.1\src\span_of.rs:

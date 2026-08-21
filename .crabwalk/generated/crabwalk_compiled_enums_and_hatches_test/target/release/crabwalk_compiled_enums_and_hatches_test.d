@@ -1,0 +1,1 @@
+C:\Users\keena\Documents\obsidian\crabwalk\.crabwalk\generated\crabwalk_compiled_enums_and_hatches_test\target\release\crabwalk_compiled_enums_and_hatches_test.dll: C:\Users\keena\Documents\obsidian\crabwalk\.crabwalk\generated\crabwalk_compiled_enums_and_hatches_test\src\lib.rs
