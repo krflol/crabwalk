@@ -1,4 +1,5 @@
-from .compiler import compile_rust_module
+import inspect
+import sys
 
 class RustMarker:
     def __init__(self, name):
@@ -45,39 +46,69 @@ class RustCrate:
     def __getattr__(self, item):
         return RustMarker(f"{self.name}.{item}")
 
-def crate(name, version=None, features=None):
-    return RustCrate(name, version, features)
+def crate(name, version="*", features=None):
+    pass
 
 def struct(derive=None):
     def decorator(cls):
-        cls._rust_derive = derive or []
+        cls._is_crabwalk_struct = True
+        cls._rust_derives = derive or []
         return cls
     return decorator
 
 def enum(derive=None):
     def decorator(cls):
-        cls._rust_derive = derive or []
+        cls._is_crabwalk_enum = True
+        cls._rust_derives = derive or []
         return cls
     return decorator
 
-def raw(code: str):
-    pass
-
-def expr(code: str):
-    pass
-
-def fn(func=None, release_gil=False):
-    """
-    Decorator that compiles the given Python function into a native Rust extension
-    and hot-swaps the runtime pointer.
-    """
+def fn(func=None, detach=False):
     def decorator(f):
-        # The runtime compilation is triggered here when the module is loaded
-        # Note: the real AST logic is handled in the builder, this just triggers it.
-        from .compiler import compile_rust_module
-        return compile_rust_module(f)
-
+        f._rust_detach = detach
+        
+        def wrapper(*args, **kwargs):
+            if not hasattr(wrapper, "_compiled"):
+                from .compiler import compile_package
+                module = sys.modules[f.__module__]
+                compile_package(module)
+                wrapper._compiled = getattr(module, f.__name__)
+            return wrapper._compiled(*args, **kwargs)
+            
+        wrapper._is_crabwalk_fn = True
+        return wrapper
+        
     if func is None:
         return decorator
     else:
         return decorator(func)
+
+def raw(code_str: str):
+    pass
+
+def expr(code_str: str) -> any:
+    pass
+
+def __getattr__(name):
+    return type(name, (), {})
+
+class TypeMeta(type):
+    def __getitem__(cls, type_args):
+        return cls
+
+class Vec(metaclass=TypeMeta): pass
+class Option(metaclass=TypeMeta): pass
+class Result(metaclass=TypeMeta): pass
+
+u8 = type("u8", (), {})
+u16 = type("u16", (), {})
+u32 = type("u32", (), {})
+u64 = type("u64", (), {})
+i8 = type("i8", (), {})
+i16 = type("i16", (), {})
+i32 = type("i32", (), {})
+i64 = type("i64", (), {})
+f32 = type("f32", (), {})
+def compile(module):
+    from .compiler import compile_package
+    compile_package(module)

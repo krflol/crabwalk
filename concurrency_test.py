@@ -4,7 +4,7 @@ from crabwalk import rust
 
 rayon = rust.crate("rayon", version="1.8")
 
-@rust.fn(release_gil=True)
+@rust.fn(detach=True)
 def parallel_math(data: rust.Vec[rust.f64]) -> rust.Vec[rust.f64]:
     # Use rust.raw to drop down into a native Rayon iterator
     rust.raw('''
@@ -15,7 +15,7 @@ def parallel_math(data: rust.Vec[rust.f64]) -> rust.Vec[rust.f64]:
     ''')
     return data
 
-@rust.fn(release_gil=False)
+@rust.fn(detach=False)
 def single_threaded_math(data: rust.Vec[rust.f64]) -> rust.Vec[rust.f64]:
     # Same thing, single threaded
     rust.raw('''
@@ -35,7 +35,7 @@ def run_background_task():
     print(f"[Background Thread] Finished, counted to {count}")
 
 def main():
-    print("Testing Rayon Concurrency and GIL Release...")
+    print("Testing Rayon Concurrency and Detached Execution...")
     
     # 10 million elements
     size = 10_000_000
@@ -43,8 +43,8 @@ def main():
     
     print(f"Data size: {len(data)}")
     
-    # Test 1: Single Threaded (Blocks GIL)
-    print("\n--- Test 1: Single Threaded (GIL Locked) ---")
+    # Test 1: Single Threaded (Attached)
+    print("\n--- Test 1: Single Threaded (Attached) ---")
     data_clone = data.copy()
     start_time = time.time()
     
@@ -59,8 +59,8 @@ def main():
     single_duration = time.time() - start_time
     print(f"Single threaded took: {single_duration:.4f} seconds")
     
-    # Test 2: Multi Threaded (GIL Released)
-    print("\n--- Test 2: Rayon Multi-Threaded (GIL Released) ---")
+    # Test 2: Multi Threaded (Detached)
+    print("\n--- Test 2: Rayon Multi-Threaded (Detached) ---")
     data_clone = data.copy()
     start_time = time.time()
     

@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Crabwalk specific
+.crabwalk/
+
+# Rust / Cargo generated files
+target/
+Cargo.lock
+**/*.rs.bk
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db

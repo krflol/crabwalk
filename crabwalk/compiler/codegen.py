@@ -1,11 +1,20 @@
 import ast
 
 class RustCodeGenerator(ast.NodeVisitor):
-    def __init__(self):
+    def __init__(self, symbol_table=None):
         self.code = []
         self.declared_vars = set()
+        self.symbol_table = symbol_table or {}
+
+    def generic_visit(self, node):
+        lineno = getattr(node, 'lineno', '?')
+        raise ValueError(f"Crabwalk: Unsupported syntax on line {lineno}: {type(node).__name__}\n{ast.dump(node)}")
 
     def visit_Assign(self, node):
+        if len(node.targets) > 1:
+            lineno = getattr(node, 'lineno', '?')
+            raise ValueError(f"Crabwalk: Multiple assignment targets are not supported on line {lineno}: {ast.dump(node)}")
+            
         if isinstance(node.targets[0], ast.Attribute):
             obj = self.get_expr(node.targets[0].value)
             attr = node.targets[0].attr
@@ -20,6 +29,17 @@ class RustCodeGenerator(ast.NodeVisitor):
             else:
                 self.code.append(f"{target} = {value_code};")
 
+    def visit_AnnAssign(self, node):
+        target = node.target.id
+        if node.value is None:
+            raise ValueError(f"Crabwalk: Annotated assignments without values are not supported: {ast.dump(node)}")
+        value_code = self.get_expr(node.value)
+        if target not in self.declared_vars:
+            self.code.append(f"let mut {target} = {value_code};")
+            self.declared_vars.add(target)
+        else:
+            self.code.append(f"{target} = {value_code};")
+
     def visit_If(self, node):
         test_code = self.get_expr(node.test)
         self.code.append(f"if {test_code} {{")
@@ -33,6 +53,8 @@ class RustCodeGenerator(ast.NodeVisitor):
             self.code.append("}")
 
     def visit_While(self, node):
+        if node.orelse:
+            raise ValueError(f"Crabwalk: while...else is not supported: {ast.dump(node)}")
         test_code = self.get_expr(node.test)
         self.code.append(f"while {test_code} {{")
         for stmt in node.body:
@@ -40,6 +62,8 @@ class RustCodeGenerator(ast.NodeVisitor):
         self.code.append("}")
 
     def visit_For(self, node):
+        if node.orelse:
+            raise ValueError(f"Crabwalk: for...else is not supported: {ast.dump(node)}")
         target = self.get_expr(node.target)
         iter_code = self.get_expr(node.iter)
         self.code.append(f"for {target} in {iter_code} {{")
@@ -84,6 +108,8 @@ class RustCodeGenerator(ast.NodeVisitor):
             op = self.get_op(node.op)
             return f"({left} {op} {right})"
         elif isinstance(node, ast.Compare):
+            if len(node.ops) > 1 or len(node.comparators) > 1:
+                raise ValueError(f"Chained comparisons are not supported: {ast.unparse(node)}")
             left = self.get_expr(node.left)
             right = self.get_expr(node.comparators[0])
             op = self.get_comp_op(node.ops[0])
@@ -93,17 +119,25 @@ class RustCodeGenerator(ast.NodeVisitor):
             values = [self.get_expr(v) for v in node.values]
             return f"({op.join(values)})"
         elif isinstance(node, ast.UnaryOp):
-            op = "!" if isinstance(node.op, ast.Not) else "-"
+            if isinstance(node.op, ast.Not):
+                op = "!"
+            elif isinstance(node.op, ast.USub):
+                op = "-"
+            else:
+                raise ValueError(f"Unsupported unary operator: {type(node.op).__name__}")
             operand = self.get_expr(node.operand)
             return f"{op}{operand}"
         elif isinstance(node, ast.Call):
+            if node.keywords:
+                raise ValueError(f"Crabwalk: Keyword arguments are not supported in Rust calls: {ast.dump(node)}")
+                
             if isinstance(node.func, ast.Attribute):
                 obj = node.func.value.id if isinstance(node.func.value, ast.Name) else self.get_expr(node.func.value)
                 method = node.func.attr
                 if obj == "serde_json" and method == "from_str":
                     typ = node.args[0].id
                     data = self.get_expr(node.args[1])
-                    return f"serde_json::from_str::<{typ}>(&{data}).unwrap()"
+                    return f"serde_json::from_str::<{typ}>(&{data})"
             
             # Catch rust.Some, rust.Ok, rust.expr, etc.
             if isinstance(node.func, ast.Attribute) and getattr(node.func.value, "id", None) == "rust":
@@ -115,6 +149,8 @@ class RustCodeGenerator(ast.NodeVisitor):
                     return f"Err({self.get_expr(node.args[0])})"
                 if node.func.attr == "expr":
                     return node.args[0].value
+                if node.func.attr == "unwrap":
+                    return f"({self.get_expr(node.args[0])}).unwrap()"
 
             func = self.get_expr(node.func)
             if func and func[0].isupper():
@@ -126,13 +162,19 @@ class RustCodeGenerator(ast.NodeVisitor):
                 return "None"
             obj = self.get_expr(node.value)
             attr = node.attr
+            
+            if obj in self.symbol_table:
+                crate_name = self.symbol_table[obj]["name"]
+                return f"{crate_name}::{attr}"
+                
             if obj and obj[0].isupper():
                 return f"{obj}::{attr}"
             if attr in ["unwrap", "is_some", "is_none", "is_ok", "is_err", "is_empty", "push", "pop"]:
                 return f"{obj}.{attr}"
-            return f"{obj}.{attr}.clone()"
+            # Let Rust handle ownership rules instead of hacking .clone() everywhere
+            return f"{obj}.{attr}"
         else:
-            raise NotImplementedError(f"Unsupported AST node: {type(node)}")
+            raise ValueError(f"Crabwalk: Unsupported syntax: {type(node).__name__}\n{ast.dump(node)}")
 
     def get_op(self, op):
         if isinstance(op, ast.Add): return "+"
