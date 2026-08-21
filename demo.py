@@ -17,14 +17,16 @@ class Metrics:
 
 @rust.fn
 def extract_title(json_data: rust.String, metrics: rust.Mut[Metrics]) -> rust.String:
-    post = serde_json.from_str(Post, json_data)
+    post = rust.unwrap(serde_json.from_str(Post, json_data))
     metrics.posts_processed = metrics.posts_processed + 1
     return post.title
 
 def main():
+    import sys
+    rust.compile(sys.modules[__name__])
     # 1. Create the global state (owned by Rust natively, but wrapped for Python)
     print("Initializing native Rust state...")
-    metrics = Metrics()
+    metrics = Metrics(0)
     
     print(f"[Python] Posts processed before: {metrics.posts_processed}")
 

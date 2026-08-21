@@ -10,7 +10,7 @@ def process_data(values: rust.Vec[rust.f64]) -> rust.Option[Stats]:
     if values.is_empty():
         return None
         
-    stats = Stats()
+    stats = Stats(0.0, 0)
     
     # For loop test
     for val in values:
@@ -31,6 +31,8 @@ def find_threshold(target: rust.f64) -> rust.f64:
     return current
 
 def main():
+    import sys
+    rust.compile(sys.modules[__name__])
     print("Testing Crabwalk Full MVP Architecture...")
     
     # Test 1: Option and For Loop

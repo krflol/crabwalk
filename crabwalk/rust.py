@@ -1,53 +1,67 @@
-import inspect
+import functools
 import sys
 
-class RustMarker:
+class RustSymbol:
+    pass
+
+class RustType(RustSymbol):
     def __init__(self, name):
         self.name = name
+    def __repr__(self):
+        return f"RustType({self.name})"
 
-# Primitives
-i8 = RustMarker("i8")
-i16 = RustMarker("i16")
-i32 = RustMarker("i32")
-i64 = RustMarker("i64")
-i128 = RustMarker("i128")
-u8 = RustMarker("u8")
-u16 = RustMarker("u16")
-u32 = RustMarker("u32")
-u64 = RustMarker("u64")
-u128 = RustMarker("u128")
-f32 = RustMarker("f32")
-f64 = RustMarker("f64")
-bool = RustMarker("bool")
-
-String = RustMarker("String")
-
-# Markers for derived traits
-Serialize = RustMarker("Serialize")
-Deserialize = RustMarker("Deserialize")
-
-class TypeModifier:
+class RustGenericType(RustType):
+    def __init__(self, name):
+        super().__init__(name)
     def __getitem__(self, item):
         return self
 
-Mut = TypeModifier()
-Vec = TypeModifier()
-Option = TypeModifier()
-Result = TypeModifier()
-HashMap = TypeModifier()
-HashSet = TypeModifier()
+class RustTrait(RustSymbol):
+    def __init__(self, name):
+        self.name = name
 
-class RustCrate:
-    def __init__(self, name, version=None, features=None):
+class RustCrateMember(RustSymbol):
+    def __init__(self, crate_name, member_name):
+        self.crate_name = crate_name
+        self.member_name = member_name
+
+class RustCrate(RustSymbol):
+    def __init__(self, name, version="*", features=None):
         self.name = name
         self.version = version
         self.features = features or []
         
     def __getattr__(self, item):
-        return RustMarker(f"{self.name}.{item}")
+        return RustCrateMember(self.name, item)
 
-def crate(name, version="*", features=None):
-    pass
+def crate(name: str, version: str = "*", features: list[str] | None = None) -> RustCrate:
+    return RustCrate(name=name, version=version, features=features)
+
+# Primitives
+i8 = RustType("i8")
+i16 = RustType("i16")
+i32 = RustType("i32")
+i64 = RustType("i64")
+i128 = RustType("i128")
+u8 = RustType("u8")
+u16 = RustType("u16")
+u32 = RustType("u32")
+u64 = RustType("u64")
+u128 = RustType("u128")
+f32 = RustType("f32")
+f64 = RustType("f64")
+bool = RustType("bool")
+String = RustType("String")
+
+# Generics
+Mut = RustGenericType("Mut")
+Ref = RustGenericType("Ref")
+Owned = RustGenericType("Owned")
+Vec = RustGenericType("Vec")
+Option = RustGenericType("Option")
+Result = RustGenericType("Result")
+HashMap = RustGenericType("HashMap")
+HashSet = RustGenericType("HashSet")
 
 def pyclass(derive=None):
     def decorator(cls):
@@ -55,7 +69,6 @@ def pyclass(derive=None):
         cls._rust_derives = derive or []
         return cls
     
-    # if it was called without parentheses: @rust.pyclass
     if callable(derive):
         cls = derive
         derive = None
@@ -81,6 +94,7 @@ def fn(func=None, detach=False):
     def decorator(f):
         f._rust_detach = detach
         
+        @functools.wraps(f)
         def wrapper(*args, **kwargs):
             if not hasattr(wrapper, "_compiled"):
                 from .compiler import compile_package
@@ -98,31 +112,27 @@ def fn(func=None, detach=False):
         return decorator(func)
 
 def raw(code_str: str):
-    pass
+    raise RuntimeError("rust.raw() is only valid inside Crabwalk-compiled code")
 
 def expr(code_str: str) -> any:
-    pass
+    raise RuntimeError("rust.expr() is only valid inside Crabwalk-compiled code")
 
-def __getattr__(name):
-    return type(name, (), {})
-
-class TypeMeta(type):
-    def __getitem__(cls, type_args):
-        return cls
-
-class Vec(metaclass=TypeMeta): pass
-class Option(metaclass=TypeMeta): pass
-class Result(metaclass=TypeMeta): pass
-
-u8 = type("u8", (), {})
-u16 = type("u16", (), {})
-u32 = type("u32", (), {})
-u64 = type("u64", (), {})
-i8 = type("i8", (), {})
-i16 = type("i16", (), {})
-i32 = type("i32", (), {})
-i64 = type("i64", (), {})
-f32 = type("f32", (), {})
 def compile(module):
     from .compiler import compile_package
     compile_package(module)
+
+def unwrap(val):
+    raise RuntimeError("rust.unwrap() is only valid inside Crabwalk-compiled code")
+
+def try_(val):
+    raise RuntimeError("rust.try_() is only valid inside Crabwalk-compiled code")
+
+def Ok(val):
+    raise RuntimeError("rust.Ok() is only valid inside Crabwalk-compiled code")
+
+def Err(val):
+    raise RuntimeError("rust.Err() is only valid inside Crabwalk-compiled code")
+
+def __getattr__(name):
+    # Fallback for dynamic types if needed, though they shouldn't be relied upon.
+    return RustType(name)

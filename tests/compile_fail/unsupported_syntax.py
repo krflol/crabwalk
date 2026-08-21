@@ -1,3 +1,4 @@
+# expected-crabwalk: Unsupported while-else or for-else loop
 from crabwalk import rust
 
 @rust.fn

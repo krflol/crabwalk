@@ -26,11 +26,11 @@ def process_job(job: Job) -> Job:
     return job
 
 def main():
+    import sys
+    rust.compile(sys.modules[__name__])
     print("Testing Enums and Escape Hatches...")
     
-    job = Job()
-    job.id = 1
-    job.status = Status.Pending
+    job = Job(1, Status.Pending)
     
     print(f"\n[Python] Job before processing: id={job.id}, status={job.status}")
     

@@ -1,3 +1,4 @@
+# expected-rustc: E0382
 from crabwalk import rust
 
 serde = rust.crate("serde", version="1.0", features=["derive"])

@@ -24,6 +24,12 @@ def ir_to_rust_type(typ: TypeIR) -> str:
         ok_t = ir_to_rust_type(typ.generics[0]) if len(typ.generics) > 0 else "_"
         err_t = ir_to_rust_type(typ.generics[1]) if len(typ.generics) > 1 else "String"
         return f"Result<{ok_t}, {err_t}>"
+    if typ.name == "Mut":
+        return f"&mut {ir_to_rust_type(typ.generics[0])}" if typ.generics else "&mut _"
+    if typ.name == "Ref":
+        return f"&{ir_to_rust_type(typ.generics[0])}" if typ.generics else "&_"
+    if typ.name == "Owned":
+        return ir_to_rust_type(typ.generics[0]) if typ.generics else "_"
         
     return typ.name
 
