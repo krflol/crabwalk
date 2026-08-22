@@ -7,7 +7,8 @@ import hashlib
 import keyword
 import math
 import re
-from collections import Counter
+import threading
+from collections import Counter, OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -44,6 +45,7 @@ from .ir import (
     CrateCallIR,
     CrateIR,
     DestructureIR,
+    Effect,
     EnumConstructorIR,
     EnumIR,
     EnumVariantIR,
@@ -89,6 +91,10 @@ from .ir import (
     UnaryIR,
     WhileIR,
 )
+
+_ANALYSIS_CACHE_LIMIT = 64
+_analysis_cache: OrderedDict[tuple[str, str, str], PackageIR] = OrderedDict()
+_analysis_cache_lock = threading.Lock()
 
 _RUST_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RUST_KEYWORDS = {
@@ -381,9 +387,9 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
         ).lower()
         for declaration in declarations
     )
-    functions = _propagate_python_boundaries(functions)
+    functions = _propagate_effects(functions)
     return PackageIR(
-        schema_version=16,
+        schema_version=17,
         module_name=identity,
         source_path=str(source_path),
         source_hash=hashlib.sha256(source_bytes).hexdigest(),
@@ -441,8 +447,48 @@ def analyze_project_path(
                     help="Pass a Python file or a package directory containing __init__.py.",
                 )
             )
-        return analyze_path(source_path, module_name)
-    return _analyze_regular_package(package_root, source_path, module_name)
+        source_identity = project_source_identity(source_path)
+        cache_key = (
+            str(source_path),
+            module_name or source_path.stem,
+            source_identity,
+        )
+        cached = _cached_analysis(cache_key)
+        if cached is not None:
+            return cached
+        return _remember_analysis(cache_key, analyze_path(source_path, module_name))
+
+    source_identity = project_source_identity(source_path)
+    package_name = _package_name_for_entry(
+        package_root,
+        source_path,
+        module_name,
+    )
+    cache_key = (str(package_root), package_name, source_identity)
+    cached = _cached_analysis(cache_key)
+    if cached is not None:
+        return cached
+    return _remember_analysis(
+        cache_key,
+        _analyze_regular_package(package_root, source_path, module_name),
+    )
+
+
+def _cached_analysis(key: tuple[str, str, str]) -> PackageIR | None:
+    with _analysis_cache_lock:
+        result = _analysis_cache.get(key)
+        if result is not None:
+            _analysis_cache.move_to_end(key)
+        return result
+
+
+def _remember_analysis(key: tuple[str, str, str], result: PackageIR) -> PackageIR:
+    with _analysis_cache_lock:
+        existing = _analysis_cache.setdefault(key, result)
+        _analysis_cache.move_to_end(key)
+        while len(_analysis_cache) > _ANALYSIS_CACHE_LIMIT:
+            _analysis_cache.popitem(last=False)
+        return existing
 
 
 def project_source_identity(path: str | Path) -> str:
@@ -582,6 +628,8 @@ def _analyze_regular_package(
             type_variables=type_variables,
             is_package=source_path.name == "__init__.py",
         )
+
+    _validate_package_import_graph(modules)
 
     domain_cache: dict[str, dict[str, _DomainIR | _ModuleRef]] = {}
 
@@ -954,7 +1002,7 @@ def _analyze_regular_package(
             )
         )
 
-    functions_tuple = _propagate_python_boundaries(tuple(functions))
+    functions_tuple = _propagate_effects(tuple(functions))
     digest = hashlib.sha256()
     source_paths: list[str] = []
     for name in sorted(modules):
@@ -965,7 +1013,7 @@ def _analyze_regular_package(
         digest.update(b"\0")
         source_paths.append(str(module.path))
     return PackageIR(
-        schema_version=16,
+        schema_version=17,
         module_name=package_name,
         source_path=str(package_root / "__init__.py"),
         source_hash=digest.hexdigest(),
@@ -1148,6 +1196,65 @@ def _resolved_import_module(
     if node.module:
         base.extend(node.module.split("."))
     return ".".join(base)
+
+
+def _validate_package_import_graph(modules: dict[str, _PackageModule]) -> None:
+    """Reject package semantics Crabwalk cannot model exactly during alpha."""
+
+    edges: dict[str, list[tuple[str, ast.AST]]] = {name: [] for name in modules}
+    for name, module in modules.items():
+        for node in module.tree.body:
+            if isinstance(node, ast.ImportFrom):
+                source = _resolved_import_module(module, node)
+                if any(alias.name == "*" for alias in node.names):
+                    _fail(
+                        "CRAB205",
+                        "Package star import is unsupported",
+                        "Import explicit names; Crabwalk does not approximate __all__ or private-name filtering.",
+                        module.path,
+                        node,
+                    )
+                if source is None or source not in modules:
+                    continue
+                targets = {
+                    f"{source}.{alias.name}"
+                    for alias in node.names
+                    if f"{source}.{alias.name}" in modules
+                }
+                if source != name and not targets:
+                    targets.add(source)
+                edges[name].extend((target, node) for target in sorted(targets))
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in modules and alias.name != name:
+                        edges[name].append((alias.name, node))
+
+    state = {name: 0 for name in modules}
+    stack: list[str] = []
+
+    def visit(name: str) -> None:
+        state[name] = 1
+        stack.append(name)
+        for target, node in edges[name]:
+            if state[target] == 0:
+                visit(target)
+                continue
+            if state[target] == 1:
+                start = stack.index(target)
+                cycle = (*stack[start:], target)
+                _fail(
+                    "CRAB204",
+                    "Package import cycle is unsupported",
+                    " -> ".join(cycle),
+                    modules[name].path,
+                    node,
+                )
+        stack.pop()
+        state[name] = 2
+
+    for name in sorted(modules):
+        if state[name] == 0:
+            visit(name)
 
 
 def _package_rust_symbol(module_name: str, function_name: str) -> str:
@@ -3819,6 +3926,9 @@ class _FunctionLowerer:
                         node.args[0],
                     )
                 result = UNIT
+            elif method == "finish" and not node.args:
+                arguments = ()
+                result = TypeRef("Result", (UNIT, STRING))
             else:
                 _unsupported(
                     node,
@@ -5711,11 +5821,24 @@ def _block_returns(statements: tuple[StatementIR, ...]) -> bool:
     return False
 
 
-def _propagate_python_boundaries(
-    functions: tuple[FunctionIR, ...],
-) -> tuple[FunctionIR, ...]:
-    direct: dict[str, bool] = {
-        function.rust_symbol: _statements_have_python_boundary(function.body)
+_EFFECT_ORDER = (
+    Effect.NATIVE_RUST,
+    Effect.CONVERSION_BOUNDARY,
+    Effect.PYTHON_RUNTIME,
+    Effect.BLOCKING,
+    Effect.THREAD_SPAWN,
+    Effect.GLOBAL_MUTATION,
+    Effect.UNSAFE_MEMORY,
+    Effect.UNSAFE_FFI,
+    Effect.MAY_PANIC,
+)
+
+
+def _propagate_effects(functions: tuple[FunctionIR, ...]) -> tuple[FunctionIR, ...]:
+    """Infer semantic effects and propagate native-call effects transitively."""
+
+    direct: dict[str, set[Effect]] = {
+        function.rust_symbol: _direct_function_effects(function)
         for function in functions
     }
     calls: dict[str, set[str]] = {
@@ -5725,36 +5848,89 @@ def _propagate_python_boundaries(
     while changed:
         changed = False
         for name, targets in calls.items():
-            if not direct[name] and any(
-                direct.get(target, False) for target in targets
-            ):
-                direct[name] = True
+            inherited = {
+                effect
+                for target in targets
+                for effect in direct.get(target, ())
+                if effect not in {Effect.NATIVE_RUST, Effect.CONVERSION_BOUNDARY}
+            }
+            expanded = direct[name] | inherited
+            if expanded != direct[name]:
+                direct[name] = expanded
                 changed = True
     values: list[FunctionIR] = []
     for function in functions:
-        effects = ["NativeRust"]
-        if function.parameters or function.return_type != UNIT:
-            effects.append("ConversionBoundary")
-        if direct[function.rust_symbol]:
-            effects.append("PythonRuntimeBoundary")
+        effects = tuple(
+            effect for effect in _EFFECT_ORDER if effect in direct[function.rust_symbol]
+        )
         values.append(
             replace(
                 function,
-                python_boundary=direct[function.rust_symbol],
-                effects=tuple(effects),
+                python_boundary=Effect.PYTHON_RUNTIME in effects,
+                effects=effects,
             )
         )
     return tuple(values)
 
 
-def _statements_have_python_boundary(statements: tuple[StatementIR, ...]) -> bool:
-    return any(
-        any(
-            isinstance(value, PythonPrintIR)
-            for value in _statement_expressions(statement)
-        )
-        for statement in statements
-    )
+def _direct_function_effects(function: FunctionIR) -> set[Effect]:
+    effects = {Effect.NATIVE_RUST}
+    if function.parameters or function.return_type != UNIT:
+        effects.add(Effect.CONVERSION_BOUNDARY)
+    for statement in function.body:
+        for expression in _statement_expressions(statement):
+            effects.update(_expression_effects(expression))
+    return effects
+
+
+def _expression_effects(expression: ExpressionIR) -> set[Effect]:
+    effects: set[Effect] = set()
+    if isinstance(expression, PythonPrintIR):
+        effects.add(Effect.PYTHON_RUNTIME)
+    if isinstance(expression, PanicIR):
+        effects.add(Effect.MAY_PANIC)
+    if isinstance(expression, BinaryIR) and expression.type_ref.is_numeric:
+        effects.add(Effect.MAY_PANIC)
+    if isinstance(expression, ConstructorIR):
+        if expression.constructor in {"UnsafeRead", "UnsafeWrite"}:
+            effects.add(Effect.UNSAFE_MEMORY)
+        elif expression.constructor == "CAbs":
+            effects.update({Effect.UNSAFE_FFI, Effect.MAY_PANIC})
+        elif expression.constructor == "UnsafeStaticIncrement":
+            effects.update({Effect.GLOBAL_MUTATION, Effect.MAY_PANIC})
+        elif expression.constructor in {"Spawn", "ThreadPool"}:
+            effects.update({Effect.THREAD_SPAWN, Effect.MAY_PANIC})
+        elif expression.constructor in {
+            "BlockOn",
+            "SleepMillis",
+            "TcpListener",
+            "TcpStream",
+        }:
+            effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
+    if isinstance(expression, MethodCallIR):
+        receiver = expression.receiver.type_ref.underlying.rust_name
+        if receiver == "Vec" and expression.method == "split_at_mut_sum":
+            effects.update({Effect.UNSAFE_MEMORY, Effect.MAY_PANIC})
+        if receiver in {"TcpListener", "TcpStream"}:
+            effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
+        if receiver == "ThreadPool":
+            effects.update({Effect.THREAD_SPAWN, Effect.BLOCKING, Effect.MAY_PANIC})
+        if receiver == "ThreadHandle" and expression.method == "join":
+            effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
+        if receiver == "Receiver" and expression.method in {"recv", "recv_async"}:
+            effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
+        if receiver in {"Arc", "Mutex", "RefCell", "Sender"}:
+            effects.add(Effect.MAY_PANIC)
+        if expression.method in {"expect", "unwrap"}:
+            effects.add(Effect.MAY_PANIC)
+    if (
+        isinstance(expression, CrateCallIR)
+        and expression.path == ("std", "mem", "drop")
+        and expression.arguments
+        and expression.arguments[0].type_ref.underlying.rust_name == "ThreadPool"
+    ):
+        effects.add(Effect.BLOCKING)
+    return effects
 
 
 def _statement_calls(statements: tuple[StatementIR, ...]) -> set[str]:

@@ -34,13 +34,17 @@ def boundary(name: rust.Str) -> rust.String:
     assert payload["cache"]["status"] == "miss"  # type: ignore[index]
     assert payload["build_command"][0:2] == ["cargo", "build"]  # type: ignore[index]
     native, boundary = payload["functions"]  # type: ignore[misc]
-    assert native["effects"] == ["NativeRust", "ConversionBoundary"]
+    assert native["effects"] == [
+        "NativeRust",
+        "ConversionBoundary",
+        "MayPanic",
+    ]
     assert native["gil"] == "released during the native call"
     assert native["parameters"][0]["conversion"]["kind"] == "checked conversion"
     assert boundary["effects"] == [
         "NativeRust",
         "ConversionBoundary",
-        "PythonRuntimeBoundary",
+        "PythonRuntime",
     ]
     assert boundary["python_calls"][0]["name"] == "print"
     assert boundary["native_calls"][0]["name"] == "rust.println"
@@ -48,7 +52,7 @@ def boundary(name: rust.Str) -> rust.String:
 
     assert _show(result, "native") == 0
     shown = capsys.readouterr().out  # type: ignore[attr-defined]
-    assert "// Effects: NativeRust, ConversionBoundary" in shown
+    assert "// Effects: NativeRust, ConversionBoundary, MayPanic" in shown
     assert "// GIL: released during the native call" in shown
     assert "// Native implementation" in shown
     assert "// Python ABI wrapper" in shown

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import sysconfig
@@ -27,7 +28,12 @@ _BUILD_ENVIRONMENT_KEYS = (
     "CARGO_HOME",
     "LDFLAGS",
     "MACOSX_DEPLOYMENT_TARGET",
+    "OPENSSL_DIR",
+    "OPENSSL_INCLUDE_DIR",
+    "OPENSSL_LIB_DIR",
     "PATH",
+    "PKG_CONFIG_PATH",
+    "PYO3_CONFIG_FILE",
     "PYO3_CROSS",
     "PYO3_CROSS_LIB_DIR",
     "PYO3_CROSS_PYTHON_VERSION",
@@ -47,9 +53,14 @@ def build_fingerprint(
     locked: bool = False,
     offline: bool = False,
     project_config_hash: str | None = None,
+    project_root: Path | None = None,
+    extra_files: tuple[Path, ...] = (),
+    extra_env: tuple[str, ...] = (),
 ) -> tuple[str, dict[str, object]]:
+    toolchain_root = (project_root or Path(ir.source_path).parent).resolve()
+    toolchain_files_hash = _toolchain_files_hash(toolchain_root)
     payload: dict[str, object] = {
-        "fingerprint_schema": 2,
+        "fingerprint_schema": 3,
         "crabwalk_version": __version__,
         "implementation_hash": _implementation_hash(),
         "ir_schema": ir.schema_version,
@@ -63,8 +74,9 @@ def build_fingerprint(
             "abiflags": getattr(sys, "abiflags", ""),
             "extension_suffix": sysconfig.get_config_var("EXT_SUFFIX"),
         },
-        "rustc": _rustc_version(),
-        "cargo": _cargo_version(),
+        "rustc": _tool_version("rustc", toolchain_root, toolchain_files_hash),
+        "cargo": _tool_version("cargo", toolchain_root, toolchain_files_hash),
+        "toolchain_files": toolchain_files_hash,
         "pyo3": PYO3_VERSION,
         "dependency_lock_hash": dependency_lock_hash,
         "cargo_policy": {"locked": locked, "offline": offline},
@@ -75,7 +87,12 @@ def build_fingerprint(
         },
         "profile": "release",
         "overflow_checks": True,
-        "build_environment": _build_environment_fingerprint(),
+        "panic_strategy": "unwind",
+        "build_environment": _build_environment_fingerprint(extra_env),
+        "extra_files": {
+            str(path.resolve()): _input_tree_hash(path)
+            for path in sorted(extra_files, key=lambda value: str(value.resolve()))
+        },
         "cargo_configuration_hash": _cargo_configuration_hash(Path(ir.source_path)),
         "project_config_hash": project_config_hash,
     }
@@ -89,19 +106,29 @@ def build_fingerprint(
 
 
 def _path_dependency_hash(root: Path) -> str:
+    return _input_tree_hash(root)
+
+
+def _input_tree_hash(root: Path) -> str:
     digest = hashlib.sha256()
     digest.update(str(root.resolve()).encode("utf-8"))
     digest.update(b"\0")
+    if root.is_file():
+        digest.update(root.read_bytes())
+        return digest.hexdigest()
     if not root.is_dir():
         return "missing"
-    selected = {"Cargo.toml", "Cargo.lock", "build.rs"}
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
         relative = path.relative_to(root)
         if any(part in {".git", ".crabwalk", "target"} for part in relative.parts):
             continue
-        if path.name not in selected and path.suffix != ".rs":
+        if path.is_symlink():
+            digest.update(relative.as_posix().encode("utf-8"))
+            digest.update(b"\0symlink\0")
+            digest.update(os.readlink(path).encode("utf-8"))
+            digest.update(b"\0")
+            continue
+        if not path.is_file():
             continue
         digest.update(relative.as_posix().encode("utf-8"))
         digest.update(b"\0")
@@ -110,11 +137,46 @@ def _path_dependency_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
-@lru_cache(maxsize=1)
-def _rustc_version() -> str:
+def _tool_version(
+    command: str,
+    cwd: Path,
+    toolchain_files_hash: str | None = None,
+) -> str:
+    resolved_cwd = cwd.resolve()
+    executable = shutil.which(command) or command
+    executable_state = _file_state(Path(executable))
+    local_toolchain_hash = (
+        toolchain_files_hash
+        if toolchain_files_hash is not None
+        else _toolchain_files_hash(resolved_cwd)
+    )
+    return _cached_tool_version(
+        command,
+        str(resolved_cwd),
+        executable,
+        executable_state,
+        local_toolchain_hash,
+        _rustup_state_hash(command),
+    )
+
+
+@lru_cache(maxsize=256)
+def _cached_tool_version(
+    command: str,
+    cwd: str,
+    executable: str,
+    executable_state: tuple[int, int, int] | None,
+    toolchain_files_hash: str,
+    rustup_state_hash: str,
+) -> str:
+    # The state arguments intentionally participate in the cache key. They make
+    # this a project/toolchain-aware optimization rather than the old global
+    # one-entry memo that could survive a local override or rustup update.
+    del command, executable_state, toolchain_files_hash, rustup_state_hash
     try:
         return subprocess.check_output(
-            ["rustc", "-vV"],
+            [executable, "-vV"],
+            cwd=Path(cwd),
             text=True,
             stderr=subprocess.STDOUT,
             timeout=15,
@@ -123,22 +185,55 @@ def _rustc_version() -> str:
         return "unavailable"
 
 
-@lru_cache(maxsize=1)
-def _cargo_version() -> str:
+def _file_state(path: Path) -> tuple[int, int, int] | None:
     try:
-        return subprocess.check_output(
-            ["cargo", "-vV"],
-            text=True,
-            stderr=subprocess.STDOUT,
-            timeout=15,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        return "unavailable"
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def _build_environment_fingerprint() -> dict[str, dict[str, object]]:
+def _rustup_state_hash(command: str) -> str:
+    digest = hashlib.sha256()
+    for name in ("RUSTUP_TOOLCHAIN", "RUSTUP_HOME"):
+        digest.update(name.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(os.environ.get(name, "").encode("utf-8"))
+        digest.update(b"\0")
+    rustup_home_value = os.environ.get("RUSTUP_HOME")
+    rustup_home = (
+        Path(rustup_home_value).expanduser()
+        if rustup_home_value
+        else Path.home() / ".rustup"
+    )
+    settings = rustup_home / "settings.toml"
+    if settings.is_file():
+        digest.update(settings.read_bytes())
+    executable_name = f"{command}.exe" if os.name == "nt" else command
+    toolchains = rustup_home / "toolchains"
+    if toolchains.is_dir():
+        for directory in sorted(toolchains.iterdir(), key=lambda path: path.name):
+            executable = directory / "bin" / executable_name
+            state = _file_state(executable)
+            if state is None:
+                continue
+            digest.update(directory.name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(repr(state).encode("ascii"))
+            digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _build_environment_fingerprint(
+    extra_keys: tuple[str, ...] = (),
+) -> dict[str, dict[str, object]]:
     values: dict[str, dict[str, object]] = {}
-    for name in _BUILD_ENVIRONMENT_KEYS:
+    names = set(_BUILD_ENVIRONMENT_KEYS) | set(extra_keys)
+    names.update(name for name in os.environ if name.startswith("CARGO_PROFILE_"))
+    # This variable is forced to unwind by CargoBuilder and must not let an
+    # ambient abort request create a separate, misleading cache identity.
+    names.discard("CARGO_PROFILE_RELEASE_PANIC")
+    for name in sorted(names):
         value = os.environ.get(name)
         if value is None:
             continue
@@ -159,6 +254,24 @@ def _build_environment_fingerprint() -> dict[str, dict[str, object]]:
             "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
         }
     return values
+
+
+def _toolchain_files_hash(project_root: Path) -> str:
+    digest = hashlib.sha256()
+    candidates: list[Path] = []
+    for directory in (project_root, *project_root.parents):
+        for name in ("rust-toolchain.toml", "rust-toolchain"):
+            candidate = directory / name
+            if candidate.is_file():
+                candidates.append(candidate)
+        if candidates:
+            break
+    for path in candidates:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _cargo_configuration_hash(source_path: Path) -> str:
@@ -184,7 +297,6 @@ def _cargo_configuration_hash(source_path: Path) -> str:
     return digest.hexdigest()
 
 
-@lru_cache(maxsize=1)
 def _implementation_hash() -> str:
     package_root = Path(__file__).resolve().parents[1]
     digest = hashlib.sha256()

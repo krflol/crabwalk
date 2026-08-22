@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-21
+updated: 2026-08-22
 tags:
   - project/crabwalk
   - docs/language
@@ -18,7 +18,8 @@ tags:
   explicitly with `rust.block_on(...)`.
 - `@rust.generic(...)`, `@rust.method(...)`, `@rust.impl(...)`, and
   `@rust.operator(..., name="add")` declare native-only helpers that are called by
-  exported functions.
+  exported functions. At ordinary Python runtime these names are metadata-bearing
+  sentinels and raise instead of interpreting their original Python bodies.
 - Every parameter has a supported Rust annotation. Value-returning functions
   have an explicit return annotation; a unit function may use `-> None` or omit it.
 - Parameters are required positional parameters. Defaults, variadics,
@@ -107,6 +108,11 @@ raised as `CrabwalkPanicError`; it never unwinds into Python.
 | `TcpStream` | `write_get`, `shutdown_write`, `read_to_string` |
 | `ThreadPool` | unit-returning `execute(lambda: expression)` jobs |
 
+`ThreadPool.finish()` consumes the pool and returns `Result[Unit, String]` after
+closing the channel and joining workers. Use `.expect(...)` or propagate the result
+when worker failure matters; `Drop` still closes/joins but never propagates a worker
+panic.
+
 Calls on an inferred declared-crate value may continue a crate method chain and
 are ultimately checked by rustc. This is not general crate reflection: source
 must provide enough expected type context, and a bad API call becomes a mapped
@@ -159,9 +165,10 @@ The advanced teaching surface is explicit and narrow:
   pointers to named Copy locals and isolate dereferencing in generated unsafe blocks.
 - numeric `Vec.split_at_mut_sum(mid)` bounds-checks then demonstrates a safe
   abstraction over `from_raw_parts_mut`.
-- `rust.c_abs(i32)` calls C `abs` through an unsafe extern declaration.
-- `rust.unsafe_static_increment(u64)` demonstrates `static mut`; do not call it
-  concurrently.
+- `rust.c_abs(i32)` calls C `abs` through an unsafe extern declaration after
+  rejecting `i32::MIN`, whose magnitude is not representable by C `int`.
+- `rust.unsafe_static_increment(u64)` demonstrates synchronized global state with
+  a checked `AtomicU64` update. It no longer uses `static mut`.
 - `rust.type_alias_identity(value)`, `rust.call_twice(function, value)`,
   `rust.boxed_closure_call`, and `rust.closure_vector_total` emit a real type alias,
   function pointer, returned `Box<dyn Fn>`, and heterogeneous closure vector.
@@ -176,8 +183,9 @@ expressions remain rejected.
 types for the bounded Rust Book server proof. The listener binds an explicit
 address; the supplied stream constructor connects only to a loopback port. The
 generated fixed pool stores `Box<dyn FnOnce() + Send + 'static>` jobs in an mpsc
-channel shared by workers through `Arc<Mutex<Receiver<_>>>`. Dropping the pool
-closes the sender and joins every worker.
+channel shared by workers through `Arc<Mutex<Receiver<_>>>`. Each job is contained
+with `catch_unwind`; the first worker failure is retained for `finish()`. Dropping
+the pool closes the sender and joins every worker without unwrapping join errors.
 
 This is not a production HTTP framework: there is no TLS, persistent service
 lifecycle, general request parser, arbitrary bind helper, or externally managed
@@ -204,15 +212,30 @@ the originating call.
 
 ## Python and native effects
 
-Every `FunctionIR` stores one or more effects:
+Every `FunctionIR` stores one or more typed effects:
 
 - `NativeRust` — the generated body executes as Rust;
 - `ConversionBoundary` — the exported call converts a parameter or return value;
-- `PythonRuntimeBoundary` — the call graph reaches an allowlisted Python operation.
+- `PythonRuntime` — the call graph reaches an allowlisted Python operation;
+- `Blocking` and `ThreadSpawn` — native scheduling/lifecycle behavior;
+- `GlobalMutation`, `UnsafeMemory`, and `UnsafeFfi` — reviewed safety-relevant work;
+- `MayPanic` — a reachable Rust panic path that relies on ABI containment.
 
 The initial Python operation is `print(value)` for ABI-convertible scalar/string
 values. `rust.println(value)` remains native. The Python effect propagates through
-native callers, so the generated wrapper cannot incorrectly release the GIL.
+native callers. Wrapper policy consumes the typed effects: Python runtime, global
+mutation, unsafe memory, and unsafe FFI prevent GIL detachment even when the
+signature itself contains only primitives.
+
+Before code generation, an IR validation pass checks effect consistency and rejects
+a Rust worker closure that directly or transitively reaches Python runtime state.
+
+## Package import policy
+
+Regular packages compile as one crate with explicit supported imports and
+re-exports. The alpha compiler rejects internal import cycles (`CRAB204`) and
+`import *` (`CRAB205`) rather than copying partially initialized bindings or
+approximating Python's `__all__` and private-name rules.
 
 ## Async and parallel distinction
 

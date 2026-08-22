@@ -15,7 +15,7 @@ def test_completed_rust_book_chapters_run_as_one_native_package() -> None:
     environment["PYTHONIOENCODING"] = "utf-8"
 
     result = subprocess.run(
-        [sys.executable, "-u", "-m", "th_rust_book.run_all"],
+        [sys.executable, "-u", "-m", "the_rust_book.run_all"],
         cwd=root / "examples",
         env=environment,
         capture_output=True,

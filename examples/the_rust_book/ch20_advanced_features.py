@@ -45,9 +45,10 @@ def unsafe_split_total() -> rust.u64:
 # Rust Book sources (calling external code; Listings 20-8 and 20-9):
 # https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html#using-extern-functions-to-call-external-code
 #
-# The generated crate declares C's `abs` in an `unsafe extern "C"` block. The call
-# is wrapped in `unsafe` because Crabwalk cannot prove the contract of foreign code;
-# panic containment is separate and cannot make foreign undefined behavior safe.
+# The generated crate declares C's `abs` in an `unsafe extern "C"` block. It
+# rejects i32::MIN before entering C because that value's positive magnitude is
+# not representable and C defines the call as undefined behavior. Other values
+# cross the focused unsafe FFI boundary normally.
 @rust.fn
 def ffi_absolute(value: rust.i32) -> rust.i32:
     return rust.c_abs(value)
@@ -56,9 +57,10 @@ def ffi_absolute(value: rust.i32) -> rust.i32:
 # Rust Book sources (immutable and mutable statics; Listings 20-10 and 20-11):
 # https://doc.rust-lang.org/book/ch20-01-unsafe-rust.html#accessing-or-modifying-a-mutable-static-variable
 #
-# This teaching intrinsic emits a real `static mut` plus an unsafe access. It is
-# intentionally not used concurrently: `static mut` has data-race hazards, and a
-# production shared counter should use the Arc<Mutex<T>> example from Chapter 16.
+# A literal `static mut` would make Crabwalk's safe Python API capable of causing a
+# Rust data race. The reviewed teaching spelling therefore emits AtomicU64 with a
+# checked Relaxed update: it still demonstrates global state while keeping every
+# safe caller sound. Arc<Mutex<T>> remains the richer Chapter 16 shared-state model.
 @rust.fn
 def unsafe_static_counter(amount: rust.u64) -> rust.u64:
     return rust.unsafe_static_increment(amount)

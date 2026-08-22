@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-21
+updated: 2026-08-22
 tags:
   - project/crabwalk
   - docs/getting-started
@@ -87,7 +87,8 @@ my_package/
 ```
 
 Namespace packages are not currently compilation units. Pass a file or regular
-package directory to the CLI.
+package directory to the CLI. Internal import cycles and `import *` are rejected
+in the alpha compiler; use an acyclic graph and explicit imported names.
 
 For explicit, bounded project discovery:
 
@@ -95,6 +96,9 @@ For explicit, bounded project discovery:
 [tool.crabwalk]
 packages = ["src/my_package"]
 python-boundaries = "warn"
+extra-files = ["native/schema.proto"]
+extra-env = ["MY_NATIVE_MODE"]
+wheel-include = ["templates/**/*.html"]
 ```
 
 Valid boundary policies are `allow`, `warn`, and `deny`. Unknown configuration
@@ -109,8 +113,8 @@ source file explicitly, optionally with `--project`.
 .crabwalk/
   generated/       deterministic Cargo/Rust/IR/source-map inputs
   target/          shared Cargo target output
-  cache/artifacts/ hash-verified loadable extensions
-  locks/           interprocess build locks
+  cache/artifacts/ hash-verified loadable extensions and access markers
+  locks/           interprocess build, load, and prune locks
 
 crabwalk-locks/
   ...Cargo.lock    stable application dependency resolution
@@ -118,6 +122,11 @@ crabwalk-locks/
 
 `.crabwalk/` is disposable. `crabwalk-locks/` is not disposable when a project
 depends on crates and expects locked/offline reproducibility.
+
+Normal builds may update and atomically persist Cargo's lock resolution. Use
+`--locked` when any lock modification must fail. Declare build-script inputs that
+Crabwalk cannot infer with `extra-files` and `extra-env`; wheel package data beyond
+Python/type files requires `wheel-include`.
 
 Continue with [[Crabwalk Language Reference]], [[Crabwalk Ownership and Domain Types]],
 and [[Crabwalk Tooling Packaging and Cache]].

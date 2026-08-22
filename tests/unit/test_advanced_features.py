@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from crabwalk.compiler.codegen import generate_project
+from crabwalk.compiler.codegen import function_releases_gil, generate_project
+from crabwalk.compiler.ir import Effect
 from crabwalk.compiler.frontend import analyze_path
 
 
@@ -126,7 +127,8 @@ def test_advanced_features_lower_to_auditable_rust(tmp_path: Path) -> None:
     source = tmp_path / "advanced.py"
     source.write_text(ADVANCED_SOURCE, encoding="utf-8")
 
-    generated = generate_project(analyze_path(source), "_crabwalk_advanced")
+    ir = analyze_path(source)
+    generated = generate_project(ir, "_crabwalk_advanced")
     rust_source = generated.rust_source
 
     assert "impl std::ops::Add<Point> for Point" in rust_source
@@ -137,9 +139,24 @@ def test_advanced_features_lower_to_auditable_rust(tmp_path: Path) -> None:
     assert "&raw mut value" in rust_source
     assert "std::slice::from_raw_parts_mut" in rust_source
     assert 'unsafe extern "C" { fn abs(input: i32) -> i32; }' in rust_source
-    assert "static mut __CW_COUNTER: u64" in rust_source
+    assert "if __cw_value == i32::MIN" in rust_source
+    assert "C abs is undefined for i32::MIN" in rust_source
+    assert "static __CW_COUNTER: std::sync::atomic::AtomicU64" in rust_source
+    assert "fetch_update" in rust_source
+    assert "Ordering::Relaxed" in rust_source
+    assert "static mut __CW_COUNTER" not in rust_source
     assert "type __CwAlias = u64" in rust_source
     assert "let __cw_operation: fn(u64) -> u64" in rust_source
     assert "Box<dyn Fn(u64) -> u64>" in rust_source
     assert "Vec<Box<dyn Fn(u64) -> u64>>" in rust_source
     assert "continue;" in rust_source
+    assert 'panic = "unwind"' in generated.cargo_toml
+
+    unsafe_demo = next(value for value in ir.functions if value.name == "unsafe_demo")
+    c_absolute = next(value for value in ir.functions if value.name == "c_absolute")
+    assert Effect.GLOBAL_MUTATION in unsafe_demo.effects
+    assert Effect.UNSAFE_MEMORY in unsafe_demo.effects
+    assert Effect.UNSAFE_FFI in c_absolute.effects
+    assert Effect.MAY_PANIC in c_absolute.effects
+    assert function_releases_gil(unsafe_demo) is False
+    assert function_releases_gil(c_absolute) is False

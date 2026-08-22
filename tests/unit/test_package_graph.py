@@ -1,8 +1,11 @@
 from pathlib import Path
 
+import pytest
+
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_project_path
 from crabwalk.compiler.ir import BinaryIR, CallIR, ReturnIR
+from crabwalk.diagnostics import CrabwalkCompilationError
 
 
 def _write_package(root: Path) -> tuple[Path, Path, Path]:
@@ -101,3 +104,64 @@ def test_package_graph_resolves_imports_reexports_and_module_calls(
     assert "fn __cw_native_cw_demo_pkg__math__double" in generated.rust_source
     assert "__cw_native_cw_demo_pkg__math__double(value)" in generated.rust_source
     assert 'regex = { version = "1" }' in generated.cargo_toml
+
+
+def test_package_graph_rejects_cycles_with_a_source_spanned_diagnostic(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "cycle_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("from .a import first\n", encoding="utf-8")
+    (package / "a.py").write_text(
+        """\
+from crabwalk import rust
+from .b import second
+
+@rust.fn
+def first(value: rust.u64) -> rust.u64:
+    return second(value)
+""",
+        encoding="utf-8",
+    )
+    (package / "b.py").write_text(
+        """\
+from crabwalk import rust
+from .a import first
+
+@rust.fn
+def second(value: rust.u64) -> rust.u64:
+    return first(value)
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_project_path(package)
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB204"
+    assert "cycle_pkg.a -> cycle_pkg.b -> cycle_pkg.a" in diagnostic.message
+    assert diagnostic.span is not None
+
+
+def test_package_graph_rejects_star_imports_instead_of_approximating_python(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "star_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("from .values import *\n", encoding="utf-8")
+    (package / "values.py").write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def value() -> rust.u64:
+    return 1
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_project_path(package)
+
+    assert captured.value.diagnostics[0].code == "CRAB205"

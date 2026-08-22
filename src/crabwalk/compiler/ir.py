@@ -3,9 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from typing import Literal, TypeAlias
 
 from crabwalk.diagnostics import SourceSpan
+
+
+class Effect(StrEnum):
+    """Semantic effects that constrain native execution and ABI policy."""
+
+    NATIVE_RUST = "NativeRust"
+    CONVERSION_BOUNDARY = "ConversionBoundary"
+    PYTHON_RUNTIME = "PythonRuntime"
+    BLOCKING = "Blocking"
+    THREAD_SPAWN = "ThreadSpawn"
+    GLOBAL_MUTATION = "GlobalMutation"
+    UNSAFE_MEMORY = "UnsafeMemory"
+    UNSAFE_FFI = "UnsafeFfi"
+    MAY_PANIC = "MayPanic"
 
 
 @dataclass(frozen=True, slots=True)
@@ -707,7 +722,7 @@ class FunctionIR:
     body: tuple[StatementIR, ...]
     span: SourceSpan
     python_boundary: bool = False
-    effects: tuple[str, ...] = ("NativeRust",)
+    effects: tuple[Effect, ...] = (Effect.NATIVE_RUST,)
     module_name: str = ""
     symbol: str = ""
     type_parameters: tuple[TypeParameterIR, ...] = ()

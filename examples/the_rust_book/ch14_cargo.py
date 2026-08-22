@@ -7,7 +7,7 @@ from crabwalk import rust
 # https://doc.rust-lang.org/book/ch14-01-release-profiles.html
 # https://doc.rust-lang.org/book/ch14-03-cargo-workspaces.html
 #
-# All modules in `th_rust_book` are compiled into one Cargo package, which mirrors
+# All modules in `the_rust_book` are compiled into one Cargo package, which mirrors
 # the Book's workspace goal of coordinating related code while avoiding duplicate
 # builds. Crabwalk always generates an inspectable release profile with overflow
 # checks enabled; `crabwalk expand` exposes its Cargo.toml and `crabwalk check`

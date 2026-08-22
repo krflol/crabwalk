@@ -7,13 +7,18 @@ project: Crabwalk
 status: verification
 phase: Alpha implementation and compatibility verification
 created: 2026-08-21
-updated: 2026-08-21
+updated: 2026-08-22
 tags:
   - project/crabwalk
   - status/verification
 ---
 
 # Crabwalk Project Hub
+
+> [!warning] Invariant-hardening feature freeze
+> The immediate target is [[Planning/Crabwalk Invariant Hardening]]. New language
+> work is paused until the reviewed safety, identity, cache, lifecycle, and wheel
+> invariants have interaction evidence and the release matrix is green.
 
 > [!abstract] Intended outcome
 > Ship a compiler/runtime toolchain that turns explicitly annotated, valid Python into real Rust, exposes ordinary Python-callable native objects, and makes every unsupported construct, conversion, ownership transition, and Python runtime crossing visible.
@@ -22,6 +27,8 @@ tags:
 > Stabilize the implemented M1–M6 surface and narrow M7 concurrency slice, run the advertised cross-platform/CPython matrix, and promote only behavior backed by clean source, cache, native ABI, crate, ownership, domain, Rayon, and wheel evidence.
 
 ## Project sources of truth
+
+- [[Planning/Crabwalk Invariant Hardening|Invariant hardening]] — review-to-fix register, compiler invariants, and feature-freeze exit gate.
 
 - [[crabwalk|Product vision and guiding architecture]] — durable goals and design principles.
 - [[Planning/Crabwalk Product Contract|Product contract]] — the original release boundary and semantics.
@@ -37,16 +44,16 @@ tags:
 
 ## Implementation snapshot
 
-As of 2026-08-21, the repository contains a working vertical compiler/runtime:
+As of 2026-08-22, the repository contains a working vertical compiler/runtime in an invariant-hardening feature freeze:
 
-- static, package-wide Python AST analysis and source-spanned schema-v16 IR;
-- first-class NativeRust, ConversionBoundary, and PythonRuntimeBoundary effects;
+- static, package-wide Python AST analysis and source-spanned schema-v17 IR;
+- typed native, conversion, Python runtime, blocking, threading, mutation, unsafe, and panic effects;
 - deterministic Rust/PyO3/Cargo generation and Python-mapped rustc diagnostics;
 - native recursion, primitives, locals, control flow, String/Str, Vec, Option, and Result;
 - runnable native adaptations of all 21 Rust Book chapters, including patterns, advanced features, and the bounded web-server project;
 - package imports/re-exports plus crates.io, path, and Git Cargo dependencies and locks;
-- checked ABI conversions, typed Result/panic errors, and eligible GIL release;
-- verified concurrent artifact cache, corruption recovery, inspection, and bounded pruning;
+- checked ABI conversions, typed Result/panic errors, effect-driven GIL release, synchronized teaching state, guarded C FFI, and non-panicking ThreadPool destruction;
+- verified concurrent artifact cache, complete-fingerprint loaded identity, corruption recovery, inspection, access-aware bounded pruning, and conventional Cargo lock maintenance;
 - Owned/Ref/Mut values with Python-visible move and call-scoped borrow enforcement;
 - structs, unit/tuple/record enums, match exhaustiveness, narrow derives, and Serde evidence;
 - Rayon-native iteration and a restricted, explicit Python executor async boundary;
@@ -83,6 +90,9 @@ cache races/corruption, and a toolchain-free wheel consumer. See
 | M7 | Rayon, native async teaching executor, threads/channels, loopback TCP, and finite ThreadPool | Tokio/reactor I/O, cancellation, and wrapper transfer remain research |
 
 ## Current execution queue
+
+The detailed, status-bearing queue is maintained in
+[[Planning/Crabwalk Invariant Hardening]]. Release work below follows its exit gate.
 
 1. Run Windows/Linux/macOS × CPython 3.11/3.14 native CI and intermediate-version unit lanes.
 2. Record repeated cold/warm/cache/call/conversion benchmarks and set evidence-based budgets.

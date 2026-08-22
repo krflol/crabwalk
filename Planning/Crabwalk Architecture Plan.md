@@ -154,12 +154,18 @@ All identifiers are stable within one build fingerprint and serializable for sna
       Rust dependencies
       Python dependencies used at boundaries
 
-Every expression and statement carries a SourceSpan and an effect classification:
+Every accepted operation carries a source span. Each function carries a typed,
+transitively propagated effect set derived from its expressions and statements:
 
 - NativeRust
 - ConversionBoundary with cost/allocation metadata
-- PythonRuntimeBoundary with target metadata
-- Unsupported with reason and suggested alternative
+- PythonRuntime with target metadata
+- Blocking and ThreadSpawn
+- GlobalMutation, UnsafeMemory, and UnsafeFfi
+- MayPanic
+
+Unsupported source is a source-spanned diagnostic, not an effect that may reach
+code generation.
 
 ### Structured IR first
 
@@ -599,7 +605,8 @@ The architecture is healthy only if automated tests continuously prove:
 2. Unsupported syntax cannot reach code generation.
 3. Every user-derived generated range maps to a valid Python SourceSpan.
 4. Byte-identical inputs produce byte-identical generated output and fingerprints.
-5. A valid cache hit launches no Cargo process.
+5. A valid cache hit without user crates launches no Cargo process; a user-crate
+   hit lets Cargo validate inputs without needlessly relinking or republishing.
 6. Two changed fingerprints can load and execute in one Python process.
 7. Native-to-native calls do not acquire Python runtime access.
 8. A Python-boundary call is present in IR, generated helpers, and inspect output.
@@ -615,4 +622,3 @@ The architecture is healthy only if automated tests continuously prove:
 - [PyO3 build and distribution](https://pyo3.rs/main/building-and-distribution) — native-extension build requirements and ABI options.
 - [Maturin mixed-project layout](https://www.maturin.rs/project_layout.html) — mixed Python/Rust packaging and internal extension submodule layout.
 - [Python Packaging User Guide](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/) — standardized project/build-system configuration.
-

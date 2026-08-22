@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-21
+updated: 2026-08-22
 tags:
   - project/crabwalk
   - docs/ownership
@@ -41,6 +41,20 @@ wrapper for that concrete `T` is loaded. `rust.Vec(sequence)` infers homogeneous
 `bool`, `i64`, `f64`, or `String`; an empty vector requires an explicit type.
 Conversion errors name the failing element index and enforce exact primitive
 types/ranges before native construction.
+
+Owned wrapper identity belongs to a compiled module/fingerprint, not merely a Rust
+type spelling. When exactly one compatible wrapper is loaded, inferred construction
+may use it. If multiple compilations expose the same type, construction raises a
+clear ambiguity error instead of choosing the most recently imported module. Bind
+the conversion explicitly to a compiled function from the consumer module:
+
+```python
+values = rust.from_python(
+    [1, 2, 3],
+    rust.Vec[rust.u64],
+    for_=module_a.consume,
+)
+```
 
 ## Ownership state
 
@@ -116,9 +130,10 @@ Enums support unit, record, and tuple payload variants. Python constructors are
 `Status.Pending()`, `Status.Running(progress=7)`, and `Status.Failed("message")`.
 `to_python()` produces a dictionary with `variant` and payload fields.
 
-Match guards and nested/destructuring patterns are deferred. Payload patterns
-accept captures or `_`. rustc remains the exhaustiveness authority; a missing
-variant is a `CRAB301` error mapped to the original Python `match` span.
+Payload patterns accept captures, `_`, nested domain patterns, tuple/rest forms,
+or-patterns, ranges, at-bindings, and typed guards. rustc remains the exhaustiveness
+authority; a missing variant is a `CRAB301` error mapped to the original Python
+`match` span.
 
 ## Derives
 

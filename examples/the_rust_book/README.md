@@ -6,19 +6,19 @@ The source baseline is rust-lang/book commit `917544888a55e4da7109bdba8c88c893c0
 
 ## Run it
 
-Run the package from the repository's `examples` directory so `th_rust_book` is
+Run the package from the repository's `examples` directory so `the_rust_book` is
 the package root and unrelated sibling examples are not folded into its crate:
 
 ```text
 cd examples
-python -m th_rust_book.run_all
+python -m the_rust_book.run_all
 cd ..
 ```
 
 Run the test commands below from the repository root:
 
 ```text
-python -m pytest examples/th_rust_book/test_ch11_automated_tests.py -q
+python -m pytest examples/the_rust_book/test_ch11_automated_tests.py -q
 python -m pytest tests/integration/test_native_rust_book.py -q
 ```
 
@@ -27,11 +27,11 @@ The first cold import can invoke Cargo. Crabwalk reports analysis, cache, build,
 To inspect rather than execute:
 
 ```text
-crabwalk expand examples/th_rust_book/__init__.py
-crabwalk check examples/th_rust_book/__init__.py --locked
+crabwalk expand examples/the_rust_book/__init__.py
+crabwalk check examples/the_rust_book/__init__.py --locked
 ```
 
-The committed dependency resolution is [the package Cargo.lock](../../crabwalk-locks/examples/th_rust_book/__init__.Cargo.lock).
+The committed dependency resolution is [the package Cargo.lock](../../crabwalk-locks/examples/the_rust_book/__init__.Cargo.lock).
 
 ## Reading order
 

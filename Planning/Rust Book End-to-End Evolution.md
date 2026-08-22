@@ -19,7 +19,7 @@ tags:
 > [!abstract] Outcome
 > Maintain a runnable Crabwalk adaptation of all 21 chapters of *The Rust Programming Language*. Each chapter must link to its official source, explain the Python-to-Rust spelling, compile into the same native package, and drive missing Crabwalk features through IR, code generation, runtime, tests, documentation, and cache-version changes.
 
-This plan is the execution companion to [[Crabwalk Roadmap]]. The runnable suite and its chapter-level evidence live in [examples/th_rust_book](../examples/th_rust_book/README.md); the exact coverage posture is in [COVERAGE.md](../examples/th_rust_book/COVERAGE.md).
+This plan is the execution companion to [[Crabwalk Roadmap]]. The runnable suite and its chapter-level evidence live in [examples/the_rust_book](../examples/the_rust_book/README.md); the exact coverage posture is in [COVERAGE.md](../examples/the_rust_book/COVERAGE.md).
 
 ## Source baseline
 
@@ -132,14 +132,14 @@ The loop is intentionally vertical. A helper name without IR, a code generator b
 
 | Layer | Evidence | Required command |
 |---|---|---|
-| Python syntax | Every module compiles as Python | `python -m compileall -q examples/th_rust_book` |
+| Python syntax | Every module compiles as Python | `python -m compileall -q examples/the_rust_book` |
 | Frontend/codegen | Focused unit suite | `python -m pytest tests/unit -q` |
 | Native vertical slices | Integration suite | `python -m pytest tests/integration -q` |
-| Book package | All chapters in one extension | from `examples`: `python -m th_rust_book.run_all` |
-| Chapter 11 teaching tests | pytest behavior and panic mapping | `python -m pytest examples/th_rust_book/test_ch11_automated_tests.py -q` |
-| Generated output | Human inspection | `crabwalk expand examples/th_rust_book/__init__.py` |
+| Book package | All chapters in one extension | from `examples`: `python -m the_rust_book.run_all` |
+| Chapter 11 teaching tests | pytest behavior and panic mapping | `python -m pytest examples/the_rust_book/test_ch11_automated_tests.py -q` |
+| Generated output | Human inspection | `crabwalk expand examples/the_rust_book/__init__.py` |
 | Cache/progress | Cold build and cache-hit runs | run once with `CRABWALK_PROGRESS=always`, then rerun unchanged |
-| Reproducible dependencies | Locked package build | `crabwalk check examples/th_rust_book/__init__.py --locked` |
+| Reproducible dependencies | Locked package build | `crabwalk check examples/the_rust_book/__init__.py --locked` |
 
 ### Local verification snapshot
 
@@ -150,7 +150,8 @@ On Windows x86-64 with CPython 3.11.8 and rustc/Cargo 1.97.0 on
 - `python -m pytest tests/unit -q`: **45 passed in 1.57 seconds** after final formatting.
 - Chapter 11 teaching suite: **5 passed in 9.42 seconds**.
 - The Chapters 1–21 native runner printed its all-assertions-passed marker.
-- Locked `crabwalk check` completed for `th_rust_book` with fingerprint `bc77da16a1b9dcf6`.
+- Locked `crabwalk check` completed after the package rename and invariant
+  hardening with fingerprint `b1617c677e76ec95` on 2026-08-22.
 - `ruff format --check` accepted all 99 Python files, `ruff check` passed, and
   `python -m compileall -q src tests examples` passed.
 - Expanded Rust was inspected for the generated `Add` implementations, UFCS
@@ -194,7 +195,7 @@ For every new Book revision or Crabwalk capability:
 4. Update IR and codegen schemas if cached semantics change.
 5. Add positive and misuse tests before adding the runner assertion.
 6. Run the focused native test and then the all-chapter package.
-7. Update [COVERAGE.md](../examples/th_rust_book/COVERAGE.md), the language reference, limitations, and changelog.
+7. Update [COVERAGE.md](../examples/the_rust_book/COVERAGE.md), the language reference, limitations, and changelog.
 8. Promote the capability only after the full verification gate is green.
 
 ## Final acceptance

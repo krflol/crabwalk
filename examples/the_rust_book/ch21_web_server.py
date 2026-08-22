@@ -66,9 +66,9 @@ def http_round_trip(path: rust.Str) -> rust.String:
     client.shutdown_write()
     response: rust.String = client.read_to_string()
 
-    # Closing the sender makes recv() return Err in every idle Worker. Drop then
-    # joins all four JoinHandles before the function can return the response.
-    rust.drop(pool)
+    # finish() closes the sender, joins every worker, and reports a captured job
+    # panic explicitly. Drop repeats only a non-panicking no-op cleanup path.
+    pool.finish().expect("HTTP worker failed")
     return response
 
 
@@ -91,7 +91,7 @@ def thread_pool_job_total() -> rust.u64:
     pool.execute(lambda: first.add_locked(1))
     pool.execute(lambda: second.add_locked(1))
     pool.execute(lambda: third.add_locked(1))
-    rust.drop(pool)
+    pool.finish().expect("thread pool worker failed")
     return counter.get_locked()
 
 
@@ -103,7 +103,7 @@ def thread_pool_job_total() -> rust.u64:
 @rust.fn
 def validated_pool_size(size: rust.usize) -> rust.usize:
     pool: rust.ThreadPool = rust.ThreadPool(size)
-    rust.drop(pool)
+    pool.finish().expect("thread pool worker failed")
     return size
 
 
@@ -112,8 +112,10 @@ def validated_pool_size(size: rust.usize) -> rust.usize:
 # https://doc.rust-lang.org/book/ch21-03-graceful-shutdown-and-cleanup.html#implementing-the-drop-trait-on-threadpool
 # https://doc.rust-lang.org/book/ch21-03-graceful-shutdown-and-cleanup.html#signaling-to-the-threads-to-stop-listening-for-jobs
 #
-# The generated Drop implementation takes and drops Option<Sender<Job>>, drains
-# the workers, and joins each thread. Channel FIFO ordering means queued jobs run
-# before disconnection; thread_pool_job_total reads the counter only after Drop.
+# The generated finish implementation takes and drops Option<Sender<Job>>, drains
+# the workers, joins each thread, and returns the first caught worker failure.
+# Drop uses the same shutdown path but never propagates a panic. Channel FIFO
+# ordering means queued jobs run before disconnection; thread_pool_job_total reads
+# the counter only after finish.
 # The end-to-end runner sends successful, missing, and delayed requests, providing
 # the bounded cleanup proof without an externally managed background process.

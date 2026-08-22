@@ -24,6 +24,7 @@ from .ir import (
     ContinueIR,
     CrateCallIR,
     DestructureIR,
+    Effect,
     EnumConstructorIR,
     EnumIR,
     ExpressionIR,
@@ -66,7 +67,7 @@ from .ir import (
 )
 
 PYO3_VERSION = "0.29.2"
-CODEGEN_SCHEMA_VERSION = 25
+CODEGEN_SCHEMA_VERSION = 26
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +119,9 @@ class _Writer:
 
 
 def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
+    from .validation import validate_package_ir
+
+    validate_package_ir(ir)
     writer = _Writer()
     domain_symbols = {value.symbol for value in (*ir.structs, *ir.enums)}
     boundary_names = {
@@ -216,6 +220,7 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
         f"{dependencies}\n"
         "[profile.release]\n"
         "overflow-checks = true\n"
+        'panic = "unwind"\n'
     )
     source_map = {
         "schema_version": 1,
@@ -806,17 +811,10 @@ def _write_export_wrapper(
 
 def _write_panic_boundary(writer: _Writer) -> None:
     writer.line(
-        "fn __cw_catch_panic<T, F: FnOnce() -> T>(operation: F) -> PyResult<T> {"
+        "fn __cw_panic_message(payload: Box<dyn std::any::Any + Send>) -> String {"
     )
     writer.enter()
-    writer.line(
-        "match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {"
-    )
-    writer.enter()
-    writer.line("Ok(value) => Ok(value),")
-    writer.line("Err(payload) => {")
-    writer.enter()
-    writer.line("let message = if let Some(value) = payload.downcast_ref::<&str>() {")
+    writer.line("if let Some(value) = payload.downcast_ref::<&str>() {")
     writer.enter()
     writer.line("(*value).to_owned()")
     writer.leave()
@@ -828,7 +826,22 @@ def _write_panic_boundary(writer: _Writer) -> None:
     writer.enter()
     writer.line('String::from("Rust panic without a string payload")')
     writer.leave()
-    writer.line("};")
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+    writer.line()
+    writer.line(
+        "fn __cw_catch_panic<T, F: FnOnce() -> T>(operation: F) -> PyResult<T> {"
+    )
+    writer.enter()
+    writer.line(
+        "match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {"
+    )
+    writer.enter()
+    writer.line("Ok(value) => Ok(value),")
+    writer.line("Err(payload) => {")
+    writer.enter()
+    writer.line("let message = __cw_panic_message(payload);")
     writer.line(
         'Err(pyo3::exceptions::PyRuntimeError::new_err(format!("CrabwalkPanicError: {}", message)))'
     )
@@ -842,11 +855,26 @@ def _write_panic_boundary(writer: _Writer) -> None:
 
 def _write_thread_pool(writer: _Writer) -> None:
     writer.line("type __CwJob = Box<dyn FnOnce() + Send + 'static>;")
+    writer.line(
+        "type __CwWorkerFailure = std::sync::Arc<std::sync::Mutex<Option<String>>>;"
+    )
+    writer.line()
+    writer.line(
+        "fn __cw_record_worker_failure(failure: &__CwWorkerFailure, message: String) {"
+    )
+    writer.enter()
+    writer.line(
+        "let mut slot = failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner());"
+    )
+    writer.line("if slot.is_none() { *slot = Some(message); }")
+    writer.leave()
+    writer.line("}")
     writer.line()
     writer.line("struct __CwThreadPool {")
     writer.enter()
     writer.line("workers: Vec<__CwWorker>,")
     writer.line("sender: Option<std::sync::mpsc::Sender<__CwJob>>,")
+    writer.line("failure: __CwWorkerFailure,")
     writer.leave()
     writer.line("}")
     writer.line()
@@ -857,13 +885,17 @@ def _write_thread_pool(writer: _Writer) -> None:
     writer.line('assert!(size > 0, "thread pool size must be positive");')
     writer.line("let (sender, receiver) = std::sync::mpsc::channel();")
     writer.line("let receiver = std::sync::Arc::new(std::sync::Mutex::new(receiver));")
+    writer.line("let failure = std::sync::Arc::new(std::sync::Mutex::new(None));")
     writer.line("let mut workers = Vec::with_capacity(size);")
     writer.line("for id in 0..size {")
     writer.enter()
-    writer.line("workers.push(__CwWorker::new(id, std::sync::Arc::clone(&receiver)));")
+    writer.line(
+        "workers.push(__CwWorker::new(id, std::sync::Arc::clone(&receiver), "
+        "std::sync::Arc::clone(&failure)));"
+    )
     writer.leave()
     writer.line("}")
-    writer.line("Self { workers, sender: Some(sender) }")
+    writer.line("Self { workers, sender: Some(sender), failure }")
     writer.leave()
     writer.line("}")
     writer.line()
@@ -878,6 +910,39 @@ def _write_thread_pool(writer: _Writer) -> None:
     writer.line("self.sender.as_ref().unwrap().send(job).unwrap();")
     writer.leave()
     writer.line("}")
+    writer.line()
+    writer.line("fn finish(mut self) -> Result<(), String> {")
+    writer.enter()
+    writer.line("self.shutdown();")
+    writer.line("let failure = {")
+    writer.enter()
+    writer.line(
+        "let mut slot = self.failure.lock()"
+        ".unwrap_or_else(|poisoned| poisoned.into_inner());"
+    )
+    writer.line("slot.take()")
+    writer.leave()
+    writer.line("};")
+    writer.line("match failure { Some(message) => Err(message), None => Ok(()) }")
+    writer.leave()
+    writer.line("}")
+    writer.line()
+    writer.line("fn shutdown(&mut self) {")
+    writer.enter()
+    writer.line("drop(self.sender.take());")
+    writer.line("for worker in self.workers.drain(..) {")
+    writer.enter()
+    writer.line("if let Err(payload) = worker.thread.join() {")
+    writer.enter()
+    writer.line(
+        "__cw_record_worker_failure(&self.failure, __cw_panic_message(payload));"
+    )
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
     writer.leave()
     writer.line("}")
     writer.line()
@@ -885,12 +950,7 @@ def _write_thread_pool(writer: _Writer) -> None:
     writer.enter()
     writer.line("fn drop(&mut self) {")
     writer.enter()
-    writer.line("drop(self.sender.take());")
-    writer.line("for worker in self.workers.drain(..) {")
-    writer.enter()
-    writer.line("worker.thread.join().unwrap();")
-    writer.leave()
-    writer.line("}")
+    writer.line("self.shutdown();")
     writer.leave()
     writer.line("}")
     writer.leave()
@@ -907,16 +967,32 @@ def _write_thread_pool(writer: _Writer) -> None:
     writer.enter()
     writer.line(
         "fn new(id: usize, receiver: "
-        "std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<__CwJob>>>) "
+        "std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<__CwJob>>>, "
+        "failure: __CwWorkerFailure) "
         "-> Self {"
     )
     writer.enter()
     writer.line("let thread = std::thread::spawn(move || loop {")
     writer.enter()
-    writer.line("let message = receiver.lock().unwrap().recv();")
+    writer.line("let message = receiver.lock()")
+    writer.enter()
+    writer.line(".unwrap_or_else(|poisoned| poisoned.into_inner())")
+    writer.line(".recv();")
+    writer.leave()
     writer.line("match message {")
     writer.enter()
-    writer.line("Ok(job) => job(),")
+    writer.line("Ok(job) => {")
+    writer.enter()
+    writer.line(
+        "if let Err(payload) = std::panic::catch_unwind("
+        "std::panic::AssertUnwindSafe(job)) {"
+    )
+    writer.enter()
+    writer.line("__cw_record_worker_failure(&failure, __cw_panic_message(payload));")
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
     writer.line("Err(_) => break,")
     writer.leave()
     writer.line("}")
@@ -1122,7 +1198,13 @@ def _write_block_on_executor(writer: _Writer) -> None:
 def function_releases_gil(function: FunctionIR) -> bool:
     """Whether an exported wrapper can detach from Python for the native call."""
 
-    if function.python_boundary:
+    effects = set(function.effects)
+    if effects & {
+        Effect.PYTHON_RUNTIME,
+        Effect.GLOBAL_MUTATION,
+        Effect.UNSAFE_MEMORY,
+        Effect.UNSAFE_FFI,
+    }:
         return False
     if any(
         parameter.type_ref.ownership is not None for parameter in function.parameters
@@ -1528,12 +1610,25 @@ def _render_expression(
             )
         if expression.constructor == "CAbs":
             value = _render_expression(expression.arguments[0], boundary_names)
-            return f"unsafe {{ abs({value}) }}"
+            return (
+                "{ let __cw_value: i32 = "
+                f"{value}; if __cw_value == i32::MIN {{ "
+                'panic!("C abs is undefined for i32::MIN"); } '
+                "unsafe { abs(__cw_value) } }"
+            )
         if expression.constructor == "UnsafeStaticIncrement":
             value = _render_expression(expression.arguments[0], boundary_names)
             return (
-                "{ static mut __CW_COUNTER: u64 = 0; unsafe { "
-                f"__CW_COUNTER += {value}; __CW_COUNTER }} }}"
+                "{ static __CW_COUNTER: std::sync::atomic::AtomicU64 = "
+                "std::sync::atomic::AtomicU64::new(0); "
+                f"let __cw_amount: u64 = {value}; "
+                "let __cw_previous = __CW_COUNTER.fetch_update("
+                "std::sync::atomic::Ordering::Relaxed, "
+                "std::sync::atomic::Ordering::Relaxed, "
+                "|current| current.checked_add(__cw_amount))"
+                '.expect("unsafe static counter overflow"); '
+                "__cw_previous.checked_add(__cw_amount)"
+                '.expect("unsafe static counter overflow") }'
             )
         if expression.constructor == "TypeAliasIdentity":
             value = _render_expression(expression.arguments[0], boundary_names)

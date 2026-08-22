@@ -27,9 +27,10 @@ The current alpha includes:
 - `Owned`, `Ref`, and `Mut` handles with move/use-after-move and call-scoped
   borrow enforcement;
 - Rust structs, unit/tuple/record enums, exhaustive `match`, and narrow derives;
-- general patterns and guards, inherent methods, trait objects, selected advanced/unsafe Rust, native async, and a finite native thread pool;
+- general patterns and guards, inherent methods, trait objects, selected
+  advanced/unsafe Rust, native async, and a finite native thread pool;
 - Python `print` versus native `rust.println`, panic containment, typed `Result`
-  errors, and GIL release for eligible native calls;
+  errors, typed effect-driven GIL policy, and non-panicking worker teardown;
 - native Rayon iterators and an explicit `rust.async_call` Python async boundary;
 - verified artifact caching, inspection commands, and wheels with embedded native
   extensions that need no Rust toolchain on the consumer machine.
@@ -65,6 +66,9 @@ Generated Rust and disposable build/cache state live under `.crabwalk/`.
 Resolved Cargo dependency locks live under `crabwalk-locks/` and should be
 committed for applications that declare crates.
 
+Normal builds may maintain a copied dependency lock and persist an intentional
+Cargo update. Pass `--locked` when the lock must remain byte-for-byte unchanged.
+
 When a `.py` file triggers an implicit first build, Crabwalk reports analysis,
 dependency, cache, Cargo, and extension-loading phases on stderr. Interactive
 terminals get an animated elapsed-time meter; redirected output gets plain log
@@ -77,6 +81,9 @@ For bounded project discovery, a project may declare one or more regular package
 [tool.crabwalk]
 packages = ["src/my_package"]
 python-boundaries = "allow" # allow, warn, or deny
+extra-files = ["native/schema.proto"]
+extra-env = ["MY_NATIVE_MODE"]
+wheel-include = ["templates/**/*.html"]
 ```
 
 When exactly one package is configured, the project directory itself can be passed
@@ -92,10 +99,10 @@ python examples/ownership/app.py
 python examples/crates_regex/app.py
 python examples/parallel/app.py
 # From the examples directory:
-python -m th_rust_book.run_all
+python -m the_rust_book.run_all
 ```
 
-The [Rust Book adaptation](examples/th_rust_book/README.md) covers Chapters 1–21 and doubles as an end-to-end compiler evolution suite.
+The [Rust Book adaptation](examples/the_rust_book/README.md) covers Chapters 1–21 and doubles as an end-to-end compiler evolution suite.
 
 ## Documentation
 
@@ -106,6 +113,7 @@ The [Rust Book adaptation](examples/th_rust_book/README.md) covers Chapters 1–
 - [Tooling, packaging, and cache](Docs/Crabwalk%20Tooling%20Packaging%20and%20Cache.md)
 - [Security and limitations](Docs/Crabwalk%20Security%20and%20Limitations.md)
 - [Compatibility and verification](Docs/Crabwalk%20Compatibility%20and%20Verification.md)
+- [Invariant-hardening plan](Planning/Crabwalk%20Invariant%20Hardening.md)
 - [Changelog and migration notes](CHANGELOG.md)
 
 The original long-form vision remains in [crabwalk.md](crabwalk.md). The

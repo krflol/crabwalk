@@ -4,7 +4,14 @@ import os
 import time
 from pathlib import Path
 
-from crabwalk.build.cache import prune_artifact_cache
+import crabwalk.build.cache as cache_module
+from crabwalk.build.cache import (
+    FileLock,
+    prune_artifact_cache,
+    retain_cache_load_lease,
+    touch_cache_access,
+    write_text,
+)
 
 
 def _entry(root: Path, character: str, size: int, age: float) -> Path:
@@ -46,3 +53,97 @@ def test_cache_pruning_is_bounded_scoped_and_supports_dry_run(tmp_path: Path) ->
     assert not middle.exists()
     assert newest.is_dir()
     assert unknown.is_dir()
+
+
+def test_pruning_skips_a_busy_fingerprint_and_uses_last_access(tmp_path: Path) -> None:
+    state = tmp_path / ".crabwalk"
+    busy = _entry(state, "d", 10, 500)
+    recently_used = _entry(state, "e", 10, 400)
+    touch_cache_access(recently_used)
+
+    with FileLock(state / "locks" / f"{'d' * 64}.lock"):
+        outcome = prune_artifact_cache(
+            state,
+            max_bytes=0,
+            max_age_seconds=None,
+        )
+
+    assert outcome.removed == (recently_used,)
+    assert busy.is_dir()
+    assert not recently_used.exists()
+
+    after_release = prune_artifact_cache(
+        state,
+        max_bytes=0,
+        max_age_seconds=None,
+    )
+    assert after_release.removed == (busy,)
+
+
+def test_pruning_revalidates_selection_after_taking_entry_lock(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    state = tmp_path / ".crabwalk"
+    candidate = _entry(state, "f", 10, 500)
+    original = cache_module._entry_size_and_mtime
+    calls = 0
+
+    def changed_after_selection(path: Path) -> tuple[int, float]:
+        nonlocal calls
+        calls += 1
+        size, last_used = original(path)
+        if path == candidate and calls > 1:
+            return size, last_used + 1.0
+        return size, last_used
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        cache_module,
+        "_entry_size_and_mtime",
+        changed_after_selection,
+    )
+
+    outcome = prune_artifact_cache(
+        state,
+        max_bytes=0,
+        max_age_seconds=None,
+    )
+
+    assert outcome.removed == ()
+    assert candidate.is_dir()
+
+
+def test_pruning_skips_a_process_load_lease(tmp_path: Path) -> None:
+    state = tmp_path / ".crabwalk"
+    fingerprint = "1" * 64
+    candidate = _entry(state, "1", 10, 500)
+    retain_cache_load_lease(state, fingerprint)
+    try:
+        leased = prune_artifact_cache(
+            state,
+            max_bytes=0,
+            max_age_seconds=None,
+        )
+        assert leased.removed == ()
+        assert candidate.is_dir()
+    finally:
+        cache_module._release_cache_load_lease(state, fingerprint)
+
+    released = prune_artifact_cache(
+        state,
+        max_bytes=0,
+        max_age_seconds=None,
+    )
+    assert released.removed == (candidate,)
+
+
+def test_atomic_text_write_preserves_unchanged_input_mtime(tmp_path: Path) -> None:
+    path = tmp_path / "generated.rs"
+    write_text(path, "fn main() {}\n")
+    old = time.time() - 100
+    os.utime(path, (old, old))
+    before = path.stat().st_mtime_ns
+
+    write_text(path, "fn main() {}\n")
+
+    assert path.stat().st_mtime_ns == before

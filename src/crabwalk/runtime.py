@@ -10,15 +10,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Callable
 
+from crabwalk._version import RUNTIME_ABI_VERSION, __version__
 from crabwalk.build.cache import read_json, sha256_file
 from crabwalk.build.loader import load_extension
 from crabwalk.compiler.codegen import function_releases_gil, owned_class_names
 from crabwalk.compiler.frontend import (
     analyze_project_path,
     project_source_anchor,
-    project_source_identity,
 )
-from crabwalk.config import configuration_hash
 from crabwalk.diagnostics import (
     CrabwalkCompilationError,
     CrabwalkBorrowError,
@@ -33,10 +32,8 @@ from crabwalk.service import CompilationResult, default_service
 
 _compile_lock = threading.RLock()
 _results: dict[tuple[str, str], CompilationResult] = {}
-_module_results: dict[tuple[str, str, str], CompilationResult] = {}
 _owned_registry_lock = threading.RLock()
 _owned_types_by_module: dict[tuple[str, str], type[Any]] = {}
-_latest_owned_types: dict[str, type[Any]] = {}
 _owned_type_fields: dict[str, tuple[str, ...]] = {}
 _owned_enum_variants: dict[str, dict[str, tuple[str, ...]]] = {}
 
@@ -177,10 +174,77 @@ class _RustOwnedValue:
             )
 
 
+def _resolve_owned_native_type(
+    rust_type: object,
+    type_key: str,
+    *,
+    for_context: object | None = None,
+) -> type[Any] | None:
+    """Resolve one wrapper without load-order-dependent ambient fallback."""
+
+    if for_context is not None and isinstance(for_context, RustFunction):
+        module = for_context._compilation.module
+        if module is None:
+            return None
+        type_ref = _runtime_type_ref(rust_type)
+        python_name, _ = owned_class_names(type_ref)
+        candidate = getattr(module, python_name, None)
+        if isinstance(candidate, type):
+            return candidate
+
+    context_module = (
+        getattr(for_context, "__module__", "")
+        if for_context is not None
+        else _calling_module_name()
+    )
+    if not isinstance(context_module, str):
+        context_module = ""
+    with _owned_registry_lock:
+        exact = _owned_types_by_module.get((context_module, type_key))
+        if exact is not None:
+            return exact
+        candidates = {
+            native_type
+            for (registered_module, registered_key), native_type in (
+                _owned_types_by_module.items()
+            )
+            if registered_key == type_key
+        }
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if len(candidates) > 1:
+        raise RuntimeError(
+            f"Multiple generated wrappers for {rust_type!r} are loaded. "
+            "Construct inside the target module or use "
+            "rust.from_python(value, type, for_=compiled_function)."
+        )
+    return None
+
+
+def _runtime_type_ref(rust_type: object) -> object:
+    """Translate a runtime marker only far enough to derive its owned class name."""
+
+    from crabwalk.compiler.ir import TypeRef
+    from crabwalk.rust import RustType
+
+    if not isinstance(rust_type, RustType):
+        raise TypeError("expected a Crabwalk Rust type")
+    return TypeRef(
+        rust_type.name,
+        tuple(_runtime_type_ref(value) for value in rust_type.arguments),
+        python_name=rust_type.python_name,
+        const_value=rust_type.const_value,
+        is_generic=rust_type.is_generic,
+        is_lifetime=rust_type.is_lifetime,
+    )
+
+
 def construct_rust_value(
     rust_type: object,
     values: tuple[object, ...],
     keywords: dict[str, object],
+    *,
+    for_context: object | None = None,
 ) -> object:
     """Construct an explicitly typed, generated Rust-owned value."""
 
@@ -189,11 +253,11 @@ def construct_rust_value(
     if not isinstance(rust_type, RustType):
         raise TypeError("expected a Crabwalk Rust type")
     type_key = rust_type.rust_key()
-    caller_module = _calling_module_name()
-    with _owned_registry_lock:
-        native_type = _owned_types_by_module.get((caller_module, type_key))
-        if native_type is None:
-            native_type = _latest_owned_types.get(type_key)
+    native_type = _resolve_owned_native_type(
+        rust_type,
+        type_key,
+        for_context=for_context,
+    )
     if native_type is None:
         raise RuntimeError(
             f"No generated wrapper for {rust_type!r} is loaded. Define an "
@@ -295,11 +359,7 @@ def construct_rust_variant(
     if not isinstance(rust_type, RustType) or variant not in rust_type.variants:
         raise TypeError("expected a generated Crabwalk enum variant")
     type_key = rust_type.rust_key()
-    caller_module = _calling_module_name()
-    with _owned_registry_lock:
-        native_type = _owned_types_by_module.get((caller_module, type_key))
-        if native_type is None:
-            native_type = _latest_owned_types.get(type_key)
+    native_type = _resolve_owned_native_type(rust_type, type_key)
     if native_type is None:
         raise RuntimeError(f"No generated wrapper for {rust_type!r} is loaded.")
     try:
@@ -690,33 +750,30 @@ def _compilation_for(path: Path, module_name: str) -> CompilationResult:
     """Resolve one loaded compilation for all decorators in a source package."""
 
     anchor = project_source_anchor(path)
-    source_hash = project_source_identity(path)
-    config_hash = configuration_hash(path) or ""
-    module_key = (str(anchor), config_hash, source_hash)
-    result = _module_results.get(module_key)
-    if result is None:
-        label = anchor.parent.name if anchor.name == "__init__.py" else anchor.stem
-        progress = ImplicitBuildProgress(label)
-        progress.start()
-        try:
-            result = _load_prebuilt_compilation(path, module_name)
-            if result is None:
-                result = default_service.compile_path(
-                    path,
-                    module_name=module_name,
-                    mode="build",
-                    load=True,
-                    progress=progress.update,
-                )
-        except BaseException:
-            progress.fail()
-            raise
-        else:
-            progress.finish(
-                cache_hit=result.cache_hit,
-                prebuilt=result.cache_status == "prebuilt",
+    label = anchor.parent.name if anchor.name == "__init__.py" else anchor.stem
+    progress = ImplicitBuildProgress(label)
+    progress.start()
+    try:
+        # Always enter the service so native dependency, toolchain, Cargo config,
+        # environment, and lock inputs participate in the complete fingerprint.
+        # A source-only memo here would bypass those stronger checks on reload.
+        result = _load_prebuilt_compilation(path, module_name)
+        if result is None:
+            result = default_service.compile_path(
+                path,
+                module_name=module_name,
+                mode="build",
+                load=True,
+                progress=progress.update,
             )
-        _module_results[module_key] = result
+    except BaseException:
+        progress.fail()
+        raise
+    else:
+        progress.finish(
+            cache_hit=result.cache_hit,
+            prebuilt=result.cache_status == "prebuilt",
+        )
     key = (str(anchor), result.fingerprint)
     cached = _results.setdefault(key, result)
     if cached.module is None:
@@ -748,12 +805,24 @@ def _load_prebuilt_compilation(
         "artifact": str,
         "artifact_sha256": str,
         "source_hash": str,
+        "crabwalk_version": str,
+        "runtime_abi_version": int,
     }
-    if manifest.get("schema_version") != 1 or any(
+    if manifest.get("schema_version") != 2 or any(
         not isinstance(manifest.get(name), expected_type)
         for name, expected_type in expected_fields.items()
     ):
         _invalid_prebuilt(ir, "The embedded manifest has an unsupported schema.")
+    if manifest["runtime_abi_version"] != RUNTIME_ABI_VERSION:
+        _invalid_prebuilt(
+            ir,
+            "The embedded native artifact uses a different Crabwalk runtime ABI.",
+        )
+    if manifest["crabwalk_version"] != __version__:
+        _invalid_prebuilt(
+            ir,
+            "The embedded native artifact was generated by a different Crabwalk version.",
+        )
     if manifest["source_hash"] != ir.source_hash:
         _invalid_prebuilt(
             ir,
@@ -859,7 +928,6 @@ def _register_owned_types(compilation: CompilationResult) -> None:
             native_type = getattr(module, python_name)
             type_key = type_ref.render()
             _owned_types_by_module[(module_name, type_key)] = native_type
-            _latest_owned_types[type_key] = native_type
     for struct in compilation.ir.structs:
         _owned_type_fields[struct.type_ref.render()] = tuple(
             field.name for field in struct.fields
@@ -881,13 +949,17 @@ def _register_owned_types(compilation: CompilationResult) -> None:
 def _calling_module_name() -> str:
     frame = inspect.currentframe()
     try:
-        user_frame = frame
-        for _ in range(3):
-            user_frame = user_frame.f_back if user_frame is not None else None
-        if user_frame is None:
-            return ""
-        value = user_frame.f_globals.get("__name__", "")
-        return value if isinstance(value, str) else ""
+        candidate = frame.f_back if frame is not None else None
+        while candidate is not None:
+            value = candidate.f_globals.get("__name__", "")
+            if (
+                isinstance(value, str)
+                and value
+                and not (value == "crabwalk" or value.startswith("crabwalk."))
+            ):
+                return value
+            candidate = candidate.f_back
+        return ""
     finally:
         del frame
 

@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-21
+updated: 2026-08-22
 tags:
   - project/crabwalk
   - docs/testing
@@ -42,7 +42,9 @@ tests/integration/
   move/borrow, reload, GC, thread, reentrancy, and rustc ownership failures
   structs/Serde and enums/exhaustiveness
   panic, conversion, Result error, and GIL behavior
-  corruption and simultaneous-process cache publication
+  unsafe FFI/global/thread-pool subprocess containment
+  corruption, simultaneous publication, prune/build/load stress, and mapped-DLL leases
+  complete-fingerprint ownership/load-order identity
   Rayon and Python async boundary
   clean Crabwalk + regex application wheel install without Rust/Cargo
 ```
@@ -92,27 +94,36 @@ The benchmark policy and promotion requirements are in
 
 ## Known local result
 
-On 2026-08-21, the current worktree was exercised on CPython 3.11.8 and Windows
+On 2026-08-22, the invariant-hardened worktree was exercised on CPython 3.11.8 and Windows
 x86-64 with rustc/Cargo 1.97.0:
 
-- the complete repository suite passed **74 tests in 510.42 seconds** on the
-  final formatted worktree;
-- the final post-format unit pass passed **45 tests in 1.57 seconds**;
-- the Rust Book Chapter 11 teaching suite passed **5 tests in 9.42 seconds**;
+- the complete repository suite passed **101 tests in 687.20 seconds** on the
+  formatted, linted, scoped-mypy-clean worktree;
+- the final focused unit pass passed **67 tests in 3.80 seconds**, and the five
+  Chapter 11 teaching tests passed in **2.11 seconds**;
 - the single native Rust Book package passed its Chapter 1–21 assertions;
-- locked package checking succeeded with fingerprint `bc77da16a1b9dcf6`;
-- `ruff format --check` accepted all 99 Python files, `ruff check` passed, and
+- locked checking of `examples/the_rust_book` passed with fingerprint
+  `b1617c677e76ec95`;
+- unsafe `i32::MIN`, atomic concurrency, worker/outer/double-panic, and ambient
+  `panic=abort` cases passed in isolated subprocesses;
+- cache evidence covered corruption, interrupted/simultaneous publication,
+  same-process path-asset invalidation, process-lifetime load leases, and a second
+  crate-backed process validating without replacing the mapped DLL;
+- the clean mixed wheel installed beside the Crabwalk runtime wheel and imported
+  with Rust/Cargo removed from `PATH`;
+- `ruff format --check` accepted all 105 Python files, Ruff lint, scoped mypy, and
   Python byte-compilation passed for `src`, `tests`, and `examples`;
+- rustfmt parsed/stabilized the generated Rust Book project and Clippy's
+  correctness lint group passed;
 - forced progress output reported analysis, fingerprinting, lock, cache, Cargo,
   load, and ready phases on stderr; and
 - expanded Rust was inspected for real operator impls, UFCS, bounded unsafe
   blocks, closure trait objects, TCP binding, and graceful thread-pool Drop.
 
-No mypy configuration or executable is present, so this record does not claim a
-mypy pass. Earlier local release-baseline evidence also covered the native linker
-probe, clean two-wheel consumer, and runtime distribution inventory. These remain
-local candidate results, not release artifacts; the GitHub OS/Python matrix has
-not yet run.
+The mypy gate intentionally covers 11 hardening/build-boundary modules; the large
+frontend, code generator, runtime binder, and CLI remain explicit typing debt.
+These are local candidate results, not release artifacts; the GitHub OS/Python
+matrix has not yet run.
 
 The deeper release checklist remains in
 [[Planning/Crabwalk Verification and Release]].

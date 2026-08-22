@@ -5,6 +5,41 @@ on:
   pull_request:
 
 jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: quality-generated-rust
+      - name: Install quality dependencies
+        run: python -m pip install -e ".[quality]"
+      - name: Check Python formatting and lint
+        run: |
+          python -m ruff format --check src tests examples
+          python -m ruff check src tests examples
+      - name: Check typed hardening boundary
+        run: python -m mypy
+      - name: Compile Python sources
+        run: python -m compileall -q src tests examples
+      - name: Run compiler unit suite
+        run: python -m pytest tests/unit -q
+      - name: Parse, format, and lint a generated Rust project
+        shell: bash
+        run: |
+          generated="$(crabwalk expand examples/the_rust_book/__init__.py)"
+          manifest="$(dirname "$(dirname "$generated")")/Cargo.toml"
+          cargo fmt --manifest-path "$manifest"
+          cargo fmt --manifest-path "$manifest" -- --check
+          cargo clippy --quiet --manifest-path "$manifest" --release -- -A warnings -D clippy::correctness
+
   native-matrix:
     strategy:
       fail-fast: false

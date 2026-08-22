@@ -2,7 +2,7 @@
 type: verification
 project: Crabwalk
 status: baseline-harness-ready
-updated: 2026-08-21
+updated: 2026-08-22
 tags:
   - project/crabwalk
   - verification/performance
@@ -52,5 +52,26 @@ One post-optimization Windows/CPython 3.11.8 sample on 2026-08-21 recorded:
 This sample is diagnostic, not a release budget. It caught and removed an accidental
 per-call filesystem path resolution: cached primitive overhead fell from roughly
 170 µs to 1.22 µs in the same harness. Retain the raw JSON in future CI runs.
+
+## Post-hardening smoke sample
+
+One Windows/CPython 3.11.8 sample on 2026-08-22, after complete-fingerprint reuse,
+typed effects, load leases, and Cargo/cache hardening, recorded:
+
+| Metric | Cold process | Valid cache-hit process |
+|---|---:|---:|
+| Process wall time | 17.05 s | 0.65 s |
+| Decorator/build-or-load time | 16.80 s | 0.42 s |
+| Primitive call | 1.62 µs | 1.66 µs |
+| Native sum over 2,000,000 integers | 0.61 ms | 0.57 ms |
+| Python `sum(range(...))` | 40.49 ms | 49.80 ms |
+| Python list → `Vec[u64]` (100,000) | 26.34 ms | 21.07 ms |
+| `Vec[u64]` → Python list (100,000) | 1.23 ms | 1.69 ms |
+
+The cached decorator increase is expected: the runtime now re-enters the service,
+reconstructs the declared build identity, and only then uses the complete-fingerprint
+process/artifact memo. Input-aware tool-version and source-analysis caches keep that
+correctness check bounded. This remains one noisy local sample; the ten-sample
+matrix policy above is unchanged.
 
 See [[Docs/Crabwalk Compatibility and Verification]] for the evidence hierarchy.

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import os
 import re
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, cast
 
 _ANSI_ESCAPE = re.compile(r"\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~])")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -59,10 +59,10 @@ class SourceSpan:
     def from_dict(cls, value: dict[str, object]) -> "SourceSpan":
         return cls(
             path=str(value["path"]),
-            line=int(value["line"]),
-            column=int(value["column"]),
-            end_line=int(value["end_line"]),
-            end_column=int(value["end_column"]),
+            line=int(cast(Any, value["line"])),
+            column=int(cast(Any, value["column"])),
+            end_line=int(cast(Any, value["end_line"])),
+            end_column=int(cast(Any, value["end_column"])),
         )
 
 
@@ -133,6 +133,7 @@ class CrabwalkCompilationError(CrabwalkError):
     """Compilation failed with one or more structured diagnostics."""
 
     def __init__(self, diagnostics: Diagnostic | Iterable[Diagnostic]):
+        values: tuple[Diagnostic, ...]
         if isinstance(diagnostics, Diagnostic):
             values = (diagnostics,)
         else:

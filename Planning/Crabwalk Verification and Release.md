@@ -151,7 +151,7 @@ Use multiple independent signals:
 1. The decorated object is a Crabwalk RustFunction bound to an extension symbol.
 2. Generated inspection shows an internal native function and direct Rust call edges.
 3. Python tracing/profiling emits no Python line events for a Rust function body or its recursive calls.
-4. A native-only call graph contains no PythonRuntimeBoundary effect.
+4. A native-only call graph contains no `PythonRuntime` effect.
 5. A test-only build manifest lists the exported native symbol and artifact fingerprint.
 6. Boundary instrumentation counts zero Python-runtime entries for a native-only fixture.
 
@@ -438,8 +438,8 @@ Measure before assigning thresholds:
 |---|---|
 | Cold compile | Report frontend, codegen, dependency build, crate build, and load separately. |
 | Warm Cargo build | Distinguish Cargo dependency reuse from Crabwalk artifact hit. |
-| Crabwalk cache hit | Zero Cargo/rustc processes. |
-| Cached import | No source compilation; report fingerprint/manifest/load time. |
+| Crabwalk cache hit | Zero Cargo/rustc for dependency-free projects; user crates may run Cargo validation without a relink. |
+| Cached import | Content-keyed static analysis/fingerprinting and verified load only; report each phase. |
 | Primitive Python→Rust call | Compare wrapper overhead across supported Python versions. |
 | Native loop/recursion | Confirm work stays in Rust and scales independently of Python tracing. |
 | Python boundary call | Measure each crossing separately. |
@@ -475,11 +475,11 @@ Release gates should initially prevent severe regressions relative to a checked-
 ### v0.1 alpha release gate
 
 - [ ] M1 and M2 gates pass.
-- [x] Native/Conversion/Python/Unsupported effects are complete and inspectable.
+- [x] Typed native/conversion/Python/blocking/threading/unsafe/mutation/panic effects are complete and inspectable.
 - [x] Python print boundary and rust.println native path are distinguished.
 - [x] Panic, GIL, conversion, and Result error contracts pass.
 - [x] Source maps pass Unicode/CRLF/multi-file/helper cases.
-- [x] Cache concurrency, interruption, corruption, and environment invalidation pass.
+- [x] Cache concurrency, interruption, corruption, environment invalidation, load leases, and local prune/build/load stress pass.
 - [x] doctor/check/build/expand/show/inspect behavior is documented and tested.
 - [x] Clean wheel builds and runs without Rust on the consumer.
 - [ ] Lowest/latest supported Python, MSRV/stable Rust, and Windows/Linux/macOS pass.

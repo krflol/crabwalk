@@ -110,7 +110,7 @@ def test_core_language_lowers_to_typed_ir_and_rust(tmp_path: Path) -> None:
     assert python_hello.effects == (
         "NativeRust",
         "ConversionBoundary",
-        "PythonRuntimeBoundary",
+        "PythonRuntime",
     )
     assert caller.python_boundary
     assert "fn __cw_native_python_hello(name: &str) -> PyResult<String>" in (

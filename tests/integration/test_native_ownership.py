@@ -315,3 +315,70 @@ print(reload_owned.total(new), new.to_python())
         "[1, 2, 3]",
         "2 [4, 5]",
     ]
+
+
+def test_inferred_owned_values_use_explicit_module_identity_in_both_load_orders(
+    tmp_path: Path,
+) -> None:
+    module_source = """\
+from crabwalk import rust
+
+@rust.fn
+def consume(values: rust.Ref[rust.Vec[rust.i64]]) -> rust.usize:
+    return values.len()
+
+def make(value):
+    return rust.Vec([value, value + 1])
+"""
+    (tmp_path / "owned_a.py").write_text(module_source, encoding="utf-8")
+    (tmp_path / "owned_b.py").write_text(module_source, encoding="utf-8")
+    driver = tmp_path / "identity_driver.py"
+    driver.write_text(
+        """\
+import importlib
+import sys
+
+from crabwalk import rust
+
+for name in sys.argv[1].split(","):
+    importlib.import_module(name)
+
+owned_a = importlib.import_module("owned_a")
+owned_b = importlib.import_module("owned_b")
+first = owned_a.make(1)
+second = owned_b.make(3)
+print(owned_a.consume(first), first.to_python())
+print(owned_b.consume(second), second.to_python())
+
+try:
+    rust.Vec([5, 6])
+except RuntimeError as error:
+    print("ambiguous", "Multiple generated wrappers" in str(error))
+
+explicit = rust.from_python([7, 8], rust.Vec[rust.i64], for_=owned_a.consume)
+print("explicit", owned_a.consume(explicit), explicit.to_python())
+""",
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join((str(root / "src"), str(tmp_path)))
+    environment["CRABWALK_PROGRESS"] = "never"
+
+    for order in ("owned_a,owned_b", "owned_b,owned_a"):
+        result = subprocess.run(
+            [sys.executable, "-u", str(driver), order],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == [
+            "2 [1, 2]",
+            "2 [3, 4]",
+            "ambiguous True",
+            "explicit 2 [7, 8]",
+        ]

@@ -124,6 +124,10 @@ class CargoBuilder:
         environment["PYO3_PYTHON"] = sys.executable
         environment["PYO3_BUILD_EXTENSION_MODULE"] = "1"
         environment["CARGO_TERM_COLOR"] = "never"
+        # Crabwalk's Python exception boundary relies on Rust unwinding. Cargo
+        # profile environment variables outrank Cargo.toml, so force the same
+        # invariant here rather than allowing an ambient `panic=abort` override.
+        environment["CARGO_PROFILE_RELEASE_PANIC"] = "unwind"
         try:
             process = subprocess.run(
                 command,

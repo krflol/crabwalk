@@ -66,7 +66,8 @@ The package runner's terminal line is:
 Rust Book chapters 1-21: all native assertions passed
 ```
 
-The 2026-08-21 Windows/CPython 3.11 verification passed all 74 repository tests,
-all 45 post-format unit tests, the 5 Chapter 11 teaching tests, the package runner,
-and the locked package check. Cross-platform release-matrix evidence remains a
-separate release gate.
+The 2026-08-22 invariant-hardening checkpoint on Windows/CPython 3.11 passed all
+101 repository tests in 687.20 seconds, all 67 focused unit tests, the 5 Chapter 11
+teaching tests, the package runner, unsafe subprocess cases, cache/load-lease
+stress, and the clean wheel consumer. Cross-platform release-matrix evidence
+remains a separate release gate.

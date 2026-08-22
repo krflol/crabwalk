@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from crabwalk.compiler.frontend import analyze_path
+from crabwalk.compiler.frontend import analyze_path, analyze_project_path
 from crabwalk.compiler.ir import BinaryIR, CallIR, IfIR, ReturnIR
 from crabwalk.diagnostics import CrabwalkCompilationError
 
@@ -81,3 +81,35 @@ def bad(n: rust.u64) -> rust.u64:
         analyze_path(path)
 
     assert captured.value.diagnostics[0].code == "CRAB109"
+
+
+def test_project_analysis_cache_tracks_new_package_sources(tmp_path: Path) -> None:
+    package = tmp_path / "demo"
+    package.mkdir()
+    entry = package / "__init__.py"
+    entry.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def first() -> rust.u64:
+    return 1
+""",
+        encoding="utf-8",
+    )
+    first = analyze_project_path(entry, "demo")
+
+    (package / "extra.py").write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def second() -> rust.u64:
+    return 2
+""",
+        encoding="utf-8",
+    )
+    second = analyze_project_path(entry, "demo")
+
+    assert first.source_hash != second.source_hash
+    assert {function.name for function in second.functions} == {"first", "second"}

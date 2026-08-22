@@ -7,6 +7,7 @@ reimplementations of their Rust namesakes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import update_wrapper
 from typing import Callable, TypeVar, overload
 
 
@@ -249,6 +250,42 @@ Mut = RustGeneric("Mut", 1)
 
 _F = TypeVar("_F", bound=Callable[..., object])
 
+
+class NativeOnlyFunction:
+    """Metadata-bearing declaration that cannot fall back to Python execution."""
+
+    def __init__(
+        self,
+        function: Callable[..., object],
+        kind: str,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        self.__crabwalk_declaration__ = {
+            "kind": kind,
+            **(metadata or {}),
+        }
+        update_wrapper(self, function)
+
+    def __call__(self, *_args: object, **_kwargs: object) -> object:
+        raise RuntimeError(
+            f"{self.__qualname__} is a native-only Crabwalk {self.__crabwalk_declaration__['kind']} "
+            "and may be called only from compiled @rust.fn code"
+        )
+
+    def __repr__(self) -> str:
+        return f"<crabwalk native-only {self.__qualname__}>"
+
+
+def _native_only_function(
+    function: _F,
+    kind: str,
+    metadata: dict[str, object] | None = None,
+) -> NativeOnlyFunction:
+    if not callable(function):
+        raise TypeError(f"@rust.{kind} expects a function")
+    return NativeOnlyFunction(function, kind, metadata)
+
+
 PartialOrd = RustTrait("PartialOrd")
 Ord = RustTrait("Ord")
 Copy = RustTrait("Copy")
@@ -276,7 +313,7 @@ def lifetime(name: str) -> RustType:
 def generic(
     *type_parameters: RustType,
     bounds: list[RustTrait] | tuple[RustTrait, ...] = (),
-) -> Callable[[_F], _F]:
+) -> Callable[[_F], NativeOnlyFunction]:
     """Mark a function as a native-only generic Rust helper.
 
     A concrete ``@rust.fn`` function calls the helper, allowing rustc to
@@ -290,10 +327,12 @@ def generic(
     if not all(isinstance(value, RustTrait) for value in bounds):
         raise TypeError("rust.generic bounds must be Rust trait markers")
 
-    def decorate(function: _F) -> _F:
-        if not callable(function):
-            raise TypeError("@rust.generic expects a function")
-        return function
+    def decorate(function: _F) -> NativeOnlyFunction:
+        return _native_only_function(
+            function,
+            "generic",
+            {"type_parameters": type_parameters, "bounds": tuple(bounds)},
+        )
 
     return decorate
 
@@ -315,17 +354,18 @@ def method(
     type_value: object,
     *,
     name: str | None = None,
-) -> Callable[[_F], _F]:
+) -> Callable[[_F], NativeOnlyFunction]:
     """Attach a native-only helper as an inherent method on a Rust domain type."""
 
-    del type_value
     if name is not None and (not isinstance(name, str) or not name.isidentifier()):
         raise TypeError("rust.method name must be a valid identifier string")
 
-    def decorate(function: _F) -> _F:
-        if not callable(function):
-            raise TypeError("@rust.method expects a function")
-        return function
+    def decorate(function: _F) -> NativeOnlyFunction:
+        return _native_only_function(
+            function,
+            "method",
+            {"type": type_value, "name": name},
+        )
 
     return decorate
 
@@ -335,17 +375,18 @@ def impl(
     type_value: object,
     *,
     name: str | None = None,
-) -> Callable[[_F], _F]:
+) -> Callable[[_F], NativeOnlyFunction]:
     """Implement one declared trait method for a concrete Rust domain type."""
 
-    del trait_value, type_value
     if name is not None and (not isinstance(name, str) or not name.isidentifier()):
         raise TypeError("rust.impl name must be a valid identifier string")
 
-    def decorate(function: _F) -> _F:
-        if not callable(function):
-            raise TypeError("@rust.impl expects a function")
-        return function
+    def decorate(function: _F) -> NativeOnlyFunction:
+        return _native_only_function(
+            function,
+            "impl",
+            {"trait": trait_value, "type": type_value, "name": name},
+        )
 
     return decorate
 
@@ -354,22 +395,23 @@ def operator(
     type_value: object,
     *,
     name: str,
-) -> Callable[[_F], _F]:
+) -> Callable[[_F], NativeOnlyFunction]:
     """Implement a supported Rust operator for one generated domain type."""
 
-    del type_value
     if name != "add":
         raise TypeError("rust.operator currently supports name='add'")
 
-    def decorate(function: _F) -> _F:
-        if not callable(function):
-            raise TypeError("@rust.operator expects a function")
-        return function
+    def decorate(function: _F) -> NativeOnlyFunction:
+        return _native_only_function(
+            function,
+            "operator",
+            {"type": type_value, "name": name},
+        )
 
     return decorate
 
 
-def async_fn(function: _F) -> _F:
+def async_fn(function: _F) -> NativeOnlyFunction:
     """Mark an ``async def`` as a native-only Rust ``async fn`` helper.
 
     The helper is discovered statically and is not exported through Python's ABI.
@@ -377,9 +419,7 @@ def async_fn(function: _F) -> _F:
     ``@rust.fn`` wrapper with ``rust.block_on(...)``.
     """
 
-    if not callable(function):
-        raise TypeError("@rust.async_fn expects an async function")
-    return function
+    return _native_only_function(function, "async_fn")
 
 
 @overload
@@ -470,12 +510,29 @@ def crate(
     return Crate(package, package, version, tuple(features), path, git, rev)
 
 
-def from_python(value: object, rust_type: RustType) -> object:
-    """Explicitly copy a supported Python value into generated Rust storage."""
+def from_python(
+    value: object,
+    rust_type: RustType,
+    *,
+    for_: object | None = None,
+) -> object:
+    """Copy a Python value into an explicitly selected generated Rust wrapper.
+
+    ``for_`` may be a compiled function from the target module. It is required
+    when more than one loaded compilation exposes the same owned Rust type and
+    the calling module itself does not identify the intended wrapper.
+    """
 
     if not isinstance(rust_type, RustType):
         raise TypeError("rust.from_python expects a concrete RustType as argument two")
-    return rust_type(value)
+    from .runtime import construct_rust_value
+
+    return construct_rust_value(
+        rust_type,
+        (value,),
+        {},
+        for_context=for_,
+    )
 
 
 def to_python(value: object) -> object:
@@ -563,6 +620,7 @@ __all__ = [
     "RefCell",
     "Mut",
     "Mutex",
+    "NativeOnlyFunction",
     "Result",
     "Receiver",
     "RustGeneric",

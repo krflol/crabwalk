@@ -2,7 +2,7 @@
 
 Run from the repository's ``examples`` directory with::
 
-    python -m th_rust_book.run_all
+    python -m the_rust_book.run_all
 
 The assertions live in ordinary Python on purpose.  Every imported ``@rust.fn``
 body is compiled together into one Rust extension, while this small host program

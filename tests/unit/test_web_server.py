@@ -34,7 +34,7 @@ def thread_pool_jobs() -> rust.u64:
     pool.execute(lambda: first.add_locked(1))
     pool.execute(lambda: second.add_locked(1))
     pool.execute(lambda: third.add_locked(1))
-    rust.drop(pool)
+    pool.finish().expect("thread pool worker failed")
     return counter.get_locked()
 """
 
@@ -57,5 +57,10 @@ def test_tcp_and_thread_pool_lower_to_standard_library_rust(tmp_path: Path) -> N
     assert "std::sync::mpsc::channel()" in rust_source
     assert "impl Drop for __CwThreadPool" in rust_source
     assert "drop(self.sender.take())" in rust_source
-    assert "worker.thread.join().unwrap()" in rust_source
+    assert "fn finish(mut self) -> Result<(), String>" in rust_source
+    assert "std::panic::catch_unwind" in rust_source
+    assert "__cw_record_worker_failure" in rust_source
+    assert "self.shutdown();" in rust_source
+    assert "worker.thread.join().unwrap()" not in rust_source
     assert "pool.execute(move ||" in rust_source
+    assert 'panic = "unwind"' in generated.cargo_toml

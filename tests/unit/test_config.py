@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from crabwalk.diagnostics import CrabwalkCompilationError
+from crabwalk.config import discover_project_config
 from crabwalk.service import default_service
 
 
@@ -76,3 +77,25 @@ def value() -> rust.u64:
     with pytest.raises(CrabwalkCompilationError) as captured:
         default_service.compile_path(outside, mode="expand")
     assert captured.value.diagnostics[0].code == "CRAB012"
+
+
+def test_config_declares_additional_cargo_file_and_environment_inputs(
+    tmp_path: Path,
+) -> None:
+    pyproject, _ = _project(tmp_path)
+    asset = tmp_path / "native-schema.proto"
+    asset.write_text("message Value {}\n", encoding="utf-8")
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8")
+        + 'extra-files = ["native-schema.proto"]\n'
+        + 'extra-env = ["APP_NATIVE_MODE"]\n'
+        + 'wheel-include = ["templates/*.html"]\n',
+        encoding="utf-8",
+    )
+
+    config = discover_project_config(tmp_path)
+
+    assert config is not None
+    assert config.extra_files == (asset,)
+    assert config.extra_env == ("APP_NATIVE_MODE",)
+    assert config.wheel_include == ("templates/*.html",)

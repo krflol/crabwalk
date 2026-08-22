@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-21
+updated: 2026-08-22
 tags:
   - project/crabwalk
   - docs/security
@@ -39,27 +39,44 @@ a proof that arbitrary third-party build output contains no sensitive derived da
 
 Generated user code uses safe Rust by default. The Rust Book teaching surface adds
 several explicit, reviewed unsafe operations: raw reads/writes of named Copy locals,
-a bounds-checked split-slice demonstration, C `abs`, and a mutable-static example.
+a bounds-checked split-slice demonstration, guarded C `abs`, and an atomic global
+counter example. The C call rejects `i32::MIN` before FFI because its positive
+magnitude is not representable; the counter uses a checked `AtomicU64` update.
 Their generated `unsafe` blocks are inspectable and deliberately do not form a
 general raw-Rust or arbitrary-FFI escape hatch. PyO3 wrappers:
 
 - range/type check exported values in Python before native entry;
-- contain Rust panics with `catch_unwind` and raise `CrabwalkPanicError`;
+- contain Rust panics with `catch_unwind` and raise `CrabwalkPanicError`; generated
+  release profiles and Cargo invocation force `panic = "unwind"`;
 - translate exported `Result::Err` into `CrabwalkRustError`;
 - enforce Rust-backed move and borrow state before taking native references;
-- release the GIL only for native-only primitive signatures;
-- keep/reacquire the GIL when the effect graph reaches Python.
+- derive GIL policy from both ABI-safe primitive signatures and typed effects;
+- keep/reacquire the GIL for Python runtime, global mutation, unsafe-memory, and
+  unsafe-FFI effects.
+
+The generated ThreadPool catches each worker job, records the first failure, and
+reports it through explicit `finish()`. Its `Drop` path closes and joins without
+propagating a join panic, including while an outer native function is unwinding.
 
 Safe generated Rust does not eliminate ABI, compiler, dependency, or handwritten
 runtime bugs. The native test matrix remains a release requirement.
 
 ## Installed artifacts
 
-Development artifacts are content addressed, manifest bound, hash verified, locked,
-and atomically published. Prebuilt wheel artifacts additionally bind the Python
-source hash and package identity. Artifact paths are resolved inside the installed
-package before loading. Wheel construction rejects package symlinks to avoid
-pulling data from outside the package tree.
+Development artifacts are content addressed over Crabwalk's declared input model,
+manifest bound, hash verified, locked, and atomically published. Native loading is
+performed under the fingerprint lock and retains a per-process reader lease for
+the mapped lifetime; pruning uses a separate global lock, nonblocking entry locks,
+access markers, and post-lock revalidation. Prebuilt wheel
+artifacts additionally bind the Python source, package identity, exact alpha
+runtime, and runtime ABI. Artifact paths are resolved inside the installed package
+before loading. Wheel construction rejects package symlinks and common credential
+or private-key names.
+
+Arbitrary build scripts can consume inputs Cargo and Crabwalk cannot infer. Declare
+those with `[tool.crabwalk].extra-files` and `extra-env`. Cargo is re-invoked for
+user-crate cache hits, but undeclared external inputs remain outside the
+content-addressed fingerprint contract.
 
 No signature or publisher attestation is currently provided. SHA-256 detects
 accidental/stale corruption and local mismatch; it does not establish who produced
@@ -71,6 +88,8 @@ distribution.
 - CPython only; interpreter-specific wheels; free-threaded CPython is not advertised.
 - Regular packages only; namespace packages and multiple configured top-level
   packages in one distribution are not supported.
+- Internal package import cycles and `import *` are rejected for alpha rather than
+  approximated. Use explicit imports and an acyclic compiler-visible graph.
 - No general Python calls, objects, reflection, exceptions-as-control-flow,
   generators, or dynamic imports inside `@rust.fn`. Closures are accepted only in
   statically typed iterator/thread/async/pool positions.
@@ -91,7 +110,8 @@ distribution.
   slice, not a production server, TLS stack, general HTTP parser, or persistent
   externally controlled background service.
 - The wheel command is a focused mixed-wheel builder, not a general metadata-aware
-  PEP 517 backend.
+  PEP 517 backend. It packages Python/type files by default; other package data
+  requires an explicit `wheel-include` pattern.
 - Cross-platform CI must pass before a release is promoted; local evidence alone is
   not a portability claim.
 

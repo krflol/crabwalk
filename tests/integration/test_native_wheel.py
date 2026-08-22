@@ -15,8 +15,6 @@ def _write_package(root: Path) -> Path:
         """\
 from crabwalk import rust
 
-regex = rust.crate("regex", version="1")
-
 from .math import double
 from .model import Point
 from .text import contains_number
@@ -50,7 +48,7 @@ class Point:
         """\
 from crabwalk import rust
 
-from . import regex
+regex = rust.crate("regex", version="1")
 
 @rust.fn
 def contains_number(value: rust.Str) -> rust.bool:

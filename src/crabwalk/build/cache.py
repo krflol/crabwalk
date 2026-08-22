@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
 import shutil
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Any
+from typing import Any, BinaryIO
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +38,7 @@ class FileLock:
     def __init__(self, path: Path, timeout: float = 600.0):
         self.path = path
         self.timeout = timeout
-        self._handle: object | None = None
+        self._handle: BinaryIO | None = None
 
     def __enter__(self) -> "FileLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -66,9 +68,23 @@ class FileLock:
                         ) from error
                     time.sleep(0.05)
         else:
-            import fcntl
+            fcntl: Any = __import__("fcntl")
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            deadline = time.monotonic() + self.timeout
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as error:
+                    if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                        handle.close()
+                        raise
+                    if time.monotonic() >= deadline:
+                        handle.close()
+                        raise TimeoutError(
+                            f"timed out waiting for Crabwalk lock {self.path}"
+                        ) from error
+                    time.sleep(0.05)
         self._handle = handle
         return self
 
@@ -87,11 +103,47 @@ class FileLock:
 
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         else:
-            import fcntl
+            fcntl: Any = __import__("fcntl")
 
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         handle.close()
         self._handle = None
+
+
+_PROCESS_LEASE_ID = f"{os.getpid()}-{time.time_ns()}"
+_load_lease_guard = threading.Lock()
+_load_leases: dict[tuple[str, str], tuple[Path, FileLock]] = {}
+
+
+def retain_cache_load_lease(state_root: Path, fingerprint: str) -> None:
+    """Keep one process-scoped reader lease for a mapped native artifact."""
+
+    resolved_state = state_root.resolve()
+    key = (str(resolved_state), fingerprint)
+    with _load_lease_guard:
+        if key in _load_leases:
+            return
+        lease_path = (
+            resolved_state
+            / "locks"
+            / "load-leases"
+            / fingerprint
+            / f"{_PROCESS_LEASE_ID}.lock"
+        )
+        lease = FileLock(lease_path, timeout=0.0)
+        lease.__enter__()
+        _load_leases[key] = (lease_path, lease)
+
+
+def _release_cache_load_lease(state_root: Path, fingerprint: str) -> None:
+    key = (str(state_root.resolve()), fingerprint)
+    with _load_lease_guard:
+        retained = _load_leases.pop(key, None)
+    if retained is None:
+        return
+    path, lease = retained
+    lease.__exit__(None, None, None)
+    path.unlink(missing_ok=True)
 
 
 def sha256_file(path: Path) -> str:
@@ -104,6 +156,12 @@ def sha256_file(path: Path) -> str:
 
 def write_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = value.encode("utf-8")
+    try:
+        if path.read_bytes() == encoded:
+            return
+    except OSError:
+        pass
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
         handle.write(value)
@@ -166,6 +224,12 @@ def artifact_cache_info(
     return ArtifactCacheInfo("hit", artifact, manifest_path, size)
 
 
+def touch_cache_access(entry: Path) -> None:
+    """Atomically record a verified cache use independently of artifact age."""
+
+    write_text(entry / ".last-access", f"{time.time_ns()}\n")
+
+
 def prune_artifact_cache(
     state_root: Path,
     *,
@@ -174,6 +238,24 @@ def prune_artifact_cache(
     dry_run: bool = False,
 ) -> CachePruneResult:
     """Remove only validated, content-addressed artifact-entry directories."""
+
+    state_root = state_root.resolve()
+    with FileLock(state_root / "locks" / "cache-prune.lock"):
+        return _prune_artifact_cache_locked(
+            state_root,
+            max_bytes=max_bytes,
+            max_age_seconds=max_age_seconds,
+            dry_run=dry_run,
+        )
+
+
+def _prune_artifact_cache_locked(
+    state_root: Path,
+    *,
+    max_bytes: int | None,
+    max_age_seconds: float | None,
+    dry_run: bool,
+) -> CachePruneResult:
 
     if max_bytes is not None and max_bytes < 0:
         raise ValueError("max_bytes must be non-negative or None")
@@ -217,15 +299,42 @@ def prune_artifact_cache(
         for path, _, _ in sorted(entries, key=lambda value: value[2])
         if path in selected
     )
-    reclaimed = sum(size for path, size, _ in entries if path in selected)
+    selected_snapshots = {
+        path: (size, last_used) for path, size, last_used in entries if path in selected
+    }
+    removed = ordered
+    removed_sizes = {path: selected_snapshots[path][0] for path in removed}
     if not dry_run:
+        actual: list[Path] = []
+        removed_sizes = {}
         for path in ordered:
-            _remove_scoped_entry(root, path)
+            try:
+                with FileLock(
+                    state_root / "locks" / f"{path.name}.lock",
+                    timeout=0.0,
+                ):
+                    if cache_load_lease_active(state_root, path.name):
+                        continue
+                    current = _entry_size_and_mtime(path)
+                    if current != selected_snapshots[path]:
+                        # A verified hit or publication changed the entry after
+                        # selection. Leave it for a future prune pass that can
+                        # assess the new access time and size consistently.
+                        continue
+                    _remove_scoped_entry(root, path)
+            except (FileNotFoundError, TimeoutError):
+                continue
+            actual.append(path)
+            removed_sizes[path] = current[0]
+        removed = tuple(actual)
+    reclaimed = sum(removed_sizes[path] for path in removed)
+    remaining_entries = len(entries) - len(removed)
+    remaining_size = sum(size for _, size, _ in entries) - reclaimed
     return CachePruneResult(
-        removed=ordered,
+        removed=removed,
         bytes_reclaimed=reclaimed,
-        bytes_remaining=sum(size for path, size, _ in entries if path not in selected),
-        entries_remaining=sum(path not in selected for path, _, _ in entries),
+        bytes_remaining=remaining_size,
+        entries_remaining=remaining_entries,
         dry_run=dry_run,
     )
 
@@ -239,9 +348,90 @@ def _entry_size_and_mtime(path: Path) -> tuple[int, float]:
         stat = candidate.stat()
         size += stat.st_size
         last_used = max(last_used, stat.st_mtime)
-    if last_used == 0.0:
+    access = path / ".last-access"
+    if access.is_file():
+        last_used = access.stat().st_mtime
+    elif last_used == 0.0:
         last_used = path.stat().st_mtime
     return size, last_used
+
+
+def cache_load_lease_active(state_root: Path, fingerprint: str) -> bool:
+    """Return whether another live process retains this mapped artifact."""
+
+    lease_root = state_root / "locks" / "load-leases" / fingerprint
+    if not lease_root.is_dir():
+        return False
+    stale: list[Path] = []
+    for path in lease_root.glob("*.lock"):
+        owner = _lease_owner_pid(path)
+        if owner is not None and _process_is_alive(owner):
+            return True
+        try:
+            with FileLock(path, timeout=0.0):
+                pass
+        except TimeoutError:
+            return True
+        stale.append(path)
+    for path in stale:
+        path.unlink(missing_ok=True)
+    try:
+        lease_root.rmdir()
+    except OSError:
+        pass
+    return False
+
+
+def _lease_owner_pid(path: Path) -> int | None:
+    try:
+        return int(path.stem.split("-", 1)[0])
+    except ValueError:
+        return None
+
+
+def _process_is_alive(process_id: int) -> bool:
+    if process_id == os.getpid():
+        return True
+    if os.name == "nt":
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [
+            ctypes.c_ulong,
+            ctypes.c_int,
+            ctypes.c_ulong,
+        ]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.GetExitCodeProcess.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_ulong),
+        ]
+        kernel32.GetExitCodeProcess.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        handle = kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            process_id,
+        )
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == still_active
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _remove_scoped_entry(root: Path, path: Path) -> None:

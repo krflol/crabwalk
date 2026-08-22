@@ -16,6 +16,9 @@ class ProjectConfig:
     pyproject: Path
     packages: tuple[Path, ...]
     python_boundaries: str
+    extra_files: tuple[Path, ...]
+    extra_env: tuple[str, ...]
+    wheel_include: tuple[str, ...]
     content_hash: str
 
     def resolve_entry(self, requested: Path) -> Path:
@@ -95,7 +98,13 @@ def _read_config(pyproject: Path, *, required: bool) -> ProjectConfig | None:
         return None
     if not isinstance(table, dict):
         _fail("CRAB010", "Invalid [tool.crabwalk] table", str(pyproject))
-    supported = {"packages", "python-boundaries"}
+    supported = {
+        "packages",
+        "python-boundaries",
+        "extra-files",
+        "extra-env",
+        "wheel-include",
+    }
     unknown = sorted(set(table) - supported)
     if unknown:
         _fail(
@@ -137,11 +146,58 @@ def _read_config(pyproject: Path, *, required: bool) -> ProjectConfig | None:
             "Invalid Python-boundary policy",
             "python-boundaries must be 'allow', 'warn', or 'deny'.",
         )
+    extra_file_values = table.get("extra-files", [])
+    if not isinstance(extra_file_values, list) or not all(
+        isinstance(value, str) and value for value in extra_file_values
+    ):
+        _fail(
+            "CRAB010",
+            "Invalid extra build-file list",
+            "[tool.crabwalk].extra-files must contain non-empty relative paths.",
+        )
+    extra_files: list[Path] = []
+    for value in extra_file_values:
+        relative = Path(value)
+        resolved = (root / relative).resolve()
+        if relative.is_absolute() or not resolved.is_relative_to(root):
+            _fail("CRAB010", "Extra build file escapes the project", value)
+        if not resolved.exists():
+            _fail("CRAB010", "Extra build file does not exist", value)
+        extra_files.append(resolved)
+    extra_env_values = table.get("extra-env", [])
+    if not isinstance(extra_env_values, list) or not all(
+        isinstance(value, str)
+        and value
+        and value.replace("_", "a").isalnum()
+        and not value[0].isdigit()
+        for value in extra_env_values
+    ):
+        _fail(
+            "CRAB010",
+            "Invalid extra build-environment list",
+            "[tool.crabwalk].extra-env must contain environment variable names.",
+        )
+    wheel_include_values = table.get("wheel-include", [])
+    if not isinstance(wheel_include_values, list) or not all(
+        isinstance(value, str)
+        and value
+        and not Path(value).is_absolute()
+        and ".." not in Path(value).parts
+        for value in wheel_include_values
+    ):
+        _fail(
+            "CRAB010",
+            "Invalid wheel package-data list",
+            "[tool.crabwalk].wheel-include must contain scoped relative glob patterns.",
+        )
     return ProjectConfig(
         root=root,
         pyproject=pyproject.resolve(),
         packages=tuple(packages),
         python_boundaries=str(policy),
+        extra_files=tuple(extra_files),
+        extra_env=tuple(extra_env_values),
+        wheel_include=tuple(wheel_include_values),
         content_hash=hashlib.sha256(raw).hexdigest(),
     )
 

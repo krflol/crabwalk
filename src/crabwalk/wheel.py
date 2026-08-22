@@ -14,9 +14,11 @@ import sysconfig
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import NoReturn
 
-from crabwalk import __version__
+from crabwalk._version import RUNTIME_ABI_VERSION, __version__
 from crabwalk.build.cache import sha256_file
+from crabwalk.config import discover_project_config
 from crabwalk.diagnostics import CrabwalkCompilationError, Diagnostic
 from crabwalk.service import CompilationResult, CompilationService, default_service
 
@@ -84,7 +86,9 @@ def build_wheel(
     destination = output_root / wheel_name
     temporary = output_root / f".{wheel_name}.{os.getpid()}.tmp"
 
-    entries = _package_entries(package_root)
+    config = discover_project_config(package_root)
+    wheel_include = config.wheel_include if config is not None else ()
+    entries = _package_entries(package_root, wheel_include)
     package_prefix = PurePosixPath(package_root.name)
     artifact_entry = package_prefix / _NATIVE_DIRECTORY / artifact.name
     manifest_entry = package_prefix / _PREBUILT_MANIFEST
@@ -144,7 +148,10 @@ def _validate_metadata(name: str, version: str) -> None:
         )
 
 
-def _package_entries(package_root: Path) -> dict[str, bytes]:
+def _package_entries(
+    package_root: Path,
+    wheel_include: tuple[str, ...] = (),
+) -> dict[str, bytes]:
     result: dict[str, bytes] = {}
     for source in sorted(
         (candidate for candidate in package_root.rglob("*") if candidate.is_file()),
@@ -152,6 +159,15 @@ def _package_entries(package_root: Path) -> dict[str, bytes]:
     ):
         relative = source.relative_to(package_root)
         if _excluded(relative):
+            continue
+        if _sensitive_package_file(relative):
+            _fail(
+                "CRAB507",
+                "Sensitive file found beneath wheel package",
+                f"Refusing to package while {relative} is present.",
+                "Move credentials and private keys outside the import package.",
+            )
+        if not _wheel_file_allowed(relative, wheel_include):
             continue
         if source.is_symlink():
             _fail(
@@ -172,6 +188,23 @@ def _excluded(relative: Path) -> bool:
     return any(part in blocked for part in relative.parts)
 
 
+def _wheel_file_allowed(relative: Path, patterns: tuple[str, ...]) -> bool:
+    if relative.suffix in {".py", ".pyi"} or relative.name == "py.typed":
+        return True
+    normalized = PurePosixPath(*relative.parts)
+    return any(normalized.match(pattern) for pattern in patterns)
+
+
+def _sensitive_package_file(relative: Path) -> bool:
+    name = relative.name.casefold()
+    stem = relative.stem.casefold()
+    if name in {".env", "credentials", "credentials.json", "id_rsa", "id_ed25519"}:
+        return True
+    if relative.suffix.casefold() in {".key", ".pem", ".p12", ".pfx"}:
+        return True
+    return any(token in stem for token in ("credential", "private_key", "secret"))
+
+
 def _prebuilt_manifest(
     compilation: CompilationResult,
     artifact_relative: PurePosixPath,
@@ -182,8 +215,9 @@ def _prebuilt_manifest(
     if artifact is None:
         raise AssertionError("wheel compilation has no artifact")
     value = {
-        "schema_version": 1,
+        "schema_version": 2,
         "crabwalk_version": __version__,
+        "runtime_abi_version": RUNTIME_ABI_VERSION,
         "module_name": compilation.ir.module_name,
         "source_hash": compilation.ir.source_hash,
         "fingerprint": compilation.fingerprint,
@@ -254,5 +288,5 @@ def _fail(
     title: str,
     message: str,
     help_text: str | None = None,
-) -> None:
+) -> NoReturn:
     raise CrabwalkCompilationError(Diagnostic(code, title, message, help=help_text))
