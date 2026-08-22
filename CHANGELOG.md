@@ -58,6 +58,9 @@ a release yet; the entries below describe the current `0.0.1` alpha candidate.
   hit, and lock changes cannot publish beneath a stale fingerprint.
 - Repaired cache entries refresh their access age, and package-cycle analysis now
   includes every parent initializer Python executes for a child import.
+- Generated PyO3 dependencies enable `extension-module` so macOS leaves Python ABI
+  symbols for the interpreter to resolve; wheel smoke builds use isolated backend
+  requirements consistently across the advertised Python matrix.
 
 ### Security
 

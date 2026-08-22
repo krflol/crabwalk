@@ -16,7 +16,7 @@ tags:
 |---|---|
 | Python | CPython 3.11–3.14; interpreter-specific extension ABI |
 | Rust | current stable toolchain; local evidence: rustc/Cargo 1.97.0 |
-| PyO3 | pinned to 0.29.2 in generated Cargo manifests |
+| PyO3 | pinned to 0.29.2 with `extension-module` in generated Cargo manifests |
 | OS | Windows, Linux, macOS are CI targets; Windows x86-64 is locally verified |
 | Profile | Cargo release profile with overflow checks enabled |
 | Package | regular Python package or standalone module for source use |

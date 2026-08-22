@@ -67,7 +67,7 @@ from .ir import (
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
 PYO3_VERSION = "0.29.2"
-CODEGEN_SCHEMA_VERSION = 27
+CODEGEN_SCHEMA_VERSION = 28
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,7 +230,8 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
         f'name = "{extension_name}"\n'
         'crate-type = ["cdylib"]\n\n'
         "[dependencies]\n"
-        f'{PYO3_CARGO_ALIAS} = {{ package = "pyo3", version = "={PYO3_VERSION}" }}\n'
+        f'{PYO3_CARGO_ALIAS} = {{ package = "pyo3", version = "={PYO3_VERSION}", '
+        'features = ["extension-module"] }\n'
         f"{dependencies}\n"
         "[profile.release]\n"
         "overflow-checks = true\n"
@@ -2008,7 +2009,7 @@ def cargo_dependency_specification(ir: PackageIR) -> dict[str, object]:
                 "binding": PYO3_CARGO_ALIAS,
                 "package": "pyo3",
                 "version": f"={PYO3_VERSION}",
-                "features": [],
+                "features": ["extension-module"],
             }
         ],
         "declared": [

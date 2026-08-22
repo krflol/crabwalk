@@ -123,7 +123,6 @@ def test_installed_wheel_uses_embedded_extension_without_rust(
             "wheel",
             str(root),
             "--no-deps",
-            "--no-build-isolation",
             "--wheel-dir",
             str(runtime_dist),
         ],

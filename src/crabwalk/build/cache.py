@@ -49,7 +49,7 @@ class FileLock:
             handle.flush()
         handle.seek(0)
         if os.name == "nt":
-            import msvcrt
+            msvcrt: Any = __import__("msvcrt")
 
             deadline = time.monotonic() + self.timeout
             while True:
@@ -104,7 +104,7 @@ class FileLock:
             return
         handle.seek(0)
         if os.name == "nt":
-            import msvcrt
+            msvcrt: Any = __import__("msvcrt")
 
             msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         else:
@@ -411,7 +411,8 @@ def _process_is_alive(process_id: int) -> bool:
 
         process_query_limited_information = 0x1000
         still_active = 259
-        kernel32 = ctypes.windll.kernel32
+        ctypes_module: Any = ctypes
+        kernel32 = ctypes_module.windll.kernel32
         kernel32.OpenProcess.argtypes = [
             ctypes.c_ulong,
             ctypes.c_int,

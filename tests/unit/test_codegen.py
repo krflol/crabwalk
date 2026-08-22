@@ -19,4 +19,5 @@ def test_codegen_is_deterministic_and_native_recursion_is_direct(
     assert f"__cw_native_{symbol}((n - 1u64))" in first.rust_source
     assert "#[pyfunction]" in first.rust_source
     assert '#[pymodule(name = "_crabwalk_demo_abc")]' in first.rust_source
+    assert 'features = ["extension-module"]' in first.cargo_toml
     assert first.source_map["entries"]
