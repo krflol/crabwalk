@@ -113,6 +113,36 @@ def test_pruning_revalidates_selection_after_taking_entry_lock(
     assert candidate.is_dir()
 
 
+def test_pruning_skips_an_entry_when_the_os_denies_deletion(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    state = tmp_path / ".crabwalk"
+    candidate = _entry(state, "8", 10, 500)
+
+    def deny_mapped_artifact_deletion(path: Path) -> None:
+        assert path == candidate
+        raise PermissionError("native artifact is still mapped")
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        cache_module.shutil,
+        "rmtree",
+        deny_mapped_artifact_deletion,
+    )
+
+    outcome = prune_artifact_cache(
+        state,
+        max_bytes=0,
+        max_age_seconds=None,
+    )
+
+    assert outcome.removed == ()
+    assert outcome.bytes_reclaimed == 0
+    assert outcome.bytes_remaining == 10
+    assert outcome.entries_remaining == 1
+    assert candidate.is_dir()
+
+
 def test_pruning_skips_a_process_load_lease(tmp_path: Path) -> None:
     state = tmp_path / ".crabwalk"
     fingerprint = "1" * 64

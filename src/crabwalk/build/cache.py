@@ -327,7 +327,12 @@ def _prune_artifact_cache_locked(
                         # assess the new access time and size consistently.
                         continue
                     _remove_scoped_entry(root, path)
-            except (FileNotFoundError, TimeoutError):
+            except (FileNotFoundError, PermissionError, TimeoutError):
+                # A native library can remain mapped briefly even after the
+                # owning process has released its Crabwalk lease. Windows
+                # reports that state as PermissionError when rmtree reaches
+                # the loaded .pyd. Treat the operating-system mapping as one
+                # more busy-entry signal and retry during a later prune pass.
                 continue
             actual.append(path)
             removed_sizes[path] = current[0]
