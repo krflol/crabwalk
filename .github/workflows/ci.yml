@@ -1,0 +1,46 @@
+name: Crabwalk CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  native-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python: ["3.11", "3.14"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os }}-${{ matrix.python }}
+      - name: Install test dependencies
+        run: python -m pip install -e . pytest
+      - name: Probe native toolchain
+        run: crabwalk doctor
+      - name: Run full suite
+        run: python -m pytest -q
+
+  intermediate-python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: python -m pip install -e . pytest
+      - run: python -m pytest tests/unit -q

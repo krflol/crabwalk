@@ -1,0 +1,83 @@
+from pathlib import Path
+
+import pytest
+
+from crabwalk.compiler.frontend import analyze_path
+from crabwalk.compiler.ir import BinaryIR, CallIR, IfIR, ReturnIR
+from crabwalk.diagnostics import CrabwalkCompilationError
+
+
+FIBONACCI = """\
+from crabwalk import rust
+
+@rust.fn
+def fibonacci(n: rust.u64) -> rust.u64:
+    if n <= 1:
+        return n
+    return fibonacci(n - 1) + fibonacci(n - 2)
+"""
+
+
+def write_source(tmp_path: Path, value: str) -> Path:
+    path = tmp_path / "app.py"
+    path.write_text(value, encoding="utf-8")
+    return path
+
+
+def test_lowers_fibonacci_to_source_spanned_ir(tmp_path: Path) -> None:
+    ir = analyze_path(write_source(tmp_path, FIBONACCI), "demo")
+
+    assert ir.module_name == "demo"
+    assert len(ir.functions) == 1
+    function = ir.functions[0]
+    assert function.name == "fibonacci"
+    assert function.parameters[0].name == "n"
+    assert isinstance(function.body[0], IfIR)
+    assert isinstance(function.body[1], ReturnIR)
+    expression = function.body[1].value
+    assert isinstance(expression, BinaryIR)
+    assert isinstance(expression.left, CallIR)
+    assert expression.left.target == "fibonacci"
+    assert function.span.line == 4
+
+
+def test_rejects_unsupported_construct_at_python_source(tmp_path: Path) -> None:
+    path = write_source(
+        tmp_path,
+        """\
+from crabwalk import rust
+
+@rust.fn
+def bad(n: rust.u64) -> rust.u64:
+    values = [n]
+    return n
+""",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(path)
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB102"
+    assert diagnostic.span is not None
+    assert diagnostic.span.line == 5
+    assert "List" in diagnostic.message
+
+
+def test_requires_return_on_all_paths(tmp_path: Path) -> None:
+    path = write_source(
+        tmp_path,
+        """\
+from crabwalk import rust
+
+@rust.fn
+def bad(n: rust.u64) -> rust.u64:
+    if n <= 1:
+        return n
+""",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(path)
+
+    assert captured.value.diagnostics[0].code == "CRAB109"

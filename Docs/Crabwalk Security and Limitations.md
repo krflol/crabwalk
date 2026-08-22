@@ -1,0 +1,99 @@
+---
+type: reference
+project: Crabwalk
+status: implemented
+updated: 2026-08-21
+tags:
+  - project/crabwalk
+  - docs/security
+---
+
+# Crabwalk Security and Limitations
+
+## Trust boundary
+
+Crabwalk's Python frontend is static: analyzing a package does not import it,
+execute `__init__.py`, evaluate annotations, or call runtime crate objects.
+Compilation is different. Cargo dependencies, build scripts, procedural macros,
+rustc wrappers, linkers, and configured external tools can execute code with the
+developer's permissions. Crabwalk does not sandbox them.
+
+Treat building an untrusted Crabwalk project exactly like building an untrusted
+Rust project:
+
+- review `rust.crate` declarations, lock changes, path dependencies, Git revisions,
+  build scripts, and proc macros;
+- prefer `--locked`; use `--offline` only after the required registry/git content is
+  prepared and trusted;
+- isolate CI builds with least-privilege credentials and filesystem/network policy;
+- do not expose broad Cargo credentials to projects that do not need them;
+- inspect generated `Cargo.toml`, `Cargo.lock`, and the exact command with
+  `crabwalk inspect`/`expand`.
+
+External diagnostics are stripped of terminal control sequences, bounded in
+length, and redact URL credentials, common secret query parameters, and values of
+secret-like environment variables. This reduces accidental disclosure; it is not
+a proof that arbitrary third-party build output contains no sensitive derived data.
+
+## Native safety boundary
+
+Generated user code uses safe Rust by default. The Rust Book teaching surface adds
+several explicit, reviewed unsafe operations: raw reads/writes of named Copy locals,
+a bounds-checked split-slice demonstration, C `abs`, and a mutable-static example.
+Their generated `unsafe` blocks are inspectable and deliberately do not form a
+general raw-Rust or arbitrary-FFI escape hatch. PyO3 wrappers:
+
+- range/type check exported values in Python before native entry;
+- contain Rust panics with `catch_unwind` and raise `CrabwalkPanicError`;
+- translate exported `Result::Err` into `CrabwalkRustError`;
+- enforce Rust-backed move and borrow state before taking native references;
+- release the GIL only for native-only primitive signatures;
+- keep/reacquire the GIL when the effect graph reaches Python.
+
+Safe generated Rust does not eliminate ABI, compiler, dependency, or handwritten
+runtime bugs. The native test matrix remains a release requirement.
+
+## Installed artifacts
+
+Development artifacts are content addressed, manifest bound, hash verified, locked,
+and atomically published. Prebuilt wheel artifacts additionally bind the Python
+source hash and package identity. Artifact paths are resolved inside the installed
+package before loading. Wheel construction rejects package symlinks to avoid
+pulling data from outside the package tree.
+
+No signature or publisher attestation is currently provided. SHA-256 detects
+accidental/stale corruption and local mismatch; it does not establish who produced
+a malicious wheel. Use the normal Python index/signing/provenance controls for
+distribution.
+
+## Current limitations
+
+- CPython only; interpreter-specific wheels; free-threaded CPython is not advertised.
+- Regular packages only; namespace packages and multiple configured top-level
+  packages in one distribution are not supported.
+- No general Python calls, objects, reflection, exceptions-as-control-flow,
+  generators, or dynamic imports inside `@rust.fn`. Closures are accepted only in
+  statically typed iterator/thread/async/pool positions.
+- No defaults, keyword calls, variadics, arbitrary crate reflection, inline Rust,
+  arbitrary macros, raw address dereference, unions, user-authored unsafe traits, or
+  general FFI declarations. Methods, generics, object-safe traits, focused Add/UFCS,
+  and narrow unsafe intrinsics are supported as documented.
+- No implicit complex/container graph conversion.
+- Owned/borrowed values cannot be returned or transferred through `async_call`.
+- Nested domain values are supported in native enum payloads, but their consuming
+  Python constructors/getters are not yet exposed.
+- Native `@rust.async_fn` uses a small std-only teaching executor, not Tokio.
+  `rust.async_call` remains a separate Python executor bridge; cancellation does not
+  stop Rust work already running.
+- Rayon is currently exposed through `Vec.par_iter()` when the package explicitly
+  declares Rayon; broader `Send`/`Sync` wrapper transfer is not exposed.
+- `TcpListener`, `TcpStream`, and `ThreadPool` provide a bounded loopback teaching
+  slice, not a production server, TLS stack, general HTTP parser, or persistent
+  externally controlled background service.
+- The wheel command is a focused mixed-wheel builder, not a general metadata-aware
+  PEP 517 backend.
+- Cross-platform CI must pass before a release is promoted; local evidence alone is
+  not a portability claim.
+
+Rejected behavior is intentional. A source form is not supported merely because
+rustc could theoretically compile a related Rust expression.

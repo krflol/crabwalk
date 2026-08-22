@@ -1,0 +1,307 @@
+"""Execute the completed Rust Book chapter adaptations as one native crate.
+
+Run from the repository's ``examples`` directory with::
+
+    python -m th_rust_book.run_all
+
+The assertions live in ordinary Python on purpose.  Every imported ``@rust.fn``
+body is compiled together into one Rust extension, while this small host program
+checks the values crossing the Python/Rust boundary.
+"""
+
+from crabwalk import CrabwalkPanicError, CrabwalkRustError, rust
+
+from .ch01_getting_started import hello_world
+from .ch02_guessing_game import compare_guess, secret_from_seed
+from .ch03_common_concepts import (
+    binding_rules,
+    compound_types,
+    countdown_sum,
+    is_crab,
+    sum_odd_below,
+)
+from .ch04_ownership import (
+    append_value,
+    consume_vector,
+    first_word_length,
+    vector_length,
+)
+from .ch05_structs import Rectangle, can_hold, rectangle_area, square_area
+from .ch06_enums import Message, message_weight, optional_or
+from .ch07_modules import area_through_module
+from .ch08_collections import (
+    blue_team_score,
+    greeting,
+    normalize_greeting,
+    vector_total,
+)
+from .ch09_error_handling import (
+    expect_nonzero,
+    increment_nonzero,
+    panic_on_zero,
+    require_nonzero,
+)
+from .ch10_generics_traits_lifetimes import (
+    largest_character,
+    largest_number,
+    longest_owned,
+)
+from .ch11_automated_tests import (
+    add_two,
+    can_hold_dimensions,
+    greeting as test_greeting,
+)
+from .ch12_minigrep import search, search_case_insensitive, validate_argument_count
+from .ch13_closures_iterators import matching_line_count, shifted_sum, transformed
+from .ch14_cargo import contains_number
+from .ch15_smart_pointers import boxed_value, interior_mutation, rc_counts
+from .ch16_concurrency import channel_value, moved_vector_length, shared_counter
+from .ch17_async_await import (
+    run_async_channel,
+    run_async_pipeline,
+    run_concurrent_sum,
+    run_race,
+    run_stream_sequence,
+)
+from .ch18_object_oriented import (
+    averaged_collection_demo,
+    publish_post,
+    screen_draw_total,
+)
+from .ch19_patterns import (
+    captured_id,
+    character_band,
+    destructured_parameter_total,
+    guarded_option,
+    ignored_parts_total,
+    literal_or_range,
+    mixed_destructure,
+    nested_color_total,
+    option_or_else,
+    or_pattern_guard,
+    point_region,
+    point_x_only,
+    setting_can_change,
+    tuple_binding_total,
+    tuple_ends,
+    tuple_loop_total,
+    while_some_total,
+)
+from .ch20_advanced_features import (
+    associated_item_demo,
+    display_bound_demo,
+    dynamically_sized_string_length,
+    ffi_absolute,
+    function_pointer_demo,
+    heterogeneous_closure_demo,
+    macro_vector_total,
+    metric_operator_demo,
+    never_coercion_demo,
+    point_operator_demo,
+    raw_pointer_demo,
+    returned_closure_demo,
+    trait_disambiguation_demo,
+    type_alias_demo,
+    unsafe_split_total,
+    unsafe_static_counter,
+)
+from .ch21_web_server import (
+    http_round_trip,
+    thread_pool_job_total,
+    validated_pool_size,
+)
+
+
+def main() -> None:
+    """Assert the observable contract of every completed Book example family."""
+
+    hello_world()
+
+    assert compare_guess(10, 20) == -1
+    assert compare_guess(20, 10) == 1
+    assert compare_guess(10, 10) == 0
+    assert secret_from_seed(0) == 1
+    assert secret_from_seed(99) == 100
+
+    assert binding_rules() == 10_806
+    assert compound_types() == 515
+    assert is_crab("🦀") is True
+    assert is_crab("x") is False
+    assert sum_odd_below(10) == 25
+    assert countdown_sum(5) == 15
+
+    values = rust.Vec[rust.u64]([1, 2, 3])
+    assert vector_length(values) == 3
+    append_value(values, 4)
+    assert values.to_python() == [1, 2, 3, 4]
+    assert first_word_length("hello rust book") == 5
+    assert consume_vector(values) == 4
+    assert values.moved is True
+
+    outer = Rectangle(width=30, height=50)
+    inner = Rectangle(width=10, height=40)
+    assert rectangle_area(outer) == 1_500
+    assert can_hold(outer, inner) is True
+    assert square_area(12) == 144
+    assert area_through_module(outer) == 1_500
+
+    quit_message = Message.Quit()
+    move_message = Message.Move(x=3, y=4)
+    write_message = Message.Write("hello")
+    color_message = Message.ChangeColor(10, 20, 30)
+    assert message_weight(quit_message) == 0
+    assert message_weight(move_message) == 7
+    assert message_weight(write_message) == 1
+    assert message_weight(color_message) == 60
+    assert write_message.to_python() == {"variant": "Write", "_0": "hello"}
+    assert color_message.to_python() == {
+        "variant": "ChangeColor",
+        "_0": 10,
+        "_1": 20,
+        "_2": 30,
+    }
+    assert optional_or(None, 9) == 9
+    assert optional_or(7, 9) == 7
+
+    assert vector_total() == 15
+    assert greeting("Ferris") == "Hello, Ferris"
+    assert normalize_greeting("hello world") == "hello Rust"
+    assert normalize_greeting("hello Crabwalk") == "hello Crabwalk"
+    assert blue_team_score() == 25
+
+    assert require_nonzero(5) == 5
+    assert increment_nonzero(5) == 6
+    assert panic_on_zero(8) == 8
+    assert expect_nonzero(8) == 8
+
+    for operation in (lambda: require_nonzero(0), lambda: increment_nonzero(0)):
+        try:
+            operation()
+        except CrabwalkRustError:
+            pass
+        else:  # pragma: no cover - this is a failure message for manual runs
+            raise AssertionError("an Err value must cross as CrabwalkRustError")
+
+    for operation in (lambda: panic_on_zero(0), lambda: expect_nonzero(0)):
+        try:
+            operation()
+        except CrabwalkPanicError:
+            pass
+        else:  # pragma: no cover - this is a failure message for manual runs
+            raise AssertionError("a Rust panic must cross as CrabwalkPanicError")
+
+    assert largest_number() == 100
+    assert largest_character() == "y"
+    assert longest_owned("abcd", "xyz") == "abcd"
+
+    assert add_two(2) == 4
+    assert can_hold_dimensions(8, 7, 5, 1) is True
+    assert test_greeting("Carol") == "Hello Carol"
+
+    poem = "Rust:\nsafe, fast, productive.\nPick three.\nTrust me."
+    assert search("duct", poem) == ["safe, fast, productive."]
+    assert search_case_insensitive("rUsT", poem) == ["Rust:", "Trust me."]
+    assert validate_argument_count(3) == 3
+    try:
+        validate_argument_count(2)
+    except CrabwalkRustError:
+        pass
+    else:  # pragma: no cover - this is a failure message for manual runs
+        raise AssertionError("invalid minigrep arguments must return Err")
+
+    assert transformed(4, 2) == [4, 5, 6]
+    assert shifted_sum(3) == 15
+    assert matching_line_count("Rust", poem) == 1
+
+    assert contains_number("room 7") is True
+    assert contains_number("no digits") is False
+
+    assert boxed_value(42) == 42
+    assert rc_counts() == 21
+    assert interior_mutation() == 15
+
+    assert moved_vector_length() == 3
+    assert channel_value() == 42
+    assert shared_counter() == 1
+
+    assert run_async_pipeline(5) == 20
+    assert run_concurrent_sum() == 7
+    assert run_race() == 20
+    assert run_async_channel() == 30
+    assert run_stream_sequence() == 10
+
+    assert averaged_collection_demo() == 15.0
+    assert screen_draw_total() == 1_253
+    assert publish_post() == "I ate a salad for lunch today"
+
+    assert tuple_binding_total() == 6
+    assert tuple_loop_total() == 63
+    assert destructured_parameter_total((3, 5)) == 8
+    assert option_or_else(7, 99) == 7
+    assert option_or_else(None, 99) == 99
+    assert while_some_total() == 6
+    assert literal_or_range(1) == 10
+    assert literal_or_range(5) == 5
+    assert literal_or_range(9) == 0
+    assert character_band("a") == 1
+    assert character_band("d") == 2
+    assert character_band("z") == 0
+    assert point_region(0, 7) == 7
+    assert point_region(4, 4) == 8
+    assert point_region(3, 4) == 7
+    assert point_x_only(3, 5, 8) == 3
+    assert mixed_destructure() == 29
+    assert nested_color_total(120, 50, 75) == 245
+    assert ignored_parts_total() == 42
+    assert tuple_ends(2, 9) == 11
+    assert setting_can_change(1, 2) is False
+    assert setting_can_change(None, 2) is True
+    assert guarded_option(8, 8) == 8
+    assert guarded_option(4, 8) == 104
+    assert guarded_option(3, 8) == 3
+    assert guarded_option(None, 8) == 0
+    assert or_pattern_guard(4, False) is False
+    assert or_pattern_guard(5, True) is True
+    assert captured_id(5) == 5
+    assert captured_id(11) == 10
+    assert captured_id(20) == 120
+
+    assert raw_pointer_demo() == 59
+    assert unsafe_split_total() == 10
+    assert ffi_absolute(-42) == 42
+    assert unsafe_static_counter(2) == 2
+    assert associated_item_demo() == 9
+    assert point_operator_demo() == 46
+    assert metric_operator_demo() == 2_500
+    assert trait_disambiguation_demo() == 123
+    assert display_bound_demo() == 42
+    assert type_alias_demo(9) == 9
+    assert never_coercion_demo() == 4
+    assert dynamically_sized_string_length("sized pointer") == 13
+    assert function_pointer_demo(5) == 12
+    assert returned_closure_demo(5) == 8
+    assert heterogeneous_closure_demo(5) == 16
+    assert macro_vector_total() == 10
+
+    ok_response = http_round_trip("/")
+    missing_response = http_round_trip("/missing")
+    slow_response = http_round_trip("/sleep")
+    assert ok_response.startswith("HTTP/1.1 200 OK")
+    assert "Hi from Rust" in ok_response
+    assert missing_response.startswith("HTTP/1.1 404 NOT FOUND")
+    assert "Oops!" in missing_response
+    assert slow_response.startswith("HTTP/1.1 200 OK")
+    assert thread_pool_job_total() == 3
+    assert validated_pool_size(2) == 2
+    try:
+        validated_pool_size(0)
+    except CrabwalkPanicError:
+        pass
+    else:  # pragma: no cover - failure detail for a manual run
+        raise AssertionError("a zero-sized ThreadPool must panic")
+
+    print("Rust Book chapters 1-21: all native assertions passed")
+
+
+if __name__ == "__main__":
+    main()

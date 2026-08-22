@@ -1,5 +1,8 @@
 # Crabwalk
 
+> [!info] Implementation planning
+> Start at [[Crabwalk Project Hub]] for the scoped product contract, architecture plan, dependency-aware roadmap, verification gates, risks, and decision queue.
+
 ## Rust as a Python Semantic Layer
 
 **Status:** Guiding architecture / pre-design  
