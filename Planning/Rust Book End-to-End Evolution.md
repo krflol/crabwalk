@@ -151,7 +151,7 @@ On Windows x86-64 with CPython 3.11.8 and rustc/Cargo 1.97.0 on
 - Chapter 11 teaching suite: **5 passed in 3.70 seconds**.
 - The Chapters 1–21 native runner printed its all-assertions-passed marker.
 - Locked `crabwalk check` completed after the package rename and invariant
-  hardening with fingerprint `d18306c076685e41`.
+  hardening with fingerprint `9394c710f14a05e0`.
 - `ruff format` accepted all 108 Python files unchanged, `ruff check`, scoped mypy
   over 13 source modules, and `python -m compileall -q src tests examples` passed.
 - Expanded Rust was inspected for the generated `Add` implementations, UFCS

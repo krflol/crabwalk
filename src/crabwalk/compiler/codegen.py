@@ -67,7 +67,7 @@ from .ir import (
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
 PYO3_VERSION = "0.29.2"
-CODEGEN_SCHEMA_VERSION = 30
+CODEGEN_SCHEMA_VERSION = 31
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,7 +249,12 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
     return GeneratedProject(
         cargo_toml=cargo_toml,
         build_rs=(
-            "fn main() {\n    pyo3_build_config::add_extension_module_link_args();\n}\n"
+            f"// Crabwalk extension unit: {extension_name}\n"
+            'fn main() {\n    println!("cargo:rerun-if-changed=build.rs");\n'
+            "    // MSVC otherwise embeds wall-clock PE/PDB identity when Cargo relinks.\n"
+            '    #[cfg(all(target_os = "windows", target_env = "msvc"))]\n'
+            '    println!("cargo:rustc-link-arg=/Brepro");\n'
+            "    pyo3_build_config::add_extension_module_link_args();\n}\n"
         ),
         rust_source=writer.render(),
         source_map=source_map,

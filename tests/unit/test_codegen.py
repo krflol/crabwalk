@@ -21,5 +21,8 @@ def test_codegen_is_deterministic_and_native_recursion_is_direct(
     assert '#[pymodule(name = "_crabwalk_demo_abc")]' in first.rust_source
     assert 'features = ["extension-module"]' in first.cargo_toml
     assert 'pyo3-build-config = { version = "=0.29.2" }' in first.cargo_toml
+    assert "// Crabwalk extension unit: _crabwalk_demo_abc" in first.build_rs
+    assert 'println!("cargo:rerun-if-changed=build.rs");' in first.build_rs
+    assert 'println!("cargo:rustc-link-arg=/Brepro");' in first.build_rs
     assert "add_extension_module_link_args();" in first.build_rs
     assert first.source_map["entries"]

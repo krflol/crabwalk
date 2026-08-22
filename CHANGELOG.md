@@ -65,6 +65,9 @@ a release yet; the entries below describe the current `0.0.1` alpha candidate.
 - The bounded HTTP teaching server treats post-response socket shutdown as
   best-effort, avoiding macOS `ENOTCONN` panics after a client half-closes while
   retaining flush-and-drop connection cleanup.
+- The generated PyO3 linker build script watches only itself and requests
+  reproducible MSVC linking, preserving byte-identical Windows DLLs when Cargo
+  relinks while switching generated modules in a shared target directory.
 
 ### Security
 
