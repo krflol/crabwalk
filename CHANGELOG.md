@@ -62,6 +62,9 @@ a release yet; the entries below describe the current `0.0.1` alpha candidate.
   `pyo3-build-config` linker setup so macOS leaves Python ABI symbols for the
   interpreter to resolve; wheel smoke builds use isolated backend requirements
   consistently across the advertised Python matrix.
+- The bounded HTTP teaching server treats post-response socket shutdown as
+  best-effort, avoiding macOS `ENOTCONN` panics after a client half-closes while
+  retaining flush-and-drop connection cleanup.
 
 ### Security
 

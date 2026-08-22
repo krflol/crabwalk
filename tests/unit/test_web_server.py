@@ -50,6 +50,8 @@ def test_tcp_and_thread_pool_lower_to_standard_library_rust(tmp_path: Path) -> N
     assert "std::net::TcpStream::connect" in rust_source
     assert "std::io::Read::read_to_string" in rust_source
     assert "std::io::Write::write_all" in rust_source
+    assert "let _ = __cw_stream.shutdown(std::net::Shutdown::Both)" in rust_source
+    assert "shutdown(std::net::Shutdown::Both).unwrap()" not in rust_source
     assert 'format!("GET {} HTTP/1.1' in rust_source
     assert "HTTP/1.1 404 NOT FOUND" in rust_source
     assert "type __CwJob = Box<dyn FnOnce() + Send + 'static>" in rust_source

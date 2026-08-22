@@ -67,7 +67,7 @@ from .ir import (
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
 PYO3_VERSION = "0.29.2"
-CODEGEN_SCHEMA_VERSION = 29
+CODEGEN_SCHEMA_VERSION = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -1775,7 +1775,7 @@ def _render_expression(
                     "std::io::Write::write_all(&mut __cw_stream, "
                     "__cw_response.as_bytes()).unwrap(); "
                     "std::io::Write::flush(&mut __cw_stream).unwrap(); "
-                    "__cw_stream.shutdown(std::net::Shutdown::Both).unwrap(); "
+                    "let _ = __cw_stream.shutdown(std::net::Shutdown::Both); "
                     "__cw_code }"
                 )
         if expression.receiver.type_ref.rust_name == "TcpStream":

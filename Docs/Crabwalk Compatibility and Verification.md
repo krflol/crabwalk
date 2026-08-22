@@ -105,7 +105,7 @@ x86-64 with rustc/Cargo 1.97.0:
   Chapter 11 teaching tests passed in **3.70 seconds**;
 - the single native Rust Book package passed its Chapter 1–21 assertions;
 - locked checking of `examples/the_rust_book` passed with fingerprint
-  `5bf5754a70fca4c2`;
+  `d18306c076685e41`;
 - dispatch/placement, semantic receiver/place, generated-namespace, mandatory-lock,
   repaired-cache-age, and parent-initializer-cycle regressions passed, including a
   real native `abs`/`String`/`pyo3` collision smoke;
