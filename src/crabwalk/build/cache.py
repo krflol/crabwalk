@@ -271,6 +271,7 @@ def _prune_artifact_cache_locked(
         return CachePruneResult((), 0, 0, 0, dry_run)
 
     entries: list[tuple[Path, int, float]] = []
+    discovered_entries = 0
     for candidate in root.iterdir():
         if not re.fullmatch(r"[0-9a-f]{64}", candidate.name):
             continue
@@ -280,7 +281,18 @@ def _prune_artifact_cache_locked(
             continue
         if resolved.parent != root or not resolved.is_dir():
             continue
-        size, last_used = _entry_size_and_mtime(resolved)
+        discovered_entries += 1
+        try:
+            with FileLock(
+                state_root / "locks" / f"{resolved.name}.lock",
+                timeout=0.0,
+            ):
+                size, last_used = _entry_size_and_mtime(resolved)
+        except (FileNotFoundError, PermissionError, TimeoutError):
+            # Inventory reads must obey the same entry lock as publication.
+            # In particular, opening .last-access for reading can prevent an
+            # atomic replacement in another process on Windows.
+            continue
         entries.append((resolved, size, last_used))
 
     now = time.time()
@@ -338,7 +350,7 @@ def _prune_artifact_cache_locked(
             removed_sizes[path] = current[0]
         removed = tuple(actual)
     reclaimed = sum(removed_sizes[path] for path in removed)
-    remaining_entries = len(entries) - len(removed)
+    remaining_entries = discovered_entries - len(removed)
     remaining_size = sum(size for _, size, _ in entries) - reclaimed
     return CachePruneResult(
         removed=removed,

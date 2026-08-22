@@ -80,6 +80,37 @@ def test_pruning_skips_a_busy_fingerprint_and_uses_last_access(tmp_path: Path) -
     assert after_release.removed == (busy,)
 
 
+def test_pruning_does_not_inventory_a_busy_fingerprint(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    state = tmp_path / ".crabwalk"
+    busy = _entry(state, "7", 10, 500)
+    original = cache_module._entry_size_and_mtime
+
+    def reject_busy_metadata_read(path: Path) -> tuple[int, float]:
+        if path == busy:
+            raise AssertionError("busy cache metadata was read without its lock")
+        return original(path)
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        cache_module,
+        "_entry_size_and_mtime",
+        reject_busy_metadata_read,
+    )
+
+    with FileLock(state / "locks" / f"{'7' * 64}.lock"):
+        outcome = prune_artifact_cache(
+            state,
+            max_bytes=0,
+            max_age_seconds=None,
+        )
+
+    assert outcome.removed == ()
+    assert outcome.entries_remaining == 1
+    assert busy.is_dir()
+
+
 def test_pruning_revalidates_selection_after_taking_entry_lock(
     tmp_path: Path,
     monkeypatch: object,
