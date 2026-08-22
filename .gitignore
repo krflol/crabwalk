@@ -8,6 +8,8 @@ htmlcov/
 *.egg-info/
 /build/
 /dist/
+/Planning/
+/planning/
 
 # Crabwalk specific
 .crabwalk/
