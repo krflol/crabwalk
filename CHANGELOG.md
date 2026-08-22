@@ -84,6 +84,8 @@ No changes yet.
 ### Migration notes
 
 This is the first public release and has no prior stable release to migrate from.
+The PyPI distribution is named `crabwalk-lang`; its import package and CLI remain
+`crabwalk`.
 Generated artifacts, IR, source maps, cache manifests, and embedded-wheel manifests
 are versioned internal protocols and may change between releases. Applications
 should commit `crabwalk-locks/` but not `.crabwalk/`.

@@ -14,7 +14,7 @@ tags:
 
 | Item | Current location or value |
 |---|---|
-| Package metadata/version | `pyproject.toml`; `crabwalk 1.0.0` |
+| Package metadata/version | `pyproject.toml`; `crabwalk-lang 1.0.0`; import package `crabwalk` |
 | Project license | `Apache-2.0`; canonical text in `LICENSE` |
 | Governance and security | `GOVERNANCE.md`, `SECURITY.md` |
 | Cross-platform hardening evidence | GitHub Actions run `32594114165`; nine jobs passed |
@@ -40,8 +40,8 @@ license inventory must be generated from the release's Python and Cargo locks.
 
 ## Release outputs
 
-- `crabwalk-1.0.0.tar.gz` Python source distribution.
-- `crabwalk-1.0.0-py3-none-any.whl` Python runtime wheel.
+- `crabwalk_lang-1.0.0.tar.gz` Python source distribution.
+- `crabwalk_lang-1.0.0-py3-none-any.whl` Python runtime wheel.
 - `SHA256SUMS` covering every GitHub release artifact.
 - Clean-install metadata/CLI/import smoke results for both distribution formats.
 - Exact source commit, `v1.0.0` tag, workflow run, schema versions, and build

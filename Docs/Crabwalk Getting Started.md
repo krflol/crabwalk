@@ -19,9 +19,12 @@ artifact and do not invoke Cargo.
 ## Install
 
 ```powershell
-python -m pip install crabwalk
+python -m pip install crabwalk-lang
 crabwalk doctor
 ```
+
+The PyPI distribution is named `crabwalk-lang`; Python imports and the CLI remain
+`crabwalk`.
 
 For an editable source checkout:
 

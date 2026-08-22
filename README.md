@@ -1,8 +1,8 @@
 # Crabwalk
 
 [![CI](https://github.com/krflol/crabwalk/actions/workflows/ci.yml/badge.svg)](https://github.com/krflol/crabwalk/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/crabwalk.svg)](https://pypi.org/project/crabwalk/)
-[![Python](https://img.shields.io/pypi/pyversions/crabwalk.svg)](https://pypi.org/project/crabwalk/)
+[![PyPI](https://img.shields.io/pypi/v/crabwalk-lang.svg)](https://pypi.org/project/crabwalk-lang/)
+[![Python](https://img.shields.io/pypi/pyversions/crabwalk-lang.svg)](https://pypi.org/project/crabwalk-lang/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/krflol/crabwalk/blob/main/LICENSE)
 
 **Python outside. Rust inside.**
@@ -114,9 +114,12 @@ Consumers installing a Crabwalk-built application wheel do not need Rust or
 Cargo. Install Crabwalk and run the readiness probe before developing from source:
 
 ```text
-python -m pip install crabwalk
+python -m pip install crabwalk-lang
 crabwalk doctor
 ```
+
+The distribution is named `crabwalk-lang`; the import package and command remain
+`crabwalk`.
 
 For an editable checkout, replace the install command with
 `python -m pip install -e .`.
