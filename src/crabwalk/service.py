@@ -393,6 +393,7 @@ class CompilationService:
                 return
             generated = generate_project(ir, "_crabwalk_lock_bootstrap")
             write_text(bootstrap_dir / "Cargo.toml", generated.cargo_toml)
+            write_text(bootstrap_dir / "build.rs", generated.build_rs)
             write_text(bootstrap_dir / "src" / "lib.rs", generated.rust_source)
             try:
                 self.cargo.generate_lockfile(bootstrap_dir, offline=offline)
@@ -472,6 +473,7 @@ def _write_generated(
     fingerprint: str,
 ) -> None:
     write_text(directory / "Cargo.toml", generated.cargo_toml)
+    write_text(directory / "build.rs", generated.build_rs)
     write_text(directory / "src" / "lib.rs", generated.rust_source)
     write_text(directory / "crabwalk-ir.json", generated.ir_json)
     write_json(directory / "crabwalk-source-map.json", generated.source_map)

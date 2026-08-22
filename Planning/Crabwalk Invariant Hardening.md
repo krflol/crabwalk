@@ -222,7 +222,7 @@ back to Cargo from an installed mixed wheel.
 - [x] Full local suite on the final worktree: 124 tests in 812.82 seconds on
   Windows/CPython 3.11.
 - [x] Final focused unit pass: 89 tests in 8.62 seconds; Chapter 11 teaching pass:
-  5 tests in 3.70 seconds; locked Rust Book fingerprint: `407206a49c3e33f0`.
+  5 tests in 3.70 seconds; locked Rust Book fingerprint: `5bf5754a70fca4c2`.
 - [ ] Windows/Linux/macOS × CPython 3.11/3.14 native matrix.
 - [ ] CPython 3.12/3.13 unit lanes.
 - [ ] Miri or sanitizer harness for the focused unsafe helper crate.

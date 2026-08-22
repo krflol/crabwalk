@@ -20,4 +20,6 @@ def test_codegen_is_deterministic_and_native_recursion_is_direct(
     assert "#[pyfunction]" in first.rust_source
     assert '#[pymodule(name = "_crabwalk_demo_abc")]' in first.rust_source
     assert 'features = ["extension-module"]' in first.cargo_toml
+    assert 'pyo3-build-config = { version = "=0.29.2" }' in first.cargo_toml
+    assert "add_extension_module_link_args();" in first.build_rs
     assert first.source_map["entries"]

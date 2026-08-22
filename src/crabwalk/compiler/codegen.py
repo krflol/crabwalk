@@ -67,12 +67,13 @@ from .ir import (
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
 PYO3_VERSION = "0.29.2"
-CODEGEN_SCHEMA_VERSION = 28
+CODEGEN_SCHEMA_VERSION = 29
 
 
 @dataclass(frozen=True, slots=True)
 class GeneratedProject:
     cargo_toml: str
+    build_rs: str
     rust_source: str
     source_map: dict[str, object]
     ir_json: str
@@ -233,6 +234,8 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
         f'{PYO3_CARGO_ALIAS} = {{ package = "pyo3", version = "={PYO3_VERSION}", '
         'features = ["extension-module"] }\n'
         f"{dependencies}\n"
+        "[build-dependencies]\n"
+        f'pyo3-build-config = {{ version = "={PYO3_VERSION}" }}\n\n'
         "[profile.release]\n"
         "overflow-checks = true\n"
         'panic = "unwind"\n'
@@ -245,6 +248,9 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
     }
     return GeneratedProject(
         cargo_toml=cargo_toml,
+        build_rs=(
+            "fn main() {\n    pyo3_build_config::add_extension_module_link_args();\n}\n"
+        ),
         rust_source=writer.render(),
         source_map=source_map,
         ir_json=json.dumps(ir.to_dict(), indent=2, sort_keys=True) + "\n",
@@ -2010,6 +2016,12 @@ def cargo_dependency_specification(ir: PackageIR) -> dict[str, object]:
                 "package": "pyo3",
                 "version": f"={PYO3_VERSION}",
                 "features": ["extension-module"],
+            }
+        ],
+        "mandatory_build": [
+            {
+                "package": "pyo3-build-config",
+                "version": f"={PYO3_VERSION}",
             }
         ],
         "declared": [

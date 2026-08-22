@@ -16,6 +16,7 @@ name = "crabwalk-generated-module"
 version = "0.0.0"
 dependencies = [
  "pyo3",
+ "pyo3-build-config",
  "regex",
 ]
 

@@ -16,7 +16,7 @@ tags:
 |---|---|
 | Python | CPython 3.11–3.14; interpreter-specific extension ABI |
 | Rust | current stable toolchain; local evidence: rustc/Cargo 1.97.0 |
-| PyO3 | pinned to 0.29.2 with `extension-module` in generated Cargo manifests |
+| PyO3 | pinned to 0.29.2 with `extension-module` plus `pyo3-build-config` link setup |
 | OS | Windows, Linux, macOS are CI targets; Windows x86-64 is locally verified |
 | Profile | Cargo release profile with overflow checks enabled |
 | Package | regular Python package or standalone module for source use |
@@ -105,7 +105,7 @@ x86-64 with rustc/Cargo 1.97.0:
   Chapter 11 teaching tests passed in **3.70 seconds**;
 - the single native Rust Book package passed its Chapter 1–21 assertions;
 - locked checking of `examples/the_rust_book` passed with fingerprint
-  `407206a49c3e33f0`;
+  `5bf5754a70fca4c2`;
 - dispatch/placement, semantic receiver/place, generated-namespace, mandatory-lock,
   repaired-cache-age, and parent-initializer-cycle regressions passed, including a
   real native `abs`/`String`/`pyo3` collision smoke;

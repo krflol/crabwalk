@@ -46,7 +46,8 @@ The cache key includes:
 - CPython implementation/version/extension ABI;
 - project-resolved rustc/Cargo executable and toolchain-selector state;
 - the complete generated dependency specification, including the mandatory pinned
-  PyO3 package, `extension-module` feature, and internal alias;
+  PyO3 package, `extension-module` feature, macOS link-config build dependency,
+  and internal alias;
 - Cargo lock content and complete regular-file path-dependency trees;
 - release profile, overflow policy, and forced unwind panic strategy;
 - Cargo configuration content;
