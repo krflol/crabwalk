@@ -134,6 +134,14 @@ Cargo diagnostic.
 - `@rust.operator(Left, name="add")` emits `std::ops::Add<Rhs>` using the helper's
   second parameter as RHS and return annotation as associated Output.
 
+Receiver capability is checked before Rust emission. `Ref[T]` can satisfy shared
+and explicitly interior-mutable operations, `Mut[T]` can also satisfy `&mut self`,
+and `Owned[T]` can satisfy consuming operations. A mutable binding to `Ref[T]`
+never counts as a mutable reference. Places retain their root through field and
+index projections, so `bucket.items.push(value)` and mutable field reborrows mark
+the owned `bucket` root mutable while the same operation through a shared root is
+rejected as `CRAB208`.
+
 Nested domain enum payloads are currently native-only at Python construction and
 getter boundaries. Construct and inspect them inside compiled functions; direct
 Python constructors/getters are omitted until consuming conversion semantics are
@@ -203,12 +211,15 @@ local = rust.crate("native-core", path="./native", features=["fast"])
 pinned = rust.crate("remote-core", git="https://example.test/repo.git", rev="abc123")
 ```
 
-Relative paths resolve from the declaring source file. The Python binding becomes
-the Cargo dependency alias, so it may differ from the package name. Dynamic
-versions, paths, revisions, and feature lists are rejected by the frontend. Cargo
-then validates package resolution and the called API; a resolution failure is
-reported as `CRAB302` at the declaration, while rustc API failures are mapped to
-the originating call.
+Relative paths resolve from the declaring source file. The Python binding is source
+identity only: generated Rust gives it a component-injective internal alias, while
+Cargo keeps the canonical package crate key when possible so procedural macros can
+resolve their package correctly. Mandatory PyO3 uses a separate internal Cargo key
+and cannot collide with a user binding named `pyo3`. Dynamic versions, paths,
+revisions, and feature lists are rejected by the frontend. Cargo then validates
+package resolution and the called API; a resolution failure is reported as
+`CRAB302` at the declaration, while rustc API failures are mapped to the originating
+call.
 
 ## Python and native effects
 
@@ -223,19 +234,35 @@ Every `FunctionIR` stores one or more typed effects:
 
 The initial Python operation is `print(value)` for ABI-convertible scalar/string
 values. `rust.println(value)` remains native. The Python effect propagates through
-native callers. Wrapper policy consumes the typed effects: Python runtime, global
-mutation, unsafe memory, and unsafe FFI prevent GIL detachment even when the
-signature itself contains only primitives.
+ordinary calls, inherent methods, concrete and dynamic trait dispatch, custom
+operators, and function-pointer targets. Wrapper policy consumes the typed effects:
+Python runtime, global mutation, unsafe memory, and unsafe FFI prevent GIL
+detachment even when the signature itself contains only primitives.
 
 Before code generation, an IR validation pass checks effect consistency and rejects
-a Rust worker closure that directly or transitively reaches Python runtime state.
+a Rust worker closure that directly or transitively reaches Python runtime state
+(`CRAB206`). It also rejects a Python-runtime effect in methods/trait or operator
+implementations, native async helpers, iterator closures, and function-pointer
+targets (`CRAB207`) until those generated contexts have a result-aware boundary
+lowering.
 
 ## Package import policy
 
 Regular packages compile as one crate with explicit supported imports and
 re-exports. The alpha compiler rejects internal import cycles (`CRAB204`) and
 `import *` (`CRAB205`) rather than copying partially initialized bindings or
-approximating Python's `__all__` and private-name rules.
+approximating Python's `__all__` and private-name rules. Cycle analysis includes
+the referenced module, selected child module, and every parent-package initializer
+that Python must execute.
+
+## Generated identifier contract
+
+Python-visible declaration names remain unchanged, but Rust internals use an
+injective encoding of module-path components and declaration names. Domain types,
+native helpers, ABI exports, ownership pyclasses, crate bindings, mandatory runtime
+items, method glue, and the C FFI helper are kept collision-free. A pre-codegen
+table rejects any duplicate emitted value, type, method, dependency, or crate
+binding as `CRAB209` with the relevant source declaration.
 
 ## Async and parallel distinction
 

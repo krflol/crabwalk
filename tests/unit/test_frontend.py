@@ -37,7 +37,7 @@ def test_lowers_fibonacci_to_source_spanned_ir(tmp_path: Path) -> None:
     expression = function.body[1].value
     assert isinstance(expression, BinaryIR)
     assert isinstance(expression.left, CallIR)
-    assert expression.left.target == "fibonacci"
+    assert expression.left.target == function.rust_symbol
     assert function.span.line == 4
 
 

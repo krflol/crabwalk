@@ -6,6 +6,7 @@ from crabwalk import rust
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_path
 from crabwalk.compiler.ir import BorrowIR, CallIR, ExpressionStatementIR, ReturnIR
+from crabwalk.compiler.naming import owned_class_names
 from crabwalk.diagnostics import CrabwalkCompilationError
 
 
@@ -53,17 +54,27 @@ def test_ownership_lowers_to_real_rust_signatures_and_reborrows(
     ir = analyze_path(path, "ownership")
     generated = generate_project(ir, "_crabwalk_ownership_test")
 
-    assert "fn __cw_native_total(values: &Vec<u64>) -> usize" in generated.rust_source
+    symbols = {function.name: function.rust_symbol for function in ir.functions}
     assert (
-        "fn __cw_native_append(mut values: &mut Vec<u64>, value: u64) -> ()"
+        f"fn __cw_native_{symbols['total']}(values: &Vec<u64>) -> usize"
         in generated.rust_source
     )
-    assert "fn __cw_native_consume(values: Vec<u64>) -> usize" in generated.rust_source
     assert (
-        "fn __cw_native_append_then_consume(mut values: Vec<u64>, value: u64)"
+        f"fn __cw_native_{symbols['append']}(mut values: &mut Vec<u64>, value: u64) -> ()"
         in generated.rust_source
     )
-    assert '#[pyclass(name = "_Crabwalk_Vec_u64")]' in generated.rust_source
+    assert (
+        f"fn __cw_native_{symbols['consume']}(values: Vec<u64>) -> usize"
+        in generated.rust_source
+    )
+    assert (
+        f"fn __cw_native_{symbols['append_then_consume']}(mut values: Vec<u64>, value: u64)"
+        in generated.rust_source
+    )
+    python_class, _ = owned_class_names(
+        ir.functions[0].parameters[0].type_ref.underlying
+    )
+    assert f'#[pyclass(name = "{python_class}")]' in generated.rust_source
     assert "value: Option<Vec<u64>>" in generated.rust_source
     assert "values.value.take()" in generated.rust_source
     assert "values.value.as_ref()" in generated.rust_source

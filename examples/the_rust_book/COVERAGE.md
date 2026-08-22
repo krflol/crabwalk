@@ -67,7 +67,8 @@ Rust Book chapters 1-21: all native assertions passed
 ```
 
 The 2026-08-22 invariant-hardening checkpoint on Windows/CPython 3.11 passed all
-101 repository tests in 687.20 seconds, all 67 focused unit tests, the 5 Chapter 11
-teaching tests, the package runner, unsafe subprocess cases, cache/load-lease
-stress, and the clean wheel consumer. Cross-platform release-matrix evidence
-remains a separate release gate.
+124 repository tests in 812.82 seconds, all 89 focused unit tests, the 5 Chapter 11
+teaching tests, the package runner, unsafe subprocess cases, dispatch/receiver/name
+interaction cases, cache/load-lease stress, and the clean wheel consumer. Its
+strict locked check fingerprint was `407206a49c3e33f0`. Cross-platform
+release-matrix evidence remains a separate release gate.

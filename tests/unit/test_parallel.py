@@ -32,8 +32,10 @@ def parallel_sum(stop: rust.u64) -> rust.u64:
     )
     ir = analyze_path(source)
     generated = generate_project(ir, "_crabwalk_parallel_test")
+    binding = ir.crates[0].binding
     assert 'rayon = { version = "1" }' in generated.cargo_toml
-    assert "use rayon::prelude::*;" in generated.rust_source
+    assert f"extern crate rayon as {binding};" in generated.rust_source
+    assert f"use {binding}::prelude::*;" in generated.rust_source
     assert ".par_iter().copied().sum()" in generated.rust_source
 
     missing = tmp_path / "missing_rayon.py"

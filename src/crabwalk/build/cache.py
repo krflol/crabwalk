@@ -94,6 +94,11 @@ class FileLock:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        self.release()
+
+    def release(self) -> None:
+        """Release an acquired lock; repeated calls are harmless."""
+
         handle = self._handle
         if handle is None:
             return
@@ -341,16 +346,25 @@ def _prune_artifact_cache_locked(
 
 def _entry_size_and_mtime(path: Path) -> tuple[int, float]:
     size = 0
-    last_used = 0.0
+    content_mtime = 0.0
     for candidate in path.rglob("*"):
         if candidate.is_symlink() or not candidate.is_file():
             continue
         stat = candidate.stat()
         size += stat.st_size
-        last_used = max(last_used, stat.st_mtime)
+        if candidate.name != ".last-access":
+            content_mtime = max(content_mtime, stat.st_mtime)
+    last_used = content_mtime
     access = path / ".last-access"
     if access.is_file():
-        last_used = access.stat().st_mtime
+        access_time = access.stat().st_mtime
+        try:
+            recorded_ns = int(access.read_text(encoding="utf-8").strip())
+        except (OSError, UnicodeError, ValueError):
+            pass
+        else:
+            access_time = max(access_time, recorded_ns / 1_000_000_000)
+        last_used = max(last_used, access_time)
     elif last_used == 0.0:
         last_used = path.stat().st_mtime
     return size, last_used

@@ -15,6 +15,12 @@ source project, records a cold Cargo build and unchanged second-process cache hi
 then measures primitive call overhead, a native loop against Python's equivalent,
 and explicit `Vec[u64]` conversion in both directions.
 
+> [!warning] Baseline refresh required
+> The mandatory-PyO3 lock hardening now invokes Cargo to validate every external
+> artifact hit. The historical warm sample below predates that policy and must be
+> recaptured before any cache-hit budget is enabled. A valid hit must still avoid
+> relinking and republishing the native artifact.
+
 ```powershell
 python benchmarks/run_baseline.py > baseline.json
 ```

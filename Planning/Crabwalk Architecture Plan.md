@@ -103,7 +103,7 @@ Moving parsing-adjacent analysis, IR validation, or code generation into Rust is
 | Declaration discovery | AST | rust.fn declarations, imports, crate declarations, supported constants | Execute declarations |
 | Symbol resolution | Declarations and package graph | Stable SymbolId table and resolved paths | Guess dynamic Python behavior |
 | Semantic lowering | Resolved AST | Source-spanned PackageIR | Emit Rust strings directly |
-| Validation/effects | PackageIR | Validated IR plus Native/Conversion/Python/Unsupported effects | Accept an unsupported node for convenience |
+| Validation/effects | PackageIR | Validated IR plus typed native/boundary/safety effects and placement invariants | Accept an unsupported node for convenience |
 | Code generation | Validated IR | Rust files, Cargo inputs, generated-range map | Lose source identity |
 | Build | Generated unit and controlled build config | Artifact, Cargo/rustc messages, build manifest | Scrape human-only compiler output |
 | Load/bind | Artifact manifest and Python function identity | RustFunction callable/descriptor | Re-run source semantics in Python |
@@ -143,7 +143,7 @@ All identifiers are stable within one build fingerprint and serializable for sna
       parameters
       return_type
       basic_blocks or structured statements
-      call_edges
+      direct and dispatch call_edges
       effects
 
     PackageIR
@@ -180,6 +180,7 @@ Crabwalk resolves:
 - whether an operation belongs to the supported surface;
 - boundary conversion availability;
 - obvious arity and contextual-literal errors; and
+- semantic place roots plus shared/mutable/owned receiver capability; and
 - enough type information for useful code generation.
 
 rustc resolves:
@@ -210,7 +211,7 @@ Recommended discovery order:
 3. The nearest Python package root containing the importing module.
 4. Otherwise, fail with a project-discovery diagnostic rather than scanning an unbounded tree.
 
-The Python package graph is authoritative. Static analysis follows only imports necessary to resolve Crabwalk declarations and Rust symbols. It does not import modules and does not execute __init__.py.
+The Python package graph is authoritative. Static analysis follows only imports necessary to resolve Crabwalk declarations and Rust symbols. It does not import modules or execute `__init__.py`, but cycle analysis models every parent-package initializer Python would execute for a child import. Internal cycles and star imports are rejected for the alpha contract.
 
 ### Proposed configuration
 
@@ -314,9 +315,13 @@ The fingerprint suffix permits multiple builds to coexist in one Python process,
 
 ### Export naming
 
-Native exports receive collision-free internal names derived from module path plus Python qualified name:
-
-    myapp.codec.encode → _cw_myapp_codec_encode
+Native exports receive collision-free internal names derived injectively from
+module-path components plus the Python qualified name. Components are encoded
+independently rather than joined with a replaceable delimiter, so `a__b.value` and
+`a.b.value` cannot collide. Ownership wrappers use a structural type hash. Before
+emission, one table validates the generated value, type, method-glue, Cargo-key,
+and crate-binding namespaces. Runtime/FFI items and mandatory PyO3 have internal
+identities that user declarations cannot shadow.
 
 Python receives a RustFunction wrapper that preserves:
 
@@ -425,9 +430,11 @@ Use a schema-versioned canonical serialization and SHA-256. Include:
 - rustc and Cargo verbose version information;
 - host and target triples;
 - Python implementation, version, ABI flags, and extension suffix;
-- PyO3 version/features;
+- complete generated dependency specification, including mandatory PyO3 and its
+  internal alias;
 - build profile and controlled compiler/linker flags;
-- crate declarations, features, sources, and dependency lock content;
+- crate declarations, features, sources, and dependency lock content for every
+  compilation unit, including units with no user-declared crate;
 - source-map format version.
 
 Do not include timestamps. Absolute paths should be excluded unless they semantically affect path dependencies or compiler output.
@@ -436,7 +443,7 @@ Do not include timestamps. Absolute paths should be excluded unless they semanti
 
 | State | Behavior |
 |---|---|
-| Valid hit | Verify manifest and artifact hash, then load with zero Cargo processes. |
+| Valid hit | Verify manifest/artifact identity, then let Cargo validate the complete generated dependency graph without republishing unchanged bytes. |
 | Miss | Build in a unique staging directory and atomically publish the complete entry. |
 | Concurrent same-key build | One process builds; others wait on a scoped lock and then verify the published entry. |
 | Corrupt/incomplete entry | Quarantine or remove only that exact entry, then rebuild. |
@@ -459,6 +466,11 @@ Each exported function has two layers:
 - Convert all arguments before releasing Python runtime access.
 - Release the GIL for a Rust-only call when supported and safe; reacquire only at an explicit Python boundary.
 - A Python boundary is an effect in the function/call graph so wrappers know runtime access is required.
+- Method, trait, operator, and function-pointer dispatch carry exact or possible
+  target symbols so effects propagate through every accepted call form.
+- Reject Python-runtime effects before emission in generated contexts whose current
+  signatures cannot carry `PyResult`, including methods/operators, native async
+  helpers, iterator closures, function-pointer targets, and workers.
 - Never let a Rust panic cross the extension ABI. The exact PyO3 behavior is verified by an end-to-end panic test rather than assumed.
 - Conversion errors identify the Python parameter or return slot and expected Rust type.
 - Result::Err and ownership-state errors use dedicated Crabwalk Python exception classes.
@@ -490,8 +502,11 @@ This proves ecosystem participation without claiming Crabwalk understands every 
 - Parse only literal name/version/features/path/git/rev/tag/branch values.
 - Resolve relative path dependencies against a documented package root.
 - Generate Cargo.toml deterministically.
+- Keep canonical Cargo package keys where procedural macros require them, while
+  mapping Python source bindings to component-injective internal Rust aliases.
 - Surface the exact dependency declaration and Cargo resolution errors.
-- Preserve standard Cargo lock content in a stable, user-committable location decided before M4.
+- Preserve complete generated Cargo lock content, including mandatory PyO3, in a
+  stable user-committable location for every compilation unit.
 - Support locked and offline builds.
 - Warn that Cargo dependencies and build scripts are executable supply-chain inputs; Crabwalk does not sandbox them.
 
@@ -605,13 +620,18 @@ The architecture is healthy only if automated tests continuously prove:
 2. Unsupported syntax cannot reach code generation.
 3. Every user-derived generated range maps to a valid Python SourceSpan.
 4. Byte-identical inputs produce byte-identical generated output and fingerprints.
-5. A valid cache hit without user crates launches no Cargo process; a user-crate
-   hit lets Cargo validate inputs without needlessly relinking or republishing.
+5. Every valid cache hit lets Cargo validate the mandatory generated dependency
+   graph without needlessly relinking or republishing.
 6. Two changed fingerprints can load and execute in one Python process.
 7. Native-to-native calls do not acquire Python runtime access.
 8. A Python-boundary call is present in IR, generated helpers, and inspect output.
 9. A rustc error maps to the intended Python expression and keeps its Rust code.
 10. Cache corruption cannot load an unverified artifact.
+11. Every accepted dispatch edge participates in effect propagation and boundary
+    placement validation.
+12. Shared receivers cannot reach mutable/consuming methods, and generated emitted
+    identifiers are unique before Rust code generation.
+13. A Cargo lock update cannot publish an artifact under the previous lock hash.
 
 ## Primary implementation references
 

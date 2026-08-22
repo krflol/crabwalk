@@ -89,18 +89,26 @@ def test_async_helpers_lower_to_native_futures_and_std_executor(
     assert pipeline.exported is False
     assert wrapper.is_async is False
     assert wrapper.exported is True
+    functions = {function.name: function.rust_symbol for function in ir.functions}
     assert "impl std::task::Wake for __CwNoopWake" in generated.rust_source
     assert "fn __cw_block_on<F: std::future::Future>" in generated.rust_source
-    assert "async fn __cw_native_async_double(value: u64) -> u64" in (
+    assert f"async fn __cw_native_{functions['async_double']}(value: u64) -> u64" in (
         generated.rust_source
     )
-    assert "__cw_native_async_double(value).await" in generated.rust_source
-    assert "__cw_block_on(__cw_native_async_pipeline(value))" in (generated.rust_source)
-    assert "__cw_join2(__cw_native_yielded(3u64), __cw_native_yielded(4u64)).await" in (
+    assert (
+        f"__cw_native_{functions['async_double']}(value).await" in generated.rust_source
+    )
+    assert f"__cw_block_on(__cw_native_{functions['async_pipeline']}(value))" in (
         generated.rust_source
     )
-    assert "__cw_select2(__cw_native_delayed(10u64, 5u64), " in (generated.rust_source)
+    assert (
+        f"__cw_join2(__cw_native_{functions['yielded']}(3u64), "
+        f"__cw_native_{functions['yielded']}(4u64)).await"
+    ) in (generated.rust_source)
+    assert f"__cw_select2(__cw_native_{functions['delayed']}(10u64, 5u64), " in (
+        generated.rust_source
+    )
     assert "__cw_recv_async(&receiver).await" in generated.rust_source
     assert "return (values.0 + values.1);" in generated.rust_source
-    assert "wrap_pyfunction!(async_double" not in generated.rust_source
-    assert "wrap_pyfunction!(run_pipeline, m)" in generated.rust_source
+    assert f"wrap_pyfunction!({functions['async_double']}" not in generated.rust_source
+    assert f"wrap_pyfunction!({functions['run_pipeline']}, m)" in generated.rust_source

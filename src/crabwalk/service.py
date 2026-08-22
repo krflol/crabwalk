@@ -30,7 +30,11 @@ from crabwalk.build.cache import (
 from crabwalk.build.cargo import CargoBuildFailure, CargoBuilder
 from crabwalk.build.fingerprint import build_fingerprint
 from crabwalk.build.loader import load_extension
-from crabwalk.compiler.codegen import GeneratedProject, generate_project
+from crabwalk.compiler.codegen import (
+    GeneratedProject,
+    cargo_dependency_specification,
+    generate_project,
+)
 from crabwalk.compiler.frontend import analyze_project_path
 from crabwalk.config import discover_project_config
 from crabwalk.compiler.ir import PackageIR
@@ -142,7 +146,7 @@ class CompilationService:
         )
         dependency_lock = _dependency_lock_path(root, canonical_source_path)
         state_root = root / ".crabwalk"
-        if ir.crates and locked and not dependency_lock.is_file():
+        if locked and not dependency_lock.is_file():
             raise CrabwalkCompilationError(
                 Diagnostic(
                     "CRAB304",
@@ -152,7 +156,7 @@ class CompilationService:
                     "Run one unlocked build to resolve and persist Cargo.lock.",
                 )
             )
-        if ir.crates and not dependency_lock.is_file():
+        if not dependency_lock.is_file():
             report("Resolving Cargo dependencies")
             self._bootstrap_dependency_lock(
                 ir,
@@ -161,12 +165,10 @@ class CompilationService:
                 offline=offline,
             )
         dependency_lock_hash = (
-            sha256_file(dependency_lock)
-            if ir.crates and dependency_lock.is_file()
-            else None
+            sha256_file(dependency_lock) if dependency_lock.is_file() else None
         )
         report("Fingerprinting build inputs")
-        effective_locked = bool(ir.crates and locked)
+        effective_locked = locked
         fingerprint, inputs = build_fingerprint(
             ir,
             dependency_lock_hash,
@@ -184,6 +186,7 @@ class CompilationService:
         )
         target_dir = state_root / "target"
         lock_path = state_root / "locks" / f"{fingerprint}.lock"
+        dependency_guard_path = _dependency_unit_lock(state_root, dependency_lock)
         suffix = sysconfig.get_config_var("EXT_SUFFIX")
         if not suffix:
             suffix = ".pyd" if os.name == "nt" else ".so"
@@ -230,7 +233,25 @@ class CompilationService:
             )
 
         report("Waiting for the build lock")
-        with FileLock(lock_path):
+        with (
+            FileLock(dependency_guard_path) as dependency_guard,
+            FileLock(lock_path) as build_guard,
+        ):
+            if _lock_hash_changed(ir, dependency_lock, dependency_lock_hash):
+                # Release both locks before recursively planning the new graph.
+                build_guard.release()
+                dependency_guard.release()
+                report("Dependency lock changed; refreshing the build identity")
+                return self.compile_path(
+                    path,
+                    module_name=module_name,
+                    mode=mode,
+                    load=load,
+                    locked=locked,
+                    offline=offline,
+                    project=project,
+                    progress=progress,
+                )
             # Recheck after acquiring the cross-process lock. The first caller
             # remembers its loaded result before releasing this lock, keeping a
             # second thread from replacing a DLL already mapped by Windows.
@@ -248,7 +269,7 @@ class CompilationService:
                 suffix,
             )
             cache_hit = cache.status == "hit"
-            if ir.crates and dependency_lock.is_file():
+            if dependency_lock.is_file():
                 shutil.copy2(dependency_lock, generated_dir / "Cargo.lock")
             if mode == "check":
                 report("Checking generated Rust with Cargo")
@@ -272,86 +293,47 @@ class CompilationService:
                     raise _cargo_diagnostics(error, source_map, ir) from error
             elif mode == "build":
                 artifact = cache.artifact
-                cache_dir = artifact.parent
-                manifest_path = cache.manifest
-                validate_with_cargo = not cache_hit or bool(ir.crates)
-                if validate_with_cargo:
-                    report(
-                        "Validating Cargo inputs"
-                        if cache_hit
-                        else "Compiling the Rust extension"
+                report(
+                    "Validating Cargo inputs"
+                    if cache_hit
+                    else "Compiling the Rust extension"
+                )
+                try:
+                    outcome = self.cargo.run(
+                        generated_dir,
+                        target_dir,
+                        extension_name,
+                        "build",
+                        locked=effective_locked,
+                        offline=offline,
                     )
-                    try:
-                        outcome = self.cargo.run(
-                            generated_dir,
-                            target_dir,
-                            extension_name,
-                            "build",
-                            locked=effective_locked,
-                            offline=offline,
-                        )
-                        command = outcome.command
-                        _persist_dependency_lock(ir, generated_dir, dependency_lock)
-                        dependency_lock_changed = _lock_hash_changed(
-                            ir,
-                            dependency_lock,
-                            dependency_lock_hash,
-                        )
-                    except CargoBuildFailure as error:
-                        raise _cargo_diagnostics(error, source_map, ir) from error
+                    command = outcome.command
+                    _persist_dependency_lock(ir, generated_dir, dependency_lock)
+                    dependency_lock_changed = _lock_hash_changed(
+                        ir,
+                        dependency_lock,
+                        dependency_lock_hash,
+                    )
+                except CargoBuildFailure as error:
+                    raise _cargo_diagnostics(error, source_map, ir) from error
+                if dependency_lock_changed:
+                    # Cargo resolved a different graph. Never publish bytes
+                    # under the fingerprint of the previous dependency lock.
+                    artifact = None
+                else:
                     if outcome.artifact is None:
                         raise AssertionError("Cargo build returned no artifact")
-                    cache_dir.mkdir(parents=True, exist_ok=True)
-                    outcome_hash = sha256_file(outcome.artifact)
-                    current_hash = sha256_file(artifact) if artifact.is_file() else None
-                    if cache_hit and current_hash != outcome_hash:
-                        raise CrabwalkCompilationError(
-                            Diagnostic(
-                                "CRAB306",
-                                "Cargo output changed outside the fingerprint model",
-                                (
-                                    "Cargo produced different native bytes while all "
-                                    "declared Crabwalk build inputs were unchanged."
-                                ),
-                                _primary_span(ir),
-                                (
-                                    "Declare build-script inputs with [tool.crabwalk] "
-                                    "extra-files/extra-env, then rebuild."
-                                ),
-                            )
-                        )
-                    if current_hash != outcome_hash:
-                        if cache_load_lease_active(state_root, fingerprint):
-                            raise CrabwalkCompilationError(
-                                Diagnostic(
-                                    "CRAB307",
-                                    "Mapped native artifact cannot be replaced",
-                                    (
-                                        "Another process is using this fingerprint "
-                                        "while its cache entry needs recovery."
-                                    ),
-                                    _primary_span(ir),
-                                    "Let the importing process exit, then rebuild.",
-                                )
-                            )
-                        temporary = cache_dir / f".{artifact.name}.{os.getpid()}.tmp"
-                        shutil.copy2(outcome.artifact, temporary)
-                        os.replace(temporary, artifact)
-                    write_json(
-                        manifest_path,
-                        {
-                            "schema_version": 1,
-                            "fingerprint": fingerprint,
-                            "extension_name": extension_name,
-                            "artifact": artifact.name,
-                            "artifact_sha256": outcome_hash,
-                            "source_hash": ir.source_hash,
-                        },
+                    artifact = _publish_cargo_artifact(
+                        outcome.artifact,
+                        cache,
+                        cache_hit=cache_hit,
+                        state_root=state_root,
+                        fingerprint=fingerprint,
+                        extension_name=extension_name,
+                        ir=ir,
                     )
-                else:
-                    report("Using the cached native extension")
-            if cache_hit:
-                touch_cache_access(cache.artifact.parent)
+            if mode == "build" and artifact is not None:
+                touch_cache_access(artifact.parent)
             if load and not dependency_lock_changed:
                 if mode != "build" or artifact is None:
                     raise ValueError("loading requires build mode")
@@ -368,6 +350,7 @@ class CompilationService:
                             "Run crabwalk doctor and inspect the generated artifact ABI.",
                         )
                     ) from error
+                touch_cache_access(artifact.parent)
                 retain_cache_load_lease(state_root, fingerprint)
                 return self._remember_loaded_result(
                     loaded_key,
@@ -404,7 +387,7 @@ class CompilationService:
             / _safe_component(ir.module_name)
             / manifest_key
         )
-        lock_path = state_root / "locks" / f"dependency-{manifest_key}.lock"
+        lock_path = _dependency_unit_lock(state_root, destination)
         with FileLock(lock_path):
             if destination.is_file():
                 return
@@ -416,6 +399,70 @@ class CompilationService:
             except CargoBuildFailure as error:
                 raise _dependency_diagnostics(error, ir) from error
             _persist_dependency_lock(ir, bootstrap_dir, destination)
+
+
+def _publish_cargo_artifact(
+    outcome_artifact: Path,
+    cache: ArtifactCacheInfo,
+    *,
+    cache_hit: bool,
+    state_root: Path,
+    fingerprint: str,
+    extension_name: str,
+    ir: PackageIR,
+) -> Path:
+    """Publish validated Cargo bytes only under their complete fingerprint."""
+
+    artifact = cache.artifact
+    cache_dir = artifact.parent
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    outcome_hash = sha256_file(outcome_artifact)
+    current_hash = sha256_file(artifact) if artifact.is_file() else None
+    if cache_hit and current_hash != outcome_hash:
+        raise CrabwalkCompilationError(
+            Diagnostic(
+                "CRAB306",
+                "Cargo output changed outside the fingerprint model",
+                (
+                    "Cargo produced different native bytes while all declared "
+                    "Crabwalk build inputs were unchanged."
+                ),
+                _primary_span(ir),
+                (
+                    "Declare build-script inputs with [tool.crabwalk] "
+                    "extra-files/extra-env, then rebuild."
+                ),
+            )
+        )
+    if current_hash != outcome_hash:
+        if cache_load_lease_active(state_root, fingerprint):
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB307",
+                    "Mapped native artifact cannot be replaced",
+                    (
+                        "Another process is using this fingerprint while its "
+                        "cache entry needs recovery."
+                    ),
+                    _primary_span(ir),
+                    "Let the importing process exit, then rebuild.",
+                )
+            )
+        temporary = cache_dir / f".{artifact.name}.{os.getpid()}.tmp"
+        shutil.copy2(outcome_artifact, temporary)
+        os.replace(temporary, artifact)
+    write_json(
+        cache.manifest,
+        {
+            "schema_version": 1,
+            "fingerprint": fingerprint,
+            "extension_name": extension_name,
+            "artifact": artifact.name,
+            "artifact_sha256": outcome_hash,
+            "source_hash": ir.source_hash,
+        },
+    )
+    return artifact
 
 
 def _write_generated(
@@ -439,8 +486,7 @@ def _persist_dependency_lock(
     generated_dir: Path,
     destination: Path,
 ) -> None:
-    if not ir.crates:
-        return
+    del ir
     source = generated_dir / "Cargo.lock"
     if not source.is_file():
         return
@@ -455,10 +501,9 @@ def _lock_hash_changed(
     dependency_lock: Path,
     previous_hash: str | None,
 ) -> bool:
+    del ir
     return bool(
-        ir.crates
-        and dependency_lock.is_file()
-        and sha256_file(dependency_lock) != previous_hash
+        dependency_lock.is_file() and sha256_file(dependency_lock) != previous_hash
     )
 
 
@@ -483,24 +528,20 @@ def _dependency_lock_path(root: Path, source_path: Path) -> Path:
     return root / "crabwalk-locks" / relative.parent / f"{relative.stem}.Cargo.lock"
 
 
+def _dependency_unit_lock(state_root: Path, dependency_lock: Path) -> Path:
+    identity = hashlib.sha256(
+        str(dependency_lock.resolve()).encode("utf-8")
+    ).hexdigest()
+    return state_root / "locks" / f"dependency-unit-{identity}.lock"
+
+
 def _safe_component(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_]+", "_", value).strip("_")
     return safe or "module"
 
 
 def _dependency_manifest_key(ir: PackageIR) -> str:
-    payload = [
-        {
-            "binding": crate.binding,
-            "package": crate.package,
-            "version": crate.version,
-            "features": crate.features,
-            "path": crate.path,
-            "git": crate.git,
-            "rev": crate.rev,
-        }
-        for crate in sorted(ir.crates, key=lambda value: value.binding)
-    ]
+    payload = cargo_dependency_specification(ir)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()[:24]
 

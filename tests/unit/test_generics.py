@@ -53,17 +53,18 @@ def test_native_only_generic_function_is_inferred_and_monomorphized(
     assert generic.type_parameters[0].name == "T"
     assert generic.type_parameters[0].bounds == ("PartialOrd", "Copy")
     assert (
-        "fn __cw_native_largest<T: PartialOrd + Copy>(values: &Vec<T>) -> T"
+        f"fn __cw_native_{generic.rust_symbol}<T: PartialOrd + Copy>(values: &Vec<T>) -> T"
         in generated.rust_source
     )
-    assert "fn largest(" not in generated.rust_source
-    assert "__cw_native_largest(&values)" in generated.rust_source
+    assert f"fn {generic.rust_symbol}(" not in generated.rust_source
+    assert f"__cw_native_{generic.rust_symbol}(&values)" in generated.rust_source
     assert lifetime_helper.type_parameters[0].is_lifetime is True
     assert (
-        "fn __cw_native_longest<'a>(left: &'a str, right: &'a str) -> &'a str"
+        f"fn __cw_native_{lifetime_helper.rust_symbol}<'a>(left: &'a str, right: &'a str) -> &'a str"
         in generated.rust_source
     )
     assert lifetime_wrapper.exported is True
-    assert "m.add_function(pyo3::wrap_pyfunction!(largest_u64, m)?)?;" in (
-        generated.rust_source
+    assert (
+        f"m.add_function(cw_runtime_pyo3::wrap_pyfunction!({wrapper.rust_symbol}, m)?)?;"
+        in (generated.rust_source)
     )

@@ -98,7 +98,9 @@ def test_general_rust_patterns_and_tuple_loop_targets_lower(tmp_path: Path) -> N
     assert "1 | 2 =>" in generated.rust_source
     assert "matched @ (3..=7) =>" in generated.rust_source
     assert "Some(number) if (number > threshold) =>" in generated.rust_source
-    assert "Point { x: 0, y: y_value } =>" in generated.rust_source
-    assert "Shape::At(Point { x: 0, y: y_value }) =>" in generated.rust_source
+    point = next(value.symbol for value in ir.structs if value.name == "Point")
+    shape = next(value.symbol for value in ir.enums if value.name == "Shape")
+    assert f"{point} {{ x: 0, y: y_value }} =>" in generated.rust_source
+    assert f"{shape}::At({point} {{ x: 0, y: y_value }}) =>" in generated.rust_source
     assert "(head, .., tail) =>" in generated.rust_source
     assert "for (index, value) in pairs.iter().copied()" in generated.rust_source

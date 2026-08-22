@@ -4,7 +4,9 @@ project: Crabwalk
 status: in-progress
 created: 2026-08-22
 updated: 2026-08-22
-reviewed-commit: af7726aab9491b29926bc768afbf43569e995569
+reviewed-commits:
+  - af7726aab9491b29926bc768afbf43569e995569
+  - f237fc079002bededc6c099c1915aa128908c848
 tags:
   - project/crabwalk
   - area/safety
@@ -15,8 +17,9 @@ tags:
 
 # Crabwalk Invariant Hardening
 
-This is the feature-freeze execution plan prompted by the static review of
-`af7726aab9491b29926bc768afbf43569e995569`. It supersedes feature expansion as
+This is the feature-freeze execution plan prompted by the static reviews of
+`af7726aab9491b29926bc768afbf43569e995569` and its hardening follow-up
+`f237fc079002bededc6c099c1915aa128908c848`. It supersedes feature expansion as
 the immediate queue. The Rust Book evolution suite remains the end-to-end
 contract, now at [[../examples/the_rust_book/README|examples/the_rust_book]].
 
@@ -41,6 +44,10 @@ contract, now at [[../examples/the_rust_book/README|examples/the_rust_book]].
 7. Wheels reject runtime-ABI mismatch and package only an explicit data boundary.
 8. Every hardening claim has a unit, native, subprocess, multiprocess, or clean
    wheel oracle.
+9. Effects and Python-boundary placement remain correct through methods, traits,
+   operators, closures, async helpers, workers, and function-pointer intrinsics.
+10. Receiver ownership, generated identifiers, and mandatory Cargo dependency
+    identity are compiler invariants rather than rustc accidents.
 
 ## Review finding register
 
@@ -60,6 +67,17 @@ contract, now at [[../examples/the_rust_book/README|examples/the_rust_book]].
 | Maintainability: effect strings | Introduce `Effect` enum, transitive propagation, GIL consumption, and pre-codegen validation | `compiler/ir.py`, `compiler/frontend.py`, `compiler/validation.py` | inspection/GIL assertions and worker/Python rejection | Complete locally |
 | Maintainability: compiler passes | Split the large frontend/codegen modules without semantic change | future refactor | byte-identical or intentionally versioned IR/Rust plus full suite | Deferred until safety release gate is green |
 
+### Follow-up review finding register
+
+| Finding | Disposition | Primary implementation | Required evidence | Status |
+|---|---|---|---|---|
+| P1 dispatch/effect completeness | Store direct and possible dispatch targets on method, trait, operator, and function-pointer IR; propagate their effects; reject unsupported Python-boundary placement as `CRAB207` | `compiler/ir.py`, `compiler/frontend.py`, `compiler/validation.py` | direct/dynamic dispatch, async, iterator, worker, and function-pointer interaction tests | Complete locally |
+| P1 receiver mutability | Model local/field/index places and method receiver capabilities; reject shared-to-mutable/owned access as `CRAB208`; mark the owned root of nested mutations | `compiler/frontend.py`, `compiler/codegen.py` | shared `Vec`/domain rejection, nested field mutation/reborrow, legal interior mutation | Complete locally |
+| P1 generated namespace collisions | Use component-injective symbols, structural wrapper hashes, an internal mandatory PyO3 alias, isolated C FFI, and a complete pre-codegen emitted-name table (`CRAB209`) | `compiler/naming.py`, `compiler/codegen.py`, `compiler/validation.py` | `abs`/`String`/`pyo3` native smoke, ambiguous package paths, wrapper and method-glue collisions | Complete locally |
+| P1 mandatory dependency lock | Include the complete generated dependency specification and PyO3 lock in every fingerprint; validate every hit with Cargo; never publish a changed lock under its old key | `compiler/codegen.py`, `build/fingerprint.py`, `service.py` | PyO3-only lock/hit tests and build-mode lock-update publication regression | Complete locally |
+| P2 repaired-entry age | Refresh access after publication, validation, and load; age from the newer of content and parsed access time | `build/cache.py`, `service.py` | build/hit/age/corrupt/repair/prune sequence | Complete locally |
+| P2 parent initializer cycles | Model the selected child, direct source module, and every required package initializer edge before cycle detection | `compiler/frontend.py` | child-import cycle through parent `__init__.py` | Complete locally |
+
 ## Typed effect contract
 
 The current effect vocabulary is:
@@ -76,8 +94,9 @@ UnsafeFfi
 MayPanic
 ```
 
-Effects are inferred directly, propagated through native calls, validated before
-code generation, shown by inspection, and consumed by wrapper policy. The alpha
+Effects are inferred directly, propagated through direct calls and resolved or
+possible method/trait/operator/function-pointer dispatch, validated before code
+generation, shown by inspection, and consumed by wrapper policy. The alpha
 GIL rule is deliberately conservative: Python runtime, global mutation, unsafe
 memory, and unsafe FFI prevent detachment. Primitive native blocking/thread work
 may detach when no ownership handle or Python effect is present.
@@ -87,6 +106,9 @@ may detach when no ownership handle or Python effect is present.
 | Invariant | Enforcement point | Failure mode |
 |---|---|---|
 | Python runtime work cannot enter a Rust worker closure | IR validation before emission | `CRAB206` at the offending call |
+| Python runtime work cannot enter a method/operator, native async helper, iterator closure, or function-pointer target whose generated signature cannot carry `PyResult` | boundary-placement validation before emission | `CRAB207` at the offending operation |
+| A shared receiver cannot satisfy `&mut self`/`self`; nested mutations retain their root place | semantic place and method-capability validation | `CRAB208` at the receiver or reborrow |
+| Every emitted value, type, method-glue, dependency, and crate-binding identifier is unique | emitted-name validation before symbol-keyed passes/codegen | `CRAB209` with both source declarations |
 | Every direct unsafe/panic operation has its required typed effect | IR validation before emission | internal assertion; compiler defect |
 | `python_boundary` agrees with `Effect.PYTHON_RUNTIME` | IR validation before emission | internal assertion; compiler defect |
 | Global teaching state is synchronized | generated helper template | no `static mut`; atomic checked update |
@@ -95,6 +117,7 @@ may detach when no ownership handle or Python effect is present.
 | Exported panic translation uses unwind | Cargo manifest and forced build env | ambient abort override is replaced with `unwind` |
 | Loaded extension files are immutable for their process lifetime | complete-fingerprint process registry | no second Cargo publication/load for the same loaded identity |
 | Owned wrapper choice is unambiguous | runtime constructor resolution | explicit ambiguity error with `for_=` guidance |
+| Every compilation unit has one persisted generated dependency lock, including mandatory PyO3 | dependency planning before fingerprint/build | strict `--locked` behavior and lock-hash identity even without user crates |
 
 ## Cache and Cargo contract
 
@@ -102,21 +125,23 @@ The fingerprint is content-addressed over Crabwalk's declared model:
 
 - all package source and compiler implementation files;
 - IR/codegen/fingerprint protocol versions and Python ABI;
-- Cargo lock, complete regular-file path-dependency trees, Cargo configuration,
-  project-local Rust toolchain selectors, resolved tool executable state, and PyO3;
+- the complete generated dependency specification (including mandatory PyO3), its
+  Cargo lock, complete regular-file path-dependency trees, Cargo configuration,
+  project-local Rust toolchain selectors, and resolved tool executable state;
 - recognized compiler/linker/target/profile environment; and
 - `[tool.crabwalk].extra-files` and `extra-env` for build-script inputs outside the
   default model.
 
-Cargo is still invoked on external artifact hits for projects with user crates so
-its own build-script and incremental dependency rules remain authoritative. A
+Cargo is still invoked on every external artifact hit so its dependency,
+build-script, and incremental rules remain authoritative. A
 project that depends on arbitrary undeclared files or environment is outside the
 content-addressed contract; declare those inputs rather than relying on accidental
 Cargo workspace state. Different Cargo output under an unchanged fingerprint is a
 `CRAB306` error rather than an in-place mutation; mapped corrupt entries are held
 for later recovery with `CRAB307`.
 
-Lock semantics follow Cargo conventions:
+Every compilation unit persists a generated dependency lock, even when PyO3 is
+its only dependency. Lock semantics follow Cargo conventions:
 
 - normal build: start from the committed lock, permit Cargo maintenance, persist
   an updated lock atomically, then recompute the artifact identity;
@@ -181,17 +206,23 @@ back to Cargo from an installed mixed wheel.
 - [x] Wheel runtime ABI and explicit package-data policy.
 - [x] Re-run the isolated two-wheel build/install/import test after manifest schema
   2 and the allowlist changes, without Rust/Cargo on the consumer path.
+- [x] Propagate effects across every supported dispatch form and validate unsupported
+  Python-boundary placement.
+- [x] Enforce receiver ownership with semantic places, including nested mutation.
+- [x] Make emitted identifiers injective and validate every generated namespace.
+- [x] Include mandatory PyO3 and its lock in every compilation identity.
+- [x] Refresh repaired cache age and model parent-package initialization edges.
 
 ### H5 — Release evidence
 
 - [x] Ruff formatting/lint gate.
-- [x] Initial mypy gate over the hardening/build boundary; frontend/codegen/runtime
-  typing debt remains explicit.
+- [x] Expanded mypy gate over 13 hardening/build/compiler modules, including naming
+  and code generation; frontend/runtime typing debt remains explicit.
 - [x] Rustfmt parse/stability and Clippy correctness check for a generated project.
-- [x] Full local suite on the final worktree: 101 tests in 687.20 seconds on
+- [x] Full local suite on the final worktree: 124 tests in 812.82 seconds on
   Windows/CPython 3.11.
-- [x] Final focused unit pass: 67 tests in 3.80 seconds; Chapter 11 teaching pass:
-  5 tests in 2.11 seconds.
+- [x] Final focused unit pass: 89 tests in 8.62 seconds; Chapter 11 teaching pass:
+  5 tests in 3.70 seconds; locked Rust Book fingerprint: `407206a49c3e33f0`.
 - [ ] Windows/Linux/macOS × CPython 3.11/3.14 native matrix.
 - [ ] CPython 3.12/3.13 unit lanes.
 - [ ] Miri or sanitizer harness for the focused unsafe helper crate.

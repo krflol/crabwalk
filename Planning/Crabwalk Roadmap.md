@@ -190,7 +190,9 @@ Compile the north-star Fibonacci fixture from actual Python AST, load it as a na
 - [x] **CACHE-001 — Implement content fingerprint and verified artifact cache** (L)
   - Depends: CG-001, BUILD-001
   - Canonicalize inputs, hash all M1-relevant versions/config, store manifest plus artifact hash, and publish atomically.
-  - Acceptance: unchanged second-process build starts zero Cargo processes; relevant source/toolchain/schema edits miss.
+  - Acceptance: an unchanged second-process build lets Cargo validate the complete
+    mandatory dependency graph without relinking or republishing; relevant
+    source/toolchain/schema/lock edits miss.
 
 - [x] **LOAD-001 — Load content-addressed extension and bind RustFunction** (L)
   - Depends: ADR-001, ABI-001, BUILD-001, CACHE-001

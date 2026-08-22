@@ -54,6 +54,19 @@ general raw-Rust or arbitrary-FFI escape hatch. PyO3 wrappers:
 - keep/reacquire the GIL for Python runtime, global mutation, unsafe-memory, and
   unsafe-FFI effects.
 
+Typed effects propagate across ordinary calls, methods, traits, operators, and
+function-pointer targets. Pre-codegen placement validation rejects Python runtime
+work in workers and generated contexts whose current Rust signature cannot carry a
+`PyResult`, including methods, operators, native async helpers, and iterator
+closures. Receiver capability is also semantic: shared references cannot satisfy
+mutable or consuming methods, while the root ownership of nested field/index
+places is retained. These checks produce source-spanned diagnostics before rustc.
+
+Generated Rust names are component-injective and checked across value, type,
+method-glue, Cargo-dependency, and crate-binding namespaces. Mandatory PyO3 and the
+narrow C `abs` declaration use isolated internal identities, preventing user names
+such as `abs`, `String`, or `pyo3` from changing compiler/runtime resolution.
+
 The generated ThreadPool catches each worker job, records the first failure, and
 reports it through explicit `finish()`. Its `Drop` path closes and joins without
 propagating a join panic, including while an outer native function is unwinding.
@@ -64,10 +77,13 @@ runtime bugs. The native test matrix remains a release requirement.
 ## Installed artifacts
 
 Development artifacts are content addressed over Crabwalk's declared input model,
-manifest bound, hash verified, locked, and atomically published. Native loading is
+manifest bound, hash verified, locked, and atomically published. Every compilation
+unit persists and fingerprints the complete generated dependency lock, including
+mandatory PyO3 even when no user crate is declared. Native loading is
 performed under the fingerprint lock and retains a per-process reader lease for
 the mapped lifetime; pruning uses a separate global lock, nonblocking entry locks,
-access markers, and post-lock revalidation. Prebuilt wheel
+access markers refreshed after publication/validation/load, and post-lock
+revalidation. Prebuilt wheel
 artifacts additionally bind the Python source, package identity, exact alpha
 runtime, and runtime ABI. Artifact paths are resolved inside the installed package
 before loading. Wheel construction rejects package symlinks and common credential
@@ -75,7 +91,7 @@ or private-key names.
 
 Arbitrary build scripts can consume inputs Cargo and Crabwalk cannot infer. Declare
 those with `[tool.crabwalk].extra-files` and `extra-env`. Cargo is re-invoked for
-user-crate cache hits, but undeclared external inputs remain outside the
+every cache hit, but undeclared external inputs remain outside the
 content-addressed fingerprint contract.
 
 No signature or publisher attestation is currently provided. SHA-256 detects

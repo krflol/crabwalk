@@ -56,5 +56,5 @@ def boundary(name: rust.Str) -> rust.String:
     assert "// GIL: released during the native call" in shown
     assert "// Native implementation" in shown
     assert "// Python ABI wrapper" in shown
-    assert "fn __cw_native_native" in shown
-    assert "fn native" in shown
+    assert f"fn __cw_native_{result.ir.functions[0].rust_symbol}" in shown
+    assert f"fn {result.ir.functions[0].rust_symbol}" in shown

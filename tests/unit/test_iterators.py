@@ -41,6 +41,7 @@ def test_string_lines_lower_to_rust_for_iterator_and_vec_return(tmp_path: Path) 
     assert "line.contains(query)" in generated.rust_source
     assert "line.to_lowercase()" in generated.rust_source
     assert "lowered_query.as_str()" in generated.rust_source
-    assert "fn search(query: &str, contents: &str) -> PyResult<Vec<String>>" in (
-        generated.rust_source
+    assert (
+        f"fn {ir.functions[0].rust_symbol}(query: &str, contents: &str) -> PyResult<Vec<String>>"
+        in (generated.rust_source)
     )

@@ -34,7 +34,7 @@ def test_structs_lower_to_real_rust_and_move_aware_wrapper(tmp_path: Path) -> No
     user = ir.structs[0]
     assert user.name == "User"
     assert [field.name for field in user.fields] == ["id", "name"]
-    assert user.type_ref.render() == "User"
+    assert user.type_ref.render() == user.symbol
 
     returned = ir.functions[0].body[0]
     assert isinstance(returned, ReturnIR)
@@ -43,13 +43,17 @@ def test_structs_lower_to_real_rust_and_move_aware_wrapper(tmp_path: Path) -> No
     assert isinstance(constructed, StructConstructorIR)
 
     generated = generate_project(ir, "_crabwalk_struct_test")
-    assert "struct User {" in generated.rust_source
+    assert f"struct {user.symbol} {{" in generated.rust_source
     assert "pub id: u64," in generated.rust_source
     assert "pub name: String," in generated.rust_source
-    assert "fn __cw_native_user_name(user: &User) -> String" in generated.rust_source
+    assert (
+        f"fn __cw_native_{ir.functions[0].rust_symbol}(user: &{user.symbol}) -> String"
+        in generated.rust_source
+    )
     assert "return user.name.clone();" in generated.rust_source
     assert (
-        'User { id: identifier, name: String::from("Alice") }' in generated.rust_source
+        f'{user.symbol} {{ id: identifier, name: String::from("Alice") }}'
+        in generated.rust_source
     )
-    assert "value: Option<User>" in generated.rust_source
+    assert f"value: Option<{user.symbol}>" in generated.rust_source
     assert "#[getter]" in generated.rust_source

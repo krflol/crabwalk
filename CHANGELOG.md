@@ -8,7 +8,7 @@ a release yet; the entries below describe the current `0.0.1` alpha candidate.
 ### Added
 
 - Static package-wide analysis for explicitly decorated Rust functions.
-- Source-spanned schema-v17 IR and deterministic Rust, PyO3, Cargo, and source-map
+- Source-spanned schema-v18 IR and deterministic Rust, PyO3, Cargo, and source-map
   generation.
 - Checked primitive/string/container boundaries, explicit Python-runtime effects,
   panic and `Result` exception mapping, and eligible GIL release.
@@ -34,6 +34,10 @@ a release yet; the entries below describe the current `0.0.1` alpha candidate.
   unsafe-memory, unsafe-FFI, and panic effects plus pre-codegen IR validation.
 - A Python quality gate with Ruff, scoped mypy coverage of the hardening/build
   boundary, generated-project rustfmt parsing, and Clippy correctness lints.
+- Dispatch-aware method/trait/operator/function-pointer effects, Python-boundary
+  placement validation, and semantic receiver/place ownership diagnostics.
+- Component-injective generated symbols, structural owned-wrapper identities, an
+  isolated FFI module, and pre-codegen value/type/method/dependency uniqueness.
 
 ### Changed
 
@@ -49,6 +53,11 @@ a release yet; the entries below describe the current `0.0.1` alpha candidate.
   fallbacks. Package cycles and star imports are rejected for the alpha contract.
 - Mixed wheels enforce a runtime ABI version and include only Python/type files by
   default; extra data requires `wheel-include`.
+- Every compilation unit now fingerprints and persists the complete generated
+  dependency graph and lock, including mandatory PyO3; Cargo validates every cache
+  hit, and lock changes cannot publish beneath a stale fingerprint.
+- Repaired cache entries refresh their access age, and package-cycle analysis now
+  includes every parent initializer Python executes for a child import.
 
 ### Security
 

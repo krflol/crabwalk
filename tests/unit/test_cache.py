@@ -147,3 +147,18 @@ def test_atomic_text_write_preserves_unchanged_input_mtime(tmp_path: Path) -> No
     write_text(path, "fn main() {}\n")
 
     assert path.stat().st_mtime_ns == before
+
+
+def test_cache_age_uses_newest_content_or_access_timestamp(tmp_path: Path) -> None:
+    entry = _entry(tmp_path / ".crabwalk", "9", 10, 500)
+    touch_cache_access(entry)
+    access = entry / ".last-access"
+    old = time.time() - 400
+    access.write_text(f"{int(old * 1_000_000_000)}\n", encoding="utf-8")
+    os.utime(access, (old, old))
+
+    artifact = entry / "artifact.bin"
+    artifact.write_bytes(b"repaired")
+    _, last_used = cache_module._entry_size_and_mtime(entry)
+
+    assert last_used >= artifact.stat().st_mtime

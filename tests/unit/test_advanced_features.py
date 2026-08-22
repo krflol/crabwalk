@@ -131,14 +131,22 @@ def test_advanced_features_lower_to_auditable_rust(tmp_path: Path) -> None:
     generated = generate_project(ir, "_crabwalk_advanced")
     rust_source = generated.rust_source
 
-    assert "impl std::ops::Add<Point> for Point" in rust_source
-    assert "impl std::ops::Add<Meters> for Millimeters" in rust_source
-    assert "<Human as Pilot>::fly(&person)" in rust_source
-    assert "<Human as Wizard>::fly(&person)" in rust_source
+    structs = {value.name: value.symbol for value in ir.structs}
+    traits = {value.name: value.symbol for value in ir.traits}
+    assert (
+        f"impl std::ops::Add<{structs['Point']}> for {structs['Point']}" in rust_source
+    )
+    assert (
+        f"impl std::ops::Add<{structs['Meters']}> for {structs['Millimeters']}"
+        in rust_source
+    )
+    assert f"<{structs['Human']} as {traits['Pilot']}>::fly(&person)" in rust_source
+    assert f"<{structs['Human']} as {traits['Wizard']}>::fly(&person)" in rust_source
     assert "&raw const value" in rust_source
     assert "&raw mut value" in rust_source
     assert "std::slice::from_raw_parts_mut" in rust_source
-    assert 'unsafe extern "C" { fn abs(input: i32) -> i32; }' in rust_source
+    assert '#[link_name = "abs"]' in rust_source
+    assert "pub(super) fn c_abs(input: i32) -> i32;" in rust_source
     assert "if __cw_value == i32::MIN" in rust_source
     assert "C abs is undefined for i32::MIN" in rust_source
     assert "static __CW_COUNTER: std::sync::atomic::AtomicU64" in rust_source

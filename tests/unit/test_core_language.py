@@ -102,8 +102,15 @@ def test_core_language_lowers_to_typed_ir_and_rust(tmp_path: Path) -> None:
     assert "while (value < n) {" in generated.rust_source
     assert "let mut values: Vec<u64> = vec![n, 1u64];" in generated.rust_source
     assert 'println!("{}", name);' in generated.rust_source
-    assert "fn validate(n: u64) -> PyResult<u64>" in generated.rust_source
-    assert "Err(error) => Err(pyo3::exceptions::PyRuntimeError" in generated.rust_source
+    validate = next(
+        function for function in ir.functions if function.name == "validate"
+    )
+    assert (
+        f"fn {validate.rust_symbol}(n: u64) -> PyResult<u64>" in generated.rust_source
+    )
+    assert "Err(error) => Err(cw_runtime_pyo3::exceptions::PyRuntimeError" in (
+        generated.rust_source
+    )
     python_hello = ir.functions[-2]
     caller = ir.functions[-1]
     assert python_hello.python_boundary
@@ -113,7 +120,10 @@ def test_core_language_lowers_to_typed_ir_and_rust(tmp_path: Path) -> None:
         "PythonRuntime",
     )
     assert caller.python_boundary
-    assert "fn __cw_native_python_hello(name: &str) -> PyResult<String>" in (
+    assert (
+        f"fn __cw_native_{python_hello.rust_symbol}(name: &str) -> PyResult<String>"
+        in (generated.rust_source)
+    )
+    assert f"return Ok(__cw_native_{python_hello.rust_symbol}(name)?);" in (
         generated.rust_source
     )
-    assert "return Ok(__cw_native_python_hello(name)?);" in generated.rust_source

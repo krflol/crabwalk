@@ -26,11 +26,13 @@ def test_static_crate_declaration_generates_cargo_and_rust_paths(
     generated = generate_project(ir, "_crabwalk_regex_abc")
 
     assert len(ir.crates) == 1
-    assert ir.crates[0].binding == "regex"
+    binding = ir.crates[0].binding
+    assert binding != "regex"
     assert ir.crates[0].version == "1"
     assert 'regex = { version = "1" }' in generated.cargo_toml
-    assert 'regex::Regex::new(r"' not in generated.rust_source
-    assert r'regex::Regex::new("\\d+")' in generated.rust_source
+    assert f"extern crate regex as {binding};" in generated.rust_source
+    assert f"{binding}::Regex::new" in generated.rust_source
+    assert r'::Regex::new("\\d+")' in generated.rust_source
     assert ".unwrap().is_match(value)" in generated.rust_source
 
 
@@ -75,16 +77,16 @@ def identity(value: rust.u64) -> rust.u64:
 """,
         encoding="utf-8",
     )
-    generated = generate_project(analyze_path(path), "_crabwalk_dependencies")
+    ir = analyze_path(path)
+    generated = generate_project(ir, "_crabwalk_dependencies")
+    bindings = {crate.package: crate.binding for crate in ir.crates}
+    assert f"extern crate serde as {bindings['serde']};" in generated.rust_source
     assert (
-        f'local_native = {{ package = "native-core", path = "{local.as_posix()}", '
+        f'native_core = {{ package = "native-core", path = "{local.as_posix()}", '
         'features = ["fast"] }'
     ) in generated.cargo_toml
     assert (
-        'remote = { package = "remote-core", '
+        'remote_core = { package = "remote-core", '
         'git = "https://example.test/repository.git", rev = "abc123" }'
     ) in generated.cargo_toml
-    assert (
-        'serde_alias = { package = "serde", version = "1", features = ["derive"] }'
-        in generated.cargo_toml
-    )
+    assert 'serde = { version = "1", features = ["derive"] }' in generated.cargo_toml

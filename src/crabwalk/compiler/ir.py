@@ -348,6 +348,7 @@ class BinaryIR:
     right: "ExpressionIR"
     type_ref: TypeRef
     span: SourceSpan
+    target_symbol: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,6 +457,9 @@ class MethodCallIR:
     arguments: tuple["ExpressionIR", ...]
     type_ref: TypeRef
     span: SourceSpan
+    target_symbol: str | None = None
+    dispatch_targets: tuple[str, ...] = ()
+    required_receiver: Literal["shared", "mutable", "owned", "interior"] = "shared"
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,6 +470,7 @@ class TraitCallIR:
     receiver: "ExpressionIR"
     type_ref: TypeRef
     span: SourceSpan
+    target_symbol: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

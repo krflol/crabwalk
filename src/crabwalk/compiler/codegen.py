@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,9 +64,10 @@ from .ir import (
     UnaryIR,
     WhileIR,
 )
+from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
 PYO3_VERSION = "0.29.2"
-CODEGEN_SCHEMA_VERSION = 26
+CODEGEN_SCHEMA_VERSION = 27
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +123,8 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
 
     validate_package_ir(ir)
     writer = _Writer()
-    domain_symbols = {value.symbol for value in (*ir.structs, *ir.enums)}
+    domain_symbols = {value.symbol for value in ir.structs}
+    domain_symbols.update(value.symbol for value in ir.enums)
     boundary_names = {
         function.rust_symbol for function in ir.functions if function.python_boundary
     }
@@ -131,13 +132,26 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
     writer.line(
         f"// IR schema: {ir.schema_version}; codegen schema: {CODEGEN_SCHEMA_VERSION}"
     )
-    writer.line("use pyo3::prelude::*;")
+    writer.line(f"extern crate {PYO3_CARGO_ALIAS} as pyo3;")
+    for dependency in sorted(ir.crates, key=lambda value: value.binding):
+        cargo_key = cargo_dependency_key(dependency.package, dependency.binding)
+        writer.line(f"extern crate {cargo_key} as {dependency.binding};")
+    writer.line(f"use {PYO3_CARGO_ALIAS}::prelude::*;")
     if any(_enum_has_heterogeneous_fields(value) for value in ir.enums):
-        writer.line("use pyo3::IntoPyObjectExt;")
+        writer.line(f"use {PYO3_CARGO_ALIAS}::IntoPyObjectExt;")
     for dependency in sorted(ir.crates, key=lambda value: value.binding):
         if dependency.package == "rayon":
             writer.line(f"use {dependency.binding}::prelude::*;")
-    writer.line('unsafe extern "C" { fn abs(input: i32) -> i32; }')
+    writer.line("mod __crabwalk_ffi {")
+    writer.enter()
+    writer.line('unsafe extern "C" {')
+    writer.enter()
+    writer.line('#[link_name = "abs"]')
+    writer.line("pub(super) fn c_abs(input: i32) -> i32;")
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
     writer.line()
     _write_panic_boundary(writer)
     writer.line()
@@ -187,7 +201,7 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
         if not function.exported:
             continue
         writer.line(
-            f"m.add_function(pyo3::wrap_pyfunction!({function.rust_symbol}, m)?)?;",
+            f"m.add_function({PYO3_CARGO_ALIAS}::wrap_pyfunction!({function.rust_symbol}, m)?)?;",
             function.span,
             "abi_export",
         )
@@ -216,7 +230,7 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
         f'name = "{extension_name}"\n'
         'crate-type = ["cdylib"]\n\n'
         "[dependencies]\n"
-        f'pyo3 = {{ version = "={PYO3_VERSION}" }}\n'
+        f'{PYO3_CARGO_ALIAS} = {{ package = "pyo3", version = "={PYO3_VERSION}" }}\n'
         f"{dependencies}\n"
         "[profile.release]\n"
         "overflow-checks = true\n"
@@ -499,7 +513,7 @@ def _write_owned_enum_class(
         pattern = _enum_variant_pattern(enum, variant.name, (), variant.tuple_style)
         writer.line(f'Some({pattern}) => Ok("{variant.name}"),')
     writer.line(
-        'None => Err(pyo3::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")),'
+        f'None => Err({PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")),'
     )
     writer.leave()
     writer.line("}")
@@ -533,7 +547,7 @@ def _write_owned_enum_class(
         writer.line("let value = self.value.as_ref().ok_or_else(|| {")
         writer.enter()
         writer.line(
-            'pyo3::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
+            f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
         )
         writer.leave()
         writer.line("})?;")
@@ -664,7 +678,7 @@ def _write_owned_struct_class(writer: _Writer, struct: StructIR) -> None:
         )
         writer.enter()
         writer.line(
-            'pyo3::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
+            f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
         )
         writer.leave()
         writer.line("})")
@@ -679,7 +693,7 @@ def _write_owned_struct_class(writer: _Writer, struct: StructIR) -> None:
         writer.line("let target = self.value.as_mut().ok_or_else(|| {")
         writer.enter()
         writer.line(
-            'pyo3::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
+            f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
         )
         writer.leave()
         writer.line("})?;")
@@ -702,7 +716,7 @@ def _write_owned_struct_class(writer: _Writer, struct: StructIR) -> None:
     writer.line(")).ok_or_else(|| {")
     writer.enter()
     writer.line(
-        'pyo3::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
+        f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
     )
     writer.leave()
     writer.line("})")
@@ -785,7 +799,7 @@ def _write_export_wrapper(
         writer.line("Ok(value) => Ok(value),")
         error_type = function.return_type.arguments[1].display()
         writer.line(
-            "Err(error) => Err(pyo3::exceptions::PyRuntimeError::new_err("
+            f"Err(error) => Err({PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("
             f'format!("CrabwalkRustError: {error_type}: {{}}", error))),'
         )
         writer.leave()
@@ -843,7 +857,7 @@ def _write_panic_boundary(writer: _Writer) -> None:
     writer.enter()
     writer.line("let message = __cw_panic_message(payload);")
     writer.line(
-        'Err(pyo3::exceptions::PyRuntimeError::new_err(format!("CrabwalkPanicError: {}", message)))'
+        f'Err({PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err(format!("CrabwalkPanicError: {{}}", message)))'
     )
     writer.leave()
     writer.line("}")
@@ -1284,7 +1298,7 @@ def _write_statement(
     if isinstance(statement, FieldAssignIR):
         writer.line(
             (
-                f"{_render_expression(statement.receiver, boundary_names)}."
+                f"{_render_place_expression(statement.receiver, boundary_names)}."
                 f"{statement.field} = "
                 f"{_render_expression(statement.value, boundary_names)};"
             ),
@@ -1393,22 +1407,22 @@ def _write_statement(
             "match",
         )
         writer.enter()
-        for arm in statement.arms:
-            if arm.variant is None:
+        for match_arm in statement.arms:
+            if match_arm.variant is None:
                 pattern = "_"
-            elif not arm.bindings:
-                pattern = f"{arm.enum_symbol}::{arm.variant}"
-            elif arm.tuple_style:
-                values = ", ".join(local or "_" for _, local in arm.bindings)
-                pattern = f"{arm.enum_symbol}::{arm.variant}({values})"
+            elif not match_arm.bindings:
+                pattern = f"{match_arm.enum_symbol}::{match_arm.variant}"
+            elif match_arm.tuple_style:
+                values = ", ".join(local or "_" for _, local in match_arm.bindings)
+                pattern = f"{match_arm.enum_symbol}::{match_arm.variant}({values})"
             else:
                 values = ", ".join(
-                    f"{field}: {local or '_'}" for field, local in arm.bindings
+                    f"{field}: {local or '_'}" for field, local in match_arm.bindings
                 )
-                pattern = f"{arm.enum_symbol}::{arm.variant} {{ {values} }}"
-            writer.line(f"{pattern} => {{", arm.span, "match_arm")
+                pattern = f"{match_arm.enum_symbol}::{match_arm.variant} {{ {values} }}"
+            writer.line(f"{pattern} => {{", match_arm.span, "match_arm")
             writer.enter()
-            for child in arm.body:
+            for child in match_arm.body:
                 _write_statement(writer, child, boundary_names, current_boundary)
             writer.leave()
             writer.line("},")
@@ -1425,19 +1439,19 @@ def _write_statement(
             "pattern_match",
         )
         writer.enter()
-        for arm in statement.arms:
+        for pattern_arm in statement.arms:
             guard = (
                 ""
-                if arm.guard is None
-                else f" if {_render_expression(arm.guard, boundary_names)}"
+                if pattern_arm.guard is None
+                else f" if {_render_expression(pattern_arm.guard, boundary_names)}"
             )
             writer.line(
-                f"{arm.pattern}{guard} => {{",
-                arm.span,
+                f"{pattern_arm.pattern}{guard} => {{",
+                pattern_arm.span,
                 "pattern_match_arm",
             )
             writer.enter()
-            for child in arm.body:
+            for child in pattern_arm.body:
                 _write_statement(writer, child, boundary_names, current_boundary)
             writer.leave()
             writer.line("},")
@@ -1506,7 +1520,7 @@ def _render_expression(
         return expression.name
     if isinstance(expression, BorrowIR):
         operator = "&mut " if expression.kind == "mutable" else "&"
-        return f"{operator}{_render_expression(expression.value, boundary_names)}"
+        return f"{operator}{_render_place_expression(expression.value, boundary_names)}"
     if isinstance(expression, UnaryIR):
         operator = {"positive": "+", "negative": "-", "not": "!"}[expression.operator]
         return f"({operator}{_render_expression(expression.operand, boundary_names)})"
@@ -1614,7 +1628,7 @@ def _render_expression(
                 "{ let __cw_value: i32 = "
                 f"{value}; if __cw_value == i32::MIN {{ "
                 'panic!("C abs is undefined for i32::MIN"); } '
-                "unsafe { abs(__cw_value) } }"
+                "unsafe { __crabwalk_ffi::c_abs(__cw_value) } }"
             )
         if expression.constructor == "UnsafeStaticIncrement":
             value = _render_expression(expression.arguments[0], boundary_names)
@@ -1883,11 +1897,28 @@ def _render_method_receiver(
 ) -> str:
     """Render a borrowed method receiver without cloning an owned struct field."""
 
+    if isinstance(expression, (FieldAccessIR, IndexIR)):
+        return _render_place_expression(expression, boundary_names)
+    return _render_expression(expression, boundary_names)
+
+
+def _render_place_expression(
+    expression: ExpressionIR,
+    boundary_names: set[str],
+) -> str:
+    """Render a storage place without cloning an intermediate projection."""
+
+    if isinstance(expression, NameIR):
+        return expression.name
     if isinstance(expression, FieldAccessIR):
         return (
-            f"{_render_expression(expression.receiver, boundary_names)}."
+            f"{_render_place_expression(expression.receiver, boundary_names)}."
             f"{expression.field}"
         )
+    if isinstance(expression, IndexIR):
+        receiver = _render_place_expression(expression.receiver, boundary_names)
+        index = _render_expression(expression.index, boundary_names)
+        return f"{receiver}[{index}]"
     return _render_expression(expression, boundary_names)
 
 
@@ -1949,8 +1980,9 @@ def _rust_char_literal(value: str) -> str:
 def _cargo_dependencies(ir: PackageIR) -> str:
     lines: list[str] = []
     for dependency in sorted(ir.crates, key=lambda value: value.binding):
+        cargo_key = cargo_dependency_key(dependency.package, dependency.binding)
         fields: list[str] = []
-        if dependency.binding != dependency.package:
+        if cargo_key != dependency.package:
             fields.append(f"package = {_toml_string(dependency.package)}")
         if dependency.version is not None:
             fields.append(f"version = {_toml_string(dependency.version)}")
@@ -1963,8 +1995,36 @@ def _cargo_dependencies(ir: PackageIR) -> str:
         if dependency.features:
             features = ", ".join(_toml_string(value) for value in dependency.features)
             fields.append(f"features = [{features}]")
-        lines.append(f"{dependency.binding} = {{ {', '.join(fields)} }}")
+        lines.append(f"{cargo_key} = {{ {', '.join(fields)} }}")
     return "\n".join(lines)
+
+
+def cargo_dependency_specification(ir: PackageIR) -> dict[str, object]:
+    """Return every generated Cargo dependency input in fingerprintable form."""
+
+    return {
+        "mandatory": [
+            {
+                "binding": PYO3_CARGO_ALIAS,
+                "package": "pyo3",
+                "version": f"={PYO3_VERSION}",
+                "features": [],
+            }
+        ],
+        "declared": [
+            {
+                "binding": crate.binding,
+                "cargo_key": cargo_dependency_key(crate.package, crate.binding),
+                "package": crate.package,
+                "version": crate.version,
+                "features": list(crate.features),
+                "path": crate.path,
+                "git": crate.git,
+                "rev": crate.rev,
+            }
+            for crate in sorted(ir.crates, key=lambda value: value.binding)
+        ],
+    }
 
 
 def _toml_string(value: str) -> str:
@@ -1984,13 +2044,6 @@ def _owned_vector_types(ir: PackageIR) -> tuple[TypeRef, ...]:
                 vector = parameter.type_ref.underlying
                 values[vector.render()] = vector
     return tuple(values[key] for key in sorted(values))
-
-
-def owned_class_names(vector_type: TypeRef) -> tuple[str, str]:
-    """Return the stable Python and Rust names for an owned wrapper type."""
-
-    suffix = re.sub(r"[^A-Za-z0-9]+", "_", vector_type.render()).strip("_")
-    return f"_Crabwalk_{suffix}", f"__CwOwned_{suffix}"
 
 
 def _write_owned_vector_class(writer: _Writer, vector_type: TypeRef) -> None:
@@ -2018,7 +2071,7 @@ def _write_owned_vector_class(writer: _Writer, vector_type: TypeRef) -> None:
     writer.line("self.value.as_ref().map(|value| value.len()).ok_or_else(|| {")
     writer.enter()
     writer.line(
-        'pyo3::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
+        f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
     )
     writer.leave()
     writer.line("})")
@@ -2030,7 +2083,7 @@ def _write_owned_vector_class(writer: _Writer, vector_type: TypeRef) -> None:
     writer.line("self.value.as_ref().cloned().ok_or_else(|| {")
     writer.enter()
     writer.line(
-        'pyo3::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
+        f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
     )
     writer.leave()
     writer.line("})")
@@ -2081,7 +2134,7 @@ def _write_wrapper_extraction(writer: _Writer, parameter: ParameterIR) -> None:
         (
             f"let __cw_arg_{parameter.name} = "
             f"{parameter.name}.value.{access}.ok_or_else(|| "
-            "pyo3::exceptions::PyRuntimeError::new_err("
+            f"{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("
             f'"CrabwalkMoveError: {parameter.name} was moved"))?;'
         ),
         parameter.span,

@@ -30,10 +30,12 @@ Rust/Cargo/source-map files, and optionally invokes Cargo.
 | `cache prune` | scoped age/size cleanup with dry-run support |
 
 `--locked` requires persisted dependency lock state and rejects any Cargo lock
-change. `--offline` passes Cargo's offline policy and is fingerprinted. A normal
-dependency build copies an existing lock into the generated crate, runs without
-`--locked`, and atomically persists intentional Cargo updates beneath
-`crabwalk-locks/`. A changed lock triggers a fresh fingerprint before loading.
+change. `--offline` passes Cargo's offline policy and is fingerprinted. Every
+compilation unit has a persisted generated dependency lock, even when mandatory
+PyO3 is its only dependency. A normal build copies that lock into the generated
+crate, runs without `--locked`, and atomically persists intentional Cargo updates
+beneath `crabwalk-locks/`. A changed lock abandons the old-key staging result and
+restarts under a fresh fingerprint before publication or loading.
 
 ## Fingerprints
 
@@ -42,7 +44,9 @@ The cache key includes:
 - package source hash and module identity;
 - Crabwalk implementation, IR, codegen, and fingerprint schema versions;
 - CPython implementation/version/extension ABI;
-- project-resolved rustc/Cargo executable and toolchain-selector state, plus PyO3;
+- project-resolved rustc/Cargo executable and toolchain-selector state;
+- the complete generated dependency specification, including the mandatory pinned
+  PyO3 package and internal alias;
 - Cargo lock content and complete regular-file path-dependency trees;
 - release profile, overflow policy, and forced unwind panic strategy;
 - Cargo configuration content;
@@ -58,8 +62,8 @@ Generated inputs are not rewritten when their bytes are unchanged, preserving
 mtimes so Cargo validation does not trigger a needless relink or mapped-DLL
 replacement.
 
-Projects with declared user crates still invoke Cargo on an external artifact hit,
-allowing Cargo's build-script and incremental rules to validate inputs. Crabwalk's
+Every external artifact hit still invokes Cargo, allowing its dependency,
+build-script, and incremental rules to validate inputs. Crabwalk's
 cache identity remains content-addressed over the documented/default inputs plus
 explicit `extra-files` and `extra-env`; arbitrary undeclared build-script inputs are
 outside that contract. If Cargo produces different native bytes under an unchanged
@@ -77,7 +81,10 @@ crabwalk cache prune . --max-bytes 1073741824 --max-age-days 14
 Cleanup only considers direct child directories whose names are 64 lowercase hex
 characters beneath `.crabwalk/cache/artifacts`. Unknown entries and paths that
 resolve outside that directory are untouched. Defaults retain at most 2 GiB and
-30 days. Verified hits atomically update a `.last-access` marker. Pruning is
+30 days. Successful publication, validation, and native loading atomically update
+a `.last-access` marker. Entry age is the newer of content modification and the
+nanosecond value recorded in that marker, so repairing an old corrupt entry makes
+it fresh. Pruning is
 serialized globally, tries each fingerprint lock without blocking, checks
 process-lifetime native load leases, and revalidates the selected size/access
 snapshot after acquiring it. Busy, mapped, or changed entries are left for a later

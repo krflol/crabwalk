@@ -85,24 +85,34 @@ def test_package_graph_resolves_imports_reexports_and_module_calls(
         "demo_pkg.text.through_module",
     ]
     assert len(from_math.crates) == 1
-    assert from_math.crates[0].binding == "regex"
+    assert from_math.crates[0].package == "regex"
 
     plus_one = from_math.functions[0]
     returned = plus_one.body[0]
     assert isinstance(returned, ReturnIR)
     assert isinstance(returned.value, BinaryIR)
     assert isinstance(returned.value.left, CallIR)
-    assert returned.value.left.target == "cw_demo_pkg__math__double"
+    double_symbol = next(
+        function.rust_symbol
+        for function in from_math.functions
+        if function.qualified_name == "demo_pkg.math.double"
+    )
+    assert returned.value.left.target == double_symbol
 
     through_module = from_math.functions[-1]
     returned = through_module.body[0]
     assert isinstance(returned, ReturnIR)
     assert isinstance(returned.value, CallIR)
-    assert returned.value.target == "cw_demo_pkg__facade__plus_one"
+    plus_one_symbol = next(
+        function.rust_symbol
+        for function in from_math.functions
+        if function.qualified_name == "demo_pkg.facade.plus_one"
+    )
+    assert returned.value.target == plus_one_symbol
 
     generated = generate_project(from_math, "_crabwalk_demo_pkg_test")
-    assert "fn __cw_native_cw_demo_pkg__math__double" in generated.rust_source
-    assert "__cw_native_cw_demo_pkg__math__double(value)" in generated.rust_source
+    assert f"fn __cw_native_{double_symbol}" in generated.rust_source
+    assert f"__cw_native_{double_symbol}(value)" in generated.rust_source
     assert 'regex = { version = "1" }' in generated.cargo_toml
 
 
@@ -165,3 +175,29 @@ def value() -> rust.u64:
         analyze_project_path(package)
 
     assert captured.value.diagnostics[0].code == "CRAB205"
+
+
+def test_package_cycle_includes_parent_initializer_for_child_import(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "initializer_cycle"
+    child = package / "a"
+    child.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "x.py").write_text(
+        "from .a import b\nsome_symbol = 1\n",
+        encoding="utf-8",
+    )
+    (child / "__init__.py").write_text(
+        "from ..x import some_symbol\n",
+        encoding="utf-8",
+    )
+    (child / "b.py").write_text("", encoding="utf-8")
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_project_path(package)
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB204"
+    assert "initializer_cycle.x" in diagnostic.message
+    assert "initializer_cycle.a" in diagnostic.message

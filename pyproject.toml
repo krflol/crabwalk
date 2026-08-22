@@ -49,6 +49,8 @@ files = [
     "src/crabwalk/build/cargo.py",
     "src/crabwalk/build/fingerprint.py",
     "src/crabwalk/compiler/ir.py",
+    "src/crabwalk/compiler/naming.py",
+    "src/crabwalk/compiler/codegen.py",
     "src/crabwalk/compiler/validation.py",
     "src/crabwalk/config.py",
     "src/crabwalk/diagnostics.py",

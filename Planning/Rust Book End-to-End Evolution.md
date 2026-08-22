@@ -144,22 +144,22 @@ The loop is intentionally vertical. A helper name without IR, a code generator b
 ### Local verification snapshot
 
 On Windows x86-64 with CPython 3.11.8 and rustc/Cargo 1.97.0 on
-2026-08-21:
+2026-08-22:
 
-- `python -m pytest -q`: **74 passed in 510.42 seconds** on the final formatted worktree.
-- `python -m pytest tests/unit -q`: **45 passed in 1.57 seconds** after final formatting.
-- Chapter 11 teaching suite: **5 passed in 9.42 seconds**.
+- `python -m pytest -q`: **124 passed in 812.82 seconds** on the final formatted worktree.
+- `python -m pytest tests/unit -q`: **89 passed in 8.62 seconds** after final formatting.
+- Chapter 11 teaching suite: **5 passed in 3.70 seconds**.
 - The Chapters 1–21 native runner printed its all-assertions-passed marker.
 - Locked `crabwalk check` completed after the package rename and invariant
-  hardening with fingerprint `b1617c677e76ec95` on 2026-08-22.
-- `ruff format --check` accepted all 99 Python files, `ruff check` passed, and
-  `python -m compileall -q src tests examples` passed.
+  hardening with fingerprint `407206a49c3e33f0`.
+- `ruff format` accepted all 108 Python files unchanged, `ruff check`, scoped mypy
+  over 13 source modules, and `python -m compileall -q src tests examples` passed.
 - Expanded Rust was inspected for the generated `Add` implementations, UFCS
   calls, bounded raw-pointer/slice blocks, closure trait objects, loopback
   `TcpListener`, job type, and joining `ThreadPool::drop` path.
 
-No mypy configuration or executable is present in this environment, so a mypy
-result is not claimed.
+The current mypy gate includes naming and code generation but intentionally leaves
+the large frontend, runtime binder, and CLI as explicit typing debt.
 
 ## Risk register
 

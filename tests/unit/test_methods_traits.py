@@ -1,7 +1,10 @@
 from pathlib import Path
 
+import pytest
+
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_path
+from crabwalk.diagnostics import CrabwalkCompilationError
 
 
 METHOD_TRAIT_SOURCE = """\
@@ -63,12 +66,147 @@ def test_inherent_methods_and_trait_objects_lower_to_rust(tmp_path: Path) -> Non
 
     assert len(ir.traits) == 1
     assert ir.traits[0].methods[0].name == "draw"
-    assert "trait Draw {" in generated.rust_source
-    assert "impl Draw for Button {" in generated.rust_source
-    assert "impl Draw for SelectBox {" in generated.rust_source
+    trait_symbol = ir.traits[0].symbol
+    button_symbol = next(value.symbol for value in ir.structs if value.name == "Button")
+    select_symbol = next(
+        value.symbol for value in ir.structs if value.name == "SelectBox"
+    )
+    assert f"trait {trait_symbol} {{" in generated.rust_source
+    assert f"impl {trait_symbol} for {button_symbol} {{" in generated.rust_source
+    assert f"impl {trait_symbol} for {select_symbol} {{" in generated.rust_source
     assert "fn increment(&mut self, amount: u64) -> ()" in generated.rust_source
     assert "counter.value = (counter.value + amount);" in generated.rust_source
-    assert "Box::new(Button {" in generated.rust_source
-    assert "as Box<dyn Draw>" in generated.rust_source
+    assert f"Box::new({button_symbol} {{" in generated.rust_source
+    assert f"as Box<dyn {trait_symbol}>" in generated.rust_source
     assert "for component in components.iter()" in generated.rust_source
     assert "total = (total + component.draw());" in generated.rust_source
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "values.push(1)",
+        "values.pop()",
+    ],
+)
+def test_shared_vec_receiver_cannot_call_mutating_method(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    source = tmp_path / "shared_vec.py"
+    source.write_text(
+        f"""\
+from crabwalk import rust
+
+@rust.fn
+def invalid(values: rust.Ref[rust.Vec[rust.u64]]) -> None:
+    {body}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(source)
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB208"
+    assert diagnostic.span is not None
+
+
+def test_shared_domain_receiver_cannot_call_mutable_inherent_method(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "shared_domain.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.struct
+class Counter:
+    value: rust.u64
+
+@rust.method(Counter, name="increment")
+def increment(counter: rust.Mut[Counter]) -> None:
+    counter.value = counter.value + 1
+
+@rust.fn
+def invalid(counter: rust.Ref[Counter]) -> None:
+    counter.increment()
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(source)
+
+    assert captured.value.diagnostics[0].code == "CRAB208"
+
+
+def test_nested_owned_field_mutation_marks_the_root_binding_mutable(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "nested_place.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.struct
+class Bucket:
+    items: rust.Vec[rust.u64]
+
+@rust.fn
+def append(values: rust.Mut[rust.Vec[rust.u64]], value: rust.u64) -> None:
+    values.push(value)
+
+@rust.fn
+def append_local() -> rust.usize:
+    bucket: Bucket = Bucket(items=rust.Vec([1]))
+    bucket.items.push(2)
+    append(bucket.items, 3)
+    return bucket.items.len()
+""",
+        encoding="utf-8",
+    )
+
+    generated = generate_project(analyze_path(source), "_crabwalk_nested_place")
+
+    assert "let mut bucket: " in generated.rust_source
+    assert "bucket.items.push(2u64)" in generated.rust_source
+    assert "(&mut bucket.items, 3u64)" in generated.rust_source
+
+
+def test_shared_root_rejects_nested_field_mutation_but_allows_interior_mutability(
+    tmp_path: Path,
+) -> None:
+    invalid = tmp_path / "nested_shared.py"
+    invalid.write_text(
+        """\
+from crabwalk import rust
+
+@rust.struct
+class Bucket:
+    items: rust.Vec[rust.u64]
+
+@rust.fn
+def invalid(bucket: rust.Ref[Bucket]) -> None:
+    bucket.items.push(1)
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(invalid)
+    assert captured.value.diagnostics[0].code == "CRAB208"
+
+    valid = tmp_path / "interior.py"
+    valid.write_text(
+        """\
+from crabwalk import rust
+
+@rust.async_fn
+async def replace(cell: rust.Ref[rust.RefCell[rust.u64]], value: rust.u64) -> rust.u64:
+    return cell.replace(value)
+""",
+        encoding="utf-8",
+    )
+    generated = generate_project(analyze_path(valid), "_crabwalk_interior")
+    assert "cell.replace(value)" in generated.rust_source

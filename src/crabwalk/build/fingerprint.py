@@ -14,7 +14,11 @@ from functools import lru_cache
 from pathlib import Path
 
 from crabwalk import __version__
-from crabwalk.compiler.codegen import CODEGEN_SCHEMA_VERSION, PYO3_VERSION
+from crabwalk.compiler.codegen import (
+    CODEGEN_SCHEMA_VERSION,
+    PYO3_VERSION,
+    cargo_dependency_specification,
+)
 from crabwalk.compiler.ir import PackageIR
 
 _BUILD_ENVIRONMENT_KEYS = (
@@ -60,7 +64,7 @@ def build_fingerprint(
     toolchain_root = (project_root or Path(ir.source_path).parent).resolve()
     toolchain_files_hash = _toolchain_files_hash(toolchain_root)
     payload: dict[str, object] = {
-        "fingerprint_schema": 3,
+        "fingerprint_schema": 4,
         "crabwalk_version": __version__,
         "implementation_hash": _implementation_hash(),
         "ir_schema": ir.schema_version,
@@ -78,6 +82,7 @@ def build_fingerprint(
         "cargo": _tool_version("cargo", toolchain_root, toolchain_files_hash),
         "toolchain_files": toolchain_files_hash,
         "pyo3": PYO3_VERSION,
+        "generated_dependencies": cargo_dependency_specification(ir),
         "dependency_lock_hash": dependency_lock_hash,
         "cargo_policy": {"locked": locked, "offline": offline},
         "path_dependencies": {

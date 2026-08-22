@@ -12,6 +12,7 @@ from collections import Counter, OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Literal, TypeAlias
 
 from crabwalk.diagnostics import (
     CrabwalkCompilationError,
@@ -91,6 +92,7 @@ from .ir import (
     UnaryIR,
     WhileIR,
 )
+from .naming import mangle_dependency, mangle_item
 
 _ANALYSIS_CACHE_LIMIT = 64
 _analysis_cache: OrderedDict[tuple[str, str, str], PackageIR] = OrderedDict()
@@ -224,6 +226,17 @@ class _Signature:
         return self.symbol or self.name
 
 
+ReceiverAccess: TypeAlias = Literal["shared", "mutable", "owned", "interior"]
+
+
+@dataclass(frozen=True, slots=True)
+class _Place:
+    """A semantic storage location rooted in a local or parameter binding."""
+
+    root: str
+    projections: tuple[str, ...] = ()
+
+
 def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     """Analyze one Python module without importing or executing it."""
 
@@ -300,7 +313,12 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
         if isinstance(node, ast.ClassDef) and _has_rust_enum_decorator(node)
     ]
     identity = module_name or source_path.stem
-    traits = _discover_traits(tree, source_path, identity, lambda name: name)
+    traits = _discover_traits(
+        tree,
+        source_path,
+        identity,
+        lambda name: mangle_item(identity, name, namespace="type"),
+    )
     if not declarations and not struct_nodes and not enum_nodes and not traits:
         raise CrabwalkCompilationError(
             Diagnostic(
@@ -311,14 +329,21 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
             )
         )
 
-    crates = _discover_crates(tree, source_path)
+    discovered_crates = _discover_crates(tree, source_path)
+    crates = {
+        local_name: replace(
+            crate,
+            binding=mangle_dependency(identity, local_name),
+        )
+        for local_name, crate in discovered_crates.items()
+    }
     type_variables = _discover_type_variables(tree, source_path)
     struct_placeholders = {
         node.name: _struct_placeholder(
             node,
             source_path,
             identity,
-            node.name,
+            mangle_item(identity, node.name, namespace="type"),
         )
         for node in struct_nodes
     }
@@ -327,7 +352,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
             node,
             source_path,
             identity,
-            node.name,
+            mangle_item(identity, node.name, namespace="type"),
         )
         for node in enum_nodes
     }
@@ -370,7 +395,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
         declaration.name: replace(
             _analyze_signature(declaration, source_path, domain_types),
             module_name=identity,
-            symbol=declaration.name,
+            symbol=mangle_item(identity, declaration.name, namespace="fn"),
         )
         for declaration in declarations
     }
@@ -389,7 +414,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     )
     functions = _propagate_effects(functions)
     return PackageIR(
-        schema_version=17,
+        schema_version=18,
         module_name=identity,
         source_path=str(source_path),
         source_hash=hashlib.sha256(source_bytes).hexdigest(),
@@ -553,7 +578,7 @@ def _analyze_regular_package(
             source_path,
             name,
             lambda trait_name, module_name=name: _package_rust_symbol(
-                module_name, trait_name
+                module_name, trait_name, namespace="type"
             ),
         )
         invalid_async_declarations = [
@@ -592,7 +617,7 @@ def _analyze_regular_package(
                 declaration,
                 source_path,
                 name,
-                _package_rust_symbol(name, declaration.name),
+                _package_rust_symbol(name, declaration.name, namespace="type"),
             )
             for declaration in struct_nodes.values()
         }
@@ -601,7 +626,7 @@ def _analyze_regular_package(
                 declaration,
                 source_path,
                 name,
-                _package_rust_symbol(name, declaration.name),
+                _package_rust_symbol(name, declaration.name, namespace="type"),
             )
             for declaration in enum_nodes.values()
         }
@@ -1013,7 +1038,7 @@ def _analyze_regular_package(
         digest.update(b"\0")
         source_paths.append(str(module.path))
     return PackageIR(
-        schema_version=17,
+        schema_version=18,
         module_name=package_name,
         source_path=str(package_root / "__init__.py"),
         source_hash=digest.hexdigest(),
@@ -1216,18 +1241,27 @@ def _validate_package_import_graph(modules: dict[str, _PackageModule]) -> None:
                     )
                 if source is None or source not in modules:
                     continue
-                targets = {
-                    f"{source}.{alias.name}"
-                    for alias in node.names
-                    if f"{source}.{alias.name}" in modules
-                }
-                if source != name and not targets:
-                    targets.add(source)
+                targets = _import_initialization_targets(source, name, modules)
+                for alias in node.names:
+                    child = f"{source}.{alias.name}"
+                    if child in modules:
+                        targets.update(
+                            _import_initialization_targets(child, name, modules)
+                        )
                 edges[name].extend((target, node) for target in sorted(targets))
             elif isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name in modules and alias.name != name:
-                        edges[name].append((alias.name, node))
+                    if alias.name in modules:
+                        edges[name].extend(
+                            (target, node)
+                            for target in sorted(
+                                _import_initialization_targets(
+                                    alias.name,
+                                    name,
+                                    modules,
+                                )
+                            )
+                        )
 
     state = {name: 0 for name in modules}
     stack: list[str] = []
@@ -1257,12 +1291,34 @@ def _validate_package_import_graph(modules: dict[str, _PackageModule]) -> None:
             visit(name)
 
 
-def _package_rust_symbol(module_name: str, function_name: str) -> str:
-    return "cw_" + re.sub(
-        r"[^A-Za-z0-9_]+",
-        "_",
-        f"{module_name}__{function_name}".replace(".", "__"),
-    )
+def _import_initialization_targets(
+    target: str,
+    current: str,
+    modules: dict[str, _PackageModule],
+) -> set[str]:
+    """Return target modules whose package initializers Python must execute."""
+
+    current_parts = current.split(".")
+    initialized_ancestors = {
+        ".".join(current_parts[:length]) for length in range(1, len(current_parts))
+    }
+    target_parts = target.split(".")
+    return {
+        prefix
+        for length in range(1, len(target_parts) + 1)
+        if (prefix := ".".join(target_parts[:length])) in modules
+        and prefix != current
+        and prefix not in initialized_ancestors
+    }
+
+
+def _package_rust_symbol(
+    module_name: str,
+    source_name: str,
+    *,
+    namespace: str = "fn",
+) -> str:
+    return mangle_item(module_name, source_name, namespace=namespace)
 
 
 def _package_crate_binding(
@@ -1270,10 +1326,8 @@ def _package_crate_binding(
     module_name: str,
     local_name: str,
 ) -> str:
-    if module_name == package_name:
-        return local_name
-    relative = module_name.removeprefix(package_name).lstrip(".").replace(".", "__")
-    return f"cw_{relative}__{local_name}"
+    del package_name
+    return mangle_dependency(module_name, local_name)
 
 
 class _FunctionLowerer:
@@ -1498,17 +1552,11 @@ class _FunctionLowerer:
                         self.path,
                         target,
                     )
-                if (
-                    isinstance(target.value, ast.Name)
-                    and target.value.id in self.parameter_ownership
-                    and self.parameter_ownership[target.value.id] != "Mut"
-                ):
-                    _fail(
-                        "CRAB190",
-                        "Field assignment requires a mutable receiver",
-                        "Declare the receiver parameter as rust.Mut[Struct].",
-                        self.path,
+                if _place_from_ast(target.value) is not None:
+                    self._require_place_access(
                         target.value,
+                        "mutable",
+                        "field assignment",
                     )
                 value = self._lower_expression(node.value, environment, field.type_ref)
                 return FieldAssignIR(
@@ -2090,7 +2138,15 @@ class _FunctionLowerer:
                 result_type = operator_signature.return_type.underlying
                 if expected is not None:
                     _require_type(result_type, expected, self.path, node)
-                return BinaryIR("add", left, right, result_type, span)
+                self._require_place_access(node.left, "owned", "add operator")
+                return BinaryIR(
+                    "add",
+                    left,
+                    right,
+                    result_type,
+                    span,
+                    operator_signature.rust_symbol,
+                )
             right = self._lower_expression(node.right, environment, left.type_ref)
             _require_type(right.type_ref, left.type_ref, self.path, node.right)
             return BinaryIR(
@@ -2933,21 +2989,63 @@ class _FunctionLowerer:
                 SourceSpan.from_ast(self.path, node),
             )
         if parameter_type.rust_name == "Mut":
-            if not isinstance(node, ast.Name):
+            if _place_from_ast(node) is None:
                 _fail(
                     "CRAB140",
-                    "Mutable borrow requires a local name",
-                    "Pass a named mutable Rust value to rust.Mut[T].",
+                    "Mutable borrow requires a Rust place",
+                    "Pass a local, field, or indexed Rust place to rust.Mut[T].",
                     self.path,
                     node,
                 )
+            self._require_place_access(node, "mutable", "mutable argument")
             return BorrowIR(
                 "mutable",
                 value,
                 parameter_type,
                 SourceSpan.from_ast(self.path, node),
             )
+        if parameter_type.rust_name == "Owned":
+            self._require_place_access(node, "owned", "owned argument")
         return value
+
+    def _require_place_access(
+        self,
+        node: ast.expr,
+        required: ReceiverAccess,
+        operation: str,
+    ) -> None:
+        """Reject an operation that exceeds the root place's ownership grant."""
+
+        place = _place_from_ast(node)
+        if place is None:
+            return
+        ownership = self.parameter_ownership.get(place.root)
+        if ownership is None or required in {"shared", "interior"}:
+            return
+        if required == "mutable" and ownership in {"Owned", "Mut"}:
+            return
+        if required == "owned" and ownership == "Owned":
+            return
+        available = {
+            "Ref": "shared",
+            "Mut": "mutable",
+            "Owned": "owned",
+        }.get(ownership, "owned")
+        _fail(
+            "CRAB208",
+            "Receiver ownership is insufficient",
+            (
+                f"{operation} requires {required} access, but root binding "
+                f"'{place.root}' provides {available} access."
+            ),
+            self.path,
+            node,
+            (
+                f"Use rust.Mut[...] for mutable access to '{place.root}'."
+                if required == "mutable"
+                else f"Pass '{place.root}' as rust.Owned[...] before consuming it."
+            ),
+        )
 
     def _lower_rust_call(
         self,
@@ -3158,14 +3256,21 @@ class _FunctionLowerer:
                     node.args[2],
                 )
             receiver = self._lower_expression(node.args[1], environment)
-            implemented = any(
+            implementations = tuple(
                 signature.trait_symbol == trait_type.python_name
                 and signature.method_for is not None
                 and signature.method_for.rust_name == receiver.type_ref.rust_name
                 and signature.method_name == method_name
                 for signature in self.trait_impl_signatures
             )
-            if not implemented:
+            matching_implementations = tuple(
+                signature
+                for signature, matches in zip(
+                    self.trait_impl_signatures, implementations
+                )
+                if matches
+            )
+            if not matching_implementations:
                 _fail(
                     "CRAB194",
                     "Trait method is not implemented for this type",
@@ -3175,6 +3280,11 @@ class _FunctionLowerer:
                 )
             if expected is not None:
                 _require_type(method.return_type, expected, self.path, node)
+            self._require_place_access(
+                node.args[1],
+                "shared",
+                f"trait method '{method_name}'",
+            )
             return TraitCallIR(
                 trait_type.python_name,
                 receiver.type_ref,
@@ -3182,6 +3292,7 @@ class _FunctionLowerer:
                 receiver,
                 method.return_type,
                 span,
+                matching_implementations[0].rust_symbol,
             )
 
         if name == "call_twice":
@@ -3669,7 +3780,21 @@ class _FunctionLowerer:
             result = inherent.return_type.underlying
             if expected is not None:
                 _require_type(result, expected, self.path, node)
-            return MethodCallIR(receiver, method, arguments, result, span)
+            required = _receiver_access_for_ownership(
+                inherent.parameters[0].type_ref.ownership
+            )
+            assert isinstance(node.func, ast.Attribute)
+            self._require_place_access(node.func.value, required, f"method '{method}'")
+            return MethodCallIR(
+                receiver,
+                method,
+                arguments,
+                result,
+                span,
+                inherent.rust_symbol,
+                (inherent.rust_symbol,),
+                required,
+            )
 
         dynamic_type = semantic_receiver
         if dynamic_type.rust_name == "Box" and dynamic_type.arguments:
@@ -3692,7 +3817,26 @@ class _FunctionLowerer:
             result = trait_method.return_type
             if expected is not None:
                 _require_type(result, expected, self.path, node)
-            return MethodCallIR(receiver, method, (), result, span)
+            dispatch_targets = tuple(
+                sorted(
+                    signature.rust_symbol
+                    for signature in self.trait_impl_signatures
+                    if signature.trait_symbol == dynamic_type.python_name
+                    and signature.method_name == method
+                )
+            )
+            assert isinstance(node.func, ast.Attribute)
+            self._require_place_access(node.func.value, "shared", f"method '{method}'")
+            return MethodCallIR(
+                receiver,
+                method,
+                (),
+                result,
+                span,
+                None,
+                dispatch_targets,
+                "shared",
+            )
 
         if receiver_type.rust_name == "Vec":
             element_type = receiver_type.arguments[0]
@@ -4126,7 +4270,19 @@ class _FunctionLowerer:
 
         if expected is not None:
             _require_type(result, expected, self.path, node)
-        return MethodCallIR(receiver, method, arguments, result, span)
+        required = _builtin_receiver_access(receiver_type, method)
+        assert isinstance(node.func, ast.Attribute)
+        self._require_place_access(node.func.value, required, f"method '{method}'")
+        return MethodCallIR(
+            receiver,
+            method,
+            arguments,
+            result,
+            span,
+            None,
+            (),
+            required,
+        )
 
     def _lower_closure(
         self,
@@ -5655,6 +5811,71 @@ def _attribute_parts(node: ast.expr) -> tuple[str, ...]:
     return ()
 
 
+def _place_from_ast(node: ast.expr) -> _Place | None:
+    """Resolve a supported expression to its storage root and projections."""
+
+    if isinstance(node, ast.Name):
+        return _Place(node.id)
+    if isinstance(node, ast.Attribute):
+        base = _place_from_ast(node.value)
+        return (
+            None
+            if base is None
+            else _Place(base.root, (*base.projections, f"field:{node.attr}"))
+        )
+    if isinstance(node, ast.Subscript):
+        base = _place_from_ast(node.value)
+        return None if base is None else _Place(base.root, (*base.projections, "index"))
+    return None
+
+
+def _receiver_access_for_ownership(ownership: str | None) -> ReceiverAccess:
+    if ownership == "Mut":
+        return "mutable"
+    if ownership == "Owned":
+        return "owned"
+    return "shared"
+
+
+def _builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
+    """Return the Rust receiver capability for one built-in method."""
+
+    receiver = type_ref.underlying.rust_name
+    if receiver == "Vec" and method in {"push", "pop", "split_at_mut_sum"}:
+        return "mutable"
+    if receiver == "HashMap" and method in {
+        "insert",
+        "remove",
+        "entry_or_insert",
+        "add",
+    }:
+        return "mutable"
+    if receiver == "String" and method == "push_str":
+        return "mutable"
+    if receiver == "TcpStream" and method in {"write_get", "read_to_string"}:
+        return "mutable"
+    if receiver == "RefCell" and method == "replace":
+        return "interior"
+    if receiver == "Arc" and method in {"add_locked", "get_locked"}:
+        return "interior"
+    if receiver == "ThreadPool" and method == "finish":
+        return "owned"
+    if receiver == "ThreadHandle" and method == "join":
+        return "owned"
+    if receiver in {"Iterator", "Option", "Result"} and method in {
+        "map",
+        "filter",
+        "collect_vec",
+        "sum",
+        "count",
+        "unwrap",
+        "expect",
+        "unwrap_or",
+    }:
+        return "owned"
+    return "shared"
+
+
 def _assignment_counts(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> Counter[str]:
@@ -5694,16 +5915,18 @@ def _mutated_receiver_names(
                 "shutdown_write",
                 "read_to_string",
             }
-            and isinstance(child.func.value, ast.Name)
         ):
-            names.add(child.func.value.id)
+            place = _place_from_ast(child.func.value)
+            if place is not None:
+                names.add(place.root)
         if (
             isinstance(child, ast.Call)
             and _is_rust_call_named(child, "unsafe_write")
             and child.args
-            and isinstance(child.args[0], ast.Name)
         ):
-            names.add(child.args[0].id)
+            place = _place_from_ast(child.args[0])
+            if place is not None:
+                names.add(place.root)
     return names
 
 
@@ -5721,23 +5944,28 @@ def _mutably_borrowed_names(
             continue
         signature = signatures[child.func.id]
         for argument, parameter in zip(child.args, signature.parameters):
-            if parameter.type_ref.ownership == "Mut" and isinstance(argument, ast.Name):
-                names.add(argument.id)
+            if parameter.type_ref.ownership == "Mut":
+                place = _place_from_ast(argument)
+                if place is not None:
+                    names.add(place.root)
     return names
 
 
 def _field_assigned_names(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> set[str]:
-    return {
-        target.value.id
-        for child in ast.walk(node)
-        if isinstance(child, (ast.Assign, ast.AnnAssign))
-        for target in (
-            child.targets if isinstance(child, ast.Assign) else (child.target,)
-        )
-        if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
-    }
+    names: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = child.targets if isinstance(child, ast.Assign) else (child.target,)
+        for target in targets:
+            if not isinstance(target, ast.Attribute):
+                continue
+            place = _place_from_ast(target.value)
+            if place is not None:
+                names.add(place.root)
+    return names
 
 
 def _mutably_called_method_names(
@@ -5752,12 +5980,13 @@ def _mutably_called_method_names(
         and method.parameters[0].type_ref.ownership == "Mut"
     }
     return {
-        child.func.value.id
+        place.root
         for child in ast.walk(node)
         if isinstance(child, ast.Call)
         and isinstance(child.func, ast.Attribute)
-        and isinstance(child.func.value, ast.Name)
         and child.func.attr in mutable_method_names
+        for place in (_place_from_ast(child.func.value),)
+        if place is not None
     }
 
 
@@ -5836,6 +6065,10 @@ _EFFECT_ORDER = (
 
 def _propagate_effects(functions: tuple[FunctionIR, ...]) -> tuple[FunctionIR, ...]:
     """Infer semantic effects and propagate native-call effects transitively."""
+
+    from .validation import validate_function_symbol_identity
+
+    validate_function_symbol_identity(functions)
 
     direct: dict[str, set[Effect]] = {
         function.rust_symbol: _direct_function_effects(function)
@@ -5935,11 +6168,31 @@ def _expression_effects(expression: ExpressionIR) -> set[Effect]:
 
 def _statement_calls(statements: tuple[StatementIR, ...]) -> set[str]:
     return {
-        value.target
+        target
         for statement in statements
         for value in _statement_expressions(statement)
-        if isinstance(value, CallIR)
+        for target in _expression_dispatch_targets(value)
     }
+
+
+def _expression_dispatch_targets(expression: ExpressionIR) -> tuple[str, ...]:
+    if isinstance(expression, CallIR):
+        return (expression.target,)
+    if isinstance(expression, MethodCallIR):
+        values = expression.dispatch_targets
+        if (
+            expression.target_symbol is not None
+            and expression.target_symbol not in values
+        ):
+            values = (expression.target_symbol, *values)
+        return values
+    if isinstance(expression, TraitCallIR) and expression.target_symbol is not None:
+        return (expression.target_symbol,)
+    if isinstance(expression, FunctionPointerTwiceIR):
+        return (expression.target,)
+    if isinstance(expression, BinaryIR) and expression.target_symbol is not None:
+        return (expression.target_symbol,)
+    return ()
 
 
 def _statement_expressions(statement: StatementIR) -> tuple[ExpressionIR, ...]:

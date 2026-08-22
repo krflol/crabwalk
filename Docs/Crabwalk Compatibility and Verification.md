@@ -29,10 +29,11 @@ requires green CI artifacts for every advertised OS/Python pair.
 ```text
 tests/unit/
   AST discovery and rejection
-  typed IR and effect propagation
+  typed IR, complete dispatch effects, and boundary-placement rejection
   deterministic Rust/Cargo generation
-  package graph and crate lowering
-  ownership/domain/match lowering
+  parent-initializer package graph and crate lowering
+  semantic receiver/place ownership, domain, and match lowering
+  generated namespace uniqueness and mandatory-lock identity
   diagnostics, fingerprints, cache pruning, inspection, wheel format
 
 tests/integration/
@@ -45,6 +46,7 @@ tests/integration/
   unsafe FFI/global/thread-pool subprocess containment
   corruption, simultaneous publication, prune/build/load stress, and mapped-DLL leases
   complete-fingerprint ownership/load-order identity
+  generated-name collision smoke through rustc/PyO3
   Rayon and Python async boundary
   clean Crabwalk + regex application wheel install without Rust/Cargo
 ```
@@ -97,13 +99,16 @@ The benchmark policy and promotion requirements are in
 On 2026-08-22, the invariant-hardened worktree was exercised on CPython 3.11.8 and Windows
 x86-64 with rustc/Cargo 1.97.0:
 
-- the complete repository suite passed **101 tests in 687.20 seconds** on the
+- the complete repository suite passed **124 tests in 812.82 seconds** on the
   formatted, linted, scoped-mypy-clean worktree;
-- the final focused unit pass passed **67 tests in 3.80 seconds**, and the five
-  Chapter 11 teaching tests passed in **2.11 seconds**;
+- the final focused unit pass passed **89 tests in 8.62 seconds**, and the five
+  Chapter 11 teaching tests passed in **3.70 seconds**;
 - the single native Rust Book package passed its Chapter 1–21 assertions;
 - locked checking of `examples/the_rust_book` passed with fingerprint
-  `b1617c677e76ec95`;
+  `407206a49c3e33f0`;
+- dispatch/placement, semantic receiver/place, generated-namespace, mandatory-lock,
+  repaired-cache-age, and parent-initializer-cycle regressions passed, including a
+  real native `abs`/`String`/`pyo3` collision smoke;
 - unsafe `i32::MIN`, atomic concurrency, worker/outer/double-panic, and ambient
   `panic=abort` cases passed in isolated subprocesses;
 - cache evidence covered corruption, interrupted/simultaneous publication,
@@ -111,7 +116,7 @@ x86-64 with rustc/Cargo 1.97.0:
   crate-backed process validating without replacing the mapped DLL;
 - the clean mixed wheel installed beside the Crabwalk runtime wheel and imported
   with Rust/Cargo removed from `PATH`;
-- `ruff format --check` accepted all 105 Python files, Ruff lint, scoped mypy, and
+- `ruff format` accepted all 108 Python files unchanged, Ruff lint, scoped mypy, and
   Python byte-compilation passed for `src`, `tests`, and `examples`;
 - rustfmt parsed/stabilized the generated Rust Book project and Clippy's
   correctness lint group passed;
@@ -120,8 +125,9 @@ x86-64 with rustc/Cargo 1.97.0:
 - expanded Rust was inspected for real operator impls, UFCS, bounded unsafe
   blocks, closure trait objects, TCP binding, and graceful thread-pool Drop.
 
-The mypy gate intentionally covers 11 hardening/build-boundary modules; the large
-frontend, code generator, runtime binder, and CLI remain explicit typing debt.
+The mypy gate intentionally covers 13 hardening/build/compiler modules, including
+the generated-name and code-generation modules; the large frontend, runtime binder,
+and CLI remain explicit typing debt.
 These are local candidate results, not release artifacts; the GitHub OS/Python
 matrix has not yet run.
 

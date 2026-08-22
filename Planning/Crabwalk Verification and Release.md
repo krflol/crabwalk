@@ -317,7 +317,9 @@ Each of these should not cause a miss unless documented:
 - Cache entry is read-only.
 - Cleanup runs while another process loads an entry.
 
-A valid-hit test injects/logs the process runner and asserts zero Cargo/rustc processes, not just cache_status == hit.
+A valid-hit test injects/logs the process runner and asserts that Cargo validates
+the complete generated graph without relinking, changing artifact bytes, or
+republishing—not merely that `cache_status == hit`.
 
 ## ABI and runtime verification
 
@@ -438,7 +440,7 @@ Measure before assigning thresholds:
 |---|---|
 | Cold compile | Report frontend, codegen, dependency build, crate build, and load separately. |
 | Warm Cargo build | Distinguish Cargo dependency reuse from Crabwalk artifact hit. |
-| Crabwalk cache hit | Zero Cargo/rustc for dependency-free projects; user crates may run Cargo validation without a relink. |
+| Crabwalk cache hit | Cargo validates the mandatory generated dependency graph without relinking or republishing; report that validation separately. |
 | Cached import | Content-keyed static analysis/fingerprinting and verified load only; report each phase. |
 | Primitive Python→Rust call | Compare wrapper overhead across supported Python versions. |
 | Native loop/recursion | Confirm work stays in Rust and scales independently of Python tracing. |
@@ -456,7 +458,8 @@ Release gates should initially prevent severe regressions relative to a checked-
 - [x] Invalid u64 inputs fail correctly.
 - [x] Unsupported syntax fails before codegen.
 - [x] One rustc error maps to the intended Python tokens.
-- [x] Second-process unchanged run starts no Cargo process.
+- [x] Second-process unchanged run lets Cargo validate the mandatory graph without
+  relinking or republishing the native artifact.
 - [x] Two fingerprints coexist in one process.
 - [ ] Windows and Linux required jobs pass.
 - [x] Generated Rust/IR/map/build inputs are inspectable.

@@ -20,8 +20,8 @@ print(fibonacci(40))
 The current alpha includes:
 
 - checked Rust primitives, `String`, borrowed `Str`, `Vec`, `Option`, and `Result`;
-- locals, arithmetic, conditionals, loops, native calls, recursion, and a typed
-  method capability table;
+- locals, arithmetic, conditionals, loops, native calls, recursion, and semantic
+  receiver/place capability checking;
 - one native extension per regular Python package, including imports/re-exports;
 - crates.io, path, and Git Cargo dependencies with persisted lock state;
 - `Owned`, `Ref`, and `Mut` handles with move/use-after-move and call-scoped
@@ -30,7 +30,8 @@ The current alpha includes:
 - general patterns and guards, inherent methods, trait objects, selected
   advanced/unsafe Rust, native async, and a finite native thread pool;
 - Python `print` versus native `rust.println`, panic containment, typed `Result`
-  errors, typed effect-driven GIL policy, and non-panicking worker teardown;
+  errors, dispatch-aware typed effects, boundary-placement validation, and
+  non-panicking worker teardown;
 - native Rayon iterators and an explicit `rust.async_call` Python async boundary;
 - verified artifact caching, inspection commands, and wheels with embedded native
   extensions that need no Rust toolchain on the consumer machine.
@@ -63,8 +64,9 @@ crabwalk cache prune [PROJECT] [--dry-run]
 ```
 
 Generated Rust and disposable build/cache state live under `.crabwalk/`.
-Resolved Cargo dependency locks live under `crabwalk-locks/` and should be
-committed for applications that declare crates.
+Resolved generated Cargo dependency locks live under `crabwalk-locks/` and should
+be committed. Every compilation unit has one because its graph includes mandatory
+PyO3 even when source declares no additional crate.
 
 Normal builds may maintain a copied dependency lock and persist an intentional
 Cargo update. Pass `--locked` when the lock must remain byte-for-byte unchanged.

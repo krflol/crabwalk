@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import subprocess
+import os
+import time
 from pathlib import Path
 from types import ModuleType
 
 import pytest
 
 from crabwalk.build.cargo import CargoBuilder, CargoOutcome
+from crabwalk.build.cache import prune_artifact_cache
 from crabwalk.diagnostics import CrabwalkCompilationError
 from crabwalk.service import CompilationService
 
@@ -45,6 +48,7 @@ class _RecordingCargo(CargoBuilder):
     def __init__(self) -> None:
         self.locked_values: list[bool] = []
         self.update_once = False
+        self.generate_count = 0
 
     def generate_lockfile(
         self,
@@ -53,6 +57,7 @@ class _RecordingCargo(CargoBuilder):
         offline: bool = False,
     ) -> CargoOutcome:
         del offline
+        self.generate_count += 1
         (project_dir / "Cargo.lock").write_text(
             "version = 4\n# initial\n", encoding="utf-8"
         )
@@ -114,9 +119,48 @@ def matches(value: rust.Str) -> rust.bool:
     assert "--locked" in locked.planned_command
 
 
+def test_mandatory_pyo3_graph_is_locked_without_user_crates(tmp_path: Path) -> None:
+    source = tmp_path / "mandatory.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def identity(value: rust.u64) -> rust.u64:
+    return value
+""",
+        encoding="utf-8",
+    )
+    cargo = _RecordingCargo()
+    service = CompilationService(cargo)
+
+    first = service.compile_path(source, mode="check")
+    cargo.locked_values.clear()
+    second = service.compile_path(source, mode="check", locked=True)
+
+    assert cargo.generate_count == 1
+    assert first.build_inputs is not None
+    assert first.build_inputs["dependency_lock_hash"] is not None
+    assert first.build_inputs["generated_dependencies"]
+    assert second.fingerprint != first.fingerprint
+    assert cargo.locked_values == [True]
+
+
 class _ArtifactCargo(CargoBuilder):
     def __init__(self) -> None:
         self.run_count = 0
+
+    def generate_lockfile(
+        self,
+        project_dir: Path,
+        *,
+        offline: bool = False,
+    ) -> CargoOutcome:
+        del offline
+        (project_dir / "Cargo.lock").write_text(
+            "version = 4\n# fixed\n", encoding="utf-8"
+        )
+        return CargoOutcome(("cargo", "generate-lockfile"), (), "", "", None)
 
     def run(
         self,
@@ -172,6 +216,126 @@ def identity(value: rust.u64) -> rust.u64:
     assert second.cache_status == "in-process"
     assert cargo.run_count == 1
     assert len(loaded_modules) == 1
+
+
+def test_no_user_crate_cache_hit_is_still_validated_by_cargo(tmp_path: Path) -> None:
+    source = tmp_path / "validated.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def identity(value: rust.u64) -> rust.u64:
+    return value
+""",
+        encoding="utf-8",
+    )
+    cargo = _ArtifactCargo()
+    service = CompilationService(cargo)
+
+    service.compile_path(source)
+    second = service.compile_path(source)
+
+    assert second.cache_hit
+    assert cargo.run_count == 2
+
+
+class _LockChangingArtifactCargo(_ArtifactCargo):
+    def __init__(self) -> None:
+        super().__init__()
+        self.build_fingerprints: list[str] = []
+
+    def run(
+        self,
+        project_dir: Path,
+        target_dir: Path,
+        extension_name: str,
+        mode: str,
+        *,
+        locked: bool = False,
+        offline: bool = False,
+    ) -> CargoOutcome:
+        del target_dir, mode, locked, offline
+        self.run_count += 1
+        self.build_fingerprints.append(project_dir.name)
+        if self.run_count == 1:
+            (project_dir / "Cargo.lock").write_text(
+                "version = 4\n# updated\n", encoding="utf-8"
+            )
+        artifact = project_dir / f"{extension_name}.native"
+        artifact.write_bytes(b"native updated graph")
+        return CargoOutcome(("cargo", "build"), (), "", "", artifact)
+
+
+def test_lock_update_never_publishes_under_the_old_fingerprint(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "lock_update_build.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def identity(value: rust.u64) -> rust.u64:
+    return value
+""",
+        encoding="utf-8",
+    )
+    cargo = _LockChangingArtifactCargo()
+
+    result = CompilationService(cargo).compile_path(source)
+
+    assert cargo.run_count == 2
+    old_fingerprint, new_fingerprint = cargo.build_fingerprints
+    assert result.fingerprint == new_fingerprint
+    assert old_fingerprint != new_fingerprint
+    assert not (
+        tmp_path / ".crabwalk" / "cache" / "artifacts" / old_fingerprint
+    ).exists()
+
+
+def test_repaired_entry_refreshes_access_before_pruning(tmp_path: Path) -> None:
+    source = tmp_path / "repair.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def identity(value: rust.u64) -> rust.u64:
+    return value
+""",
+        encoding="utf-8",
+    )
+    cargo = _ArtifactCargo()
+    service = CompilationService(cargo)
+    first = service.compile_path(source)
+    service.compile_path(source)
+    assert first.artifact is not None
+
+    entry = first.artifact.parent
+    first.artifact.write_bytes(b"corrupt")
+    old = time.time() - 10_000
+    for path in (
+        first.artifact,
+        entry / "artifact-manifest.json",
+        entry / ".last-access",
+    ):
+        os.utime(path, (old, old))
+    (entry / ".last-access").write_text(
+        f"{int(old * 1_000_000_000)}\n", encoding="utf-8"
+    )
+    os.utime(entry / ".last-access", (old, old))
+
+    repaired = service.compile_path(source)
+    pruned = prune_artifact_cache(
+        tmp_path / ".crabwalk",
+        max_bytes=None,
+        max_age_seconds=60,
+    )
+
+    assert repaired.artifact == first.artifact
+    assert pruned.removed == ()
+    assert first.artifact.is_file()
 
 
 class _ChangingArtifactCargo(CargoBuilder):

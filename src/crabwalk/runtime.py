@@ -13,7 +13,8 @@ from typing import Any, Callable
 from crabwalk._version import RUNTIME_ABI_VERSION, __version__
 from crabwalk.build.cache import read_json, sha256_file
 from crabwalk.build.loader import load_extension
-from crabwalk.compiler.codegen import function_releases_gil, owned_class_names
+from crabwalk.compiler.codegen import function_releases_gil
+from crabwalk.compiler.naming import owned_class_names
 from crabwalk.compiler.frontend import (
     analyze_project_path,
     project_source_anchor,
