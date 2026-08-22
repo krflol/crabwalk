@@ -133,7 +133,7 @@ def test_installed_wheel_uses_embedded_extension_without_rust(
         check=False,
     )
     assert runtime_built.returncode == 0, runtime_built.stderr
-    runtime_wheels = list(runtime_dist.glob("crabwalk-*.whl"))
+    runtime_wheels = list(runtime_dist.glob("crabwalk_lang-*.whl"))
     assert len(runtime_wheels) == 1
     runtime_wheel = runtime_wheels[0]
     with zipfile.ZipFile(runtime_wheel) as archive:
