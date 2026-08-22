@@ -1,23 +1,86 @@
 # Crabwalk
 
-Crabwalk is an experimental compiler/runtime for opting valid Python functions
+**Python outside. Rust inside.**
+
+Crabwalk is a compiler/runtime for opting an explicit subset of Python functions
 into real Rust semantics and native execution. There is no interpreted fallback:
-accepted `@rust.fn` bodies become Rust, and unsupported source fails with a
-source-oriented `CRAB` diagnostic.
+accepted `@rust.fn` bodies become inspectable Rust, rustc checks the generated
+program, and unsupported source fails with a source-oriented `CRAB` diagnostic.
 
 ```python
 from crabwalk import rust
 
-@rust.fn
-def fibonacci(n: rust.u64) -> rust.u64:
-    if n <= 1:
-        return n
-    return fibonacci(n - 1) + fibonacci(n - 2)
+rayon = rust.crate("rayon", version="1.12.0")
 
-print(fibonacci(40))
+@rust.fn
+def parallel_sum(n: rust.u64) -> rust.u64:
+    values: rust.Vec[rust.u64] = rust.Vec([])
+    for value in range(n):
+        values.push(value)
+    return values.par_iter().copied().sum()
+
+print(parallel_sum(5_000_000))
 ```
 
-The current alpha includes:
+Those annotations are concrete Rust types, `Vec[rust.u64]` becomes `Vec<u64>`,
+and `par_iter()` is real Rayon parallelism resolved through Cargo.
+
+## Why Crabwalk
+
+Python keeps ownership of the application, libraries, orchestration, and
+presentation. Selected typed regions gain native execution, Cargo crates, rustc
+checking, explicit ownership, GIL-aware concurrency, and source-mapped compiler
+diagnostics without requiring a handwritten PyO3 project for every kernel.
+
+- **Gradual native adoption:** move one hot path at a time instead of starting a
+  ground-up rewrite.
+- **Two ecosystems in one program:** compose FastAPI, NumPy, and Matplotlib with
+  Rayon, `libm`, and other expressible Cargo APIs.
+- **Visible boundaries:** conversions, moves, shared borrows, mutable borrows,
+  panic translation, and GIL behavior are explicit.
+- **Less integration machinery:** Crabwalk generates Cargo and PyO3 projects,
+  builds and caches extensions, and maps native errors back to Python source.
+- **An extraction path:** inspect generated Rust today and promote a mature kernel
+  into a purpose-built Rust crate when it outgrows the application boundary.
+
+Crabwalk does not claim that arbitrary Python is Rust. It statically checks its
+supported compiled subset, asks rustc to check the generated Rust, and validates
+exported values at runtime boundaries.
+
+## Showcase
+
+The reproducible showcase combines FastAPI, NumPy, Matplotlib, Rayon, `libm`,
+owned Rust vectors, async scheduling, and GIL-detached native work:
+
+```text
+python -m pip install fastapi uvicorn numpy matplotlib
+python examples/showcase/showcase_api.py
+```
+
+Open `http://127.0.0.1:8001/docs`, or run the focused examples:
+
+```text
+python examples/showcase/true_par.py
+python examples/showcase/fastapi_mre.py
+python examples/showcase/ml_mre.py
+```
+
+Verified warm runs on the development machine showed a Rayon sum around **7.8x**
+faster than an explicit Python loop, and the educational logistic-regression
+trainer around **3.4x–5.5x** faster than its vectorized NumPy implementation and
+**8.7x–17.6x** faster than equivalent scalar Python loops. These are local kernel
+measurements—not universal speed claims—and exclude compilation, HTTP transport,
+serialization, evaluation, and plotting.
+
+![Logistic regression trained in Rust and plotted in Python](examples/showcase/ml_decision_curve.png)
+
+See the [full showcase guide](examples/showcase/README.md) for routes, expected
+outputs, ownership observations, measurement boundaries, and precise wording for
+public claims.
+
+## What works today
+
+The current compiler surface includes:
 
 - checked Rust primitives, `String`, borrowed `Str`, `Vec`, `Option`, and `Result`;
 - locals, arithmetic, conditionals, loops, native calls, recursion, and semantic
