@@ -249,7 +249,7 @@ lowering.
 ## Package import policy
 
 Regular packages compile as one crate with explicit supported imports and
-re-exports. The alpha compiler rejects internal import cycles (`CRAB204`) and
+re-exports. The current compiler rejects internal import cycles (`CRAB204`) and
 `import *` (`CRAB205`) rather than copying partially initialized bindings or
 approximating Python's `__all__` and private-name rules. Cycle analysis includes
 the referenced module, selected child module, and every parent-package initializer

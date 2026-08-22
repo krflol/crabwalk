@@ -70,5 +70,5 @@ The 2026-08-22 invariant-hardening checkpoint on Windows/CPython 3.11 passed all
 124 repository tests in 812.82 seconds, all 89 focused unit tests, the 5 Chapter 11
 teaching tests, the package runner, unsafe subprocess cases, dispatch/receiver/name
 interaction cases, cache/load-lease stress, and the clean wheel consumer. Its
-strict locked check fingerprint was `9394c710f14a05e0`. Cross-platform
+strict locked check fingerprint was `0d89ca2a3df1dfd9`. Cross-platform
 release-matrix evidence remains a separate release gate.

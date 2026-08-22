@@ -36,7 +36,9 @@ tags:
 - [[Planning/Crabwalk Roadmap|Roadmap and work breakdown]] — milestone tasks and exit gates.
 - [[Planning/Crabwalk Verification and Release|Verification and release plan]] — required test and release evidence.
 - [[Planning/Rust Book End-to-End Evolution|Rust Book end-to-end evolution]] — chapter-driven compiler expansion, coverage, and gates.
-- [[Planning/Crabwalk Alpha Artifact Inventory|Alpha artifact inventory]] — protocols, inputs, and still-required release outputs.
+- [[Planning/Crabwalk Alpha Artifact Inventory|1.0.0 artifact inventory]] — protocols, inputs, and release outputs.
+- [[GOVERNANCE|Governance]] — maintainer responsibilities, contributions, and release decisions.
+- [[SECURITY|Security policy]] — supported releases and private vulnerability reporting.
 - [[Planning/Crabwalk Risks and Decisions|Risks and decisions]] — risk register and unresolved product choices.
 - [[Docs/Crabwalk Getting Started|Getting started]] — the implemented user path.
 - [[Docs/Crabwalk Language Reference|Language reference]] — accepted syntax and semantics today.

@@ -10,19 +10,20 @@ tags:
 
 # Crabwalk Compatibility and Verification
 
-## Advertised alpha matrix
+## Supported release matrix
 
 | Dimension | Policy |
 |---|---|
 | Python | CPython 3.11–3.14; interpreter-specific extension ABI |
 | Rust | current stable toolchain; local evidence: rustc/Cargo 1.97.0 |
 | PyO3 | pinned to 0.29.2 with `extension-module` plus `pyo3-build-config` link setup |
-| OS | Windows, Linux, macOS are CI targets; Windows x86-64 is locally verified |
+| OS | Windows, Linux, and macOS in the required GitHub Actions native matrix |
 | Profile | Cargo release profile with overflow checks enabled |
 | Package | regular Python package or standalone module for source use |
 
-The range is a test target, not a promise that an unrun platform works. A release
-requires green CI artifacts for every advertised OS/Python pair.
+The CPython range and operating systems above are release-tested targets. Native
+application artifacts remain interpreter-, operating-system-, and architecture-
+specific; Crabwalk's own compiler/runtime distribution is pure Python.
 
 ## Test layers
 
@@ -105,7 +106,7 @@ x86-64 with rustc/Cargo 1.97.0:
   Chapter 11 teaching tests passed in **3.70 seconds**;
 - the single native Rust Book package passed its Chapter 1–21 assertions;
 - locked checking of `examples/the_rust_book` passed with fingerprint
-  `9394c710f14a05e0`;
+  `0d89ca2a3df1dfd9`;
 - dispatch/placement, semantic receiver/place, generated-namespace, mandatory-lock,
   repaired-cache-age, and parent-initializer-cycle regressions passed, including a
   real native `abs`/`String`/`pyo3` collision smoke;
@@ -128,8 +129,13 @@ x86-64 with rustc/Cargo 1.97.0:
 The mypy gate intentionally covers 13 hardening/build/compiler modules, including
 the generated-name and code-generation modules; the large frontend, runtime binder,
 and CLI remain explicit typing debt.
-These are local candidate results, not release artifacts; the GitHub OS/Python
-matrix has not yet run.
+
+GitHub Actions
+[run 32594114165](https://github.com/krflol/crabwalk/actions/runs/32594114165)
+passed all nine hardening jobs on 2026-08-22: the complete native suite on Windows,
+Linux, and macOS for CPython 3.11 and 3.14, unit lanes for CPython 3.12 and 3.13,
+and the quality gate. The release commit is subjected to the same matrix before
+publication.
 
 The deeper release checklist remains in
 [[Planning/Crabwalk Verification and Release]].

@@ -122,18 +122,18 @@ ABI/platform. It:
 2. copies `.py`, `.pyi`, and `py.typed` plus explicitly configured `wheel-include`
    package data, while rejecting symlinks and common secret/private-key names;
 3. embeds the extension beneath `_crabwalk_native/`;
-4. embeds `_crabwalk_prebuilt.json` with source/artifact hashes, exact alpha
+4. embeds `_crabwalk_prebuilt.json` with source/artifact hashes, exact Crabwalk
    Crabwalk version, and runtime ABI version;
 5. writes deterministic wheel metadata and a hashed `RECORD`;
 6. declares the matching Crabwalk runtime version as a dependency.
 
 On import, the installed runtime re-analyzes source without executing it, verifies
-the manifest schema/runtime ABI/exact alpha version/source hash, contains the
+the manifest schema/runtime ABI/exact Crabwalk version/source hash, contains the
 artifact path within the package, verifies the binary hash, and loads the matching
 extension name. Any mismatch raises `CRAB405`; it never silently invokes Cargo
 from an installed wheel.
 
 Wheels are interpreter-specific (`cpXY-cpXY-platform`), not `abi3`. Build one per
-supported CPython/platform combination. This is an alpha wheel command rather than
-a general PEP 517 backend: distribution metadata/dependency merging beyond the
+supported CPython/platform combination. This is a focused mixed-wheel command
+rather than a general PEP 517 backend: distribution metadata/dependency merging beyond the
 required Crabwalk runtime is still the packager's responsibility.

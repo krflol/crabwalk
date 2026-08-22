@@ -84,7 +84,7 @@ performed under the fingerprint lock and retains a per-process reader lease for
 the mapped lifetime; pruning uses a separate global lock, nonblocking entry locks,
 access markers refreshed after publication/validation/load, and post-lock
 revalidation. Prebuilt wheel
-artifacts additionally bind the Python source, package identity, exact alpha
+artifacts additionally bind the Python source, package identity, exact Crabwalk
 runtime, and runtime ABI. Artifact paths are resolved inside the installed package
 before loading. Wheel construction rejects package symlinks and common credential
 or private-key names.
@@ -104,7 +104,7 @@ distribution.
 - CPython only; interpreter-specific wheels; free-threaded CPython is not advertised.
 - Regular packages only; namespace packages and multiple configured top-level
   packages in one distribution are not supported.
-- Internal package import cycles and `import *` are rejected for alpha rather than
+- Internal package import cycles and `import *` are rejected by the current compiler rather than
   approximated. Use explicit imports and an acyclic compiler-visible graph.
 - No general Python calls, objects, reflection, exceptions-as-control-flow,
   generators, or dynamic imports inside `@rust.fn`. Closures are accepted only in

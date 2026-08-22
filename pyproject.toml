@@ -1,14 +1,38 @@
 [build-system]
-requires = ["setuptools>=65"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "crabwalk"
-version = "0.0.1"
-description = "An opt-in Rust semantic and native execution layer for Python"
+version = "1.0.0"
+description = "Compile an explicit Python subset into inspectable, rustc-checked native extensions"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["compiler", "native-extension", "pyo3", "python", "rust"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Compilers",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/krflol/crabwalk"
+Documentation = "https://github.com/krflol/crabwalk/tree/main/Docs"
+Repository = "https://github.com/krflol/crabwalk.git"
+Issues = "https://github.com/krflol/crabwalk/issues"
+Changelog = "https://github.com/krflol/crabwalk/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 quality = [

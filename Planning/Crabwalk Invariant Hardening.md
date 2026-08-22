@@ -222,13 +222,15 @@ back to Cargo from an installed mixed wheel.
 - [x] Full local suite on the final worktree: 124 tests in 812.82 seconds on
   Windows/CPython 3.11.
 - [x] Final focused unit pass: 89 tests in 8.62 seconds; Chapter 11 teaching pass:
-  5 tests in 3.70 seconds; locked Rust Book fingerprint: `9394c710f14a05e0`.
-- [ ] Windows/Linux/macOS × CPython 3.11/3.14 native matrix.
-- [ ] CPython 3.12/3.13 unit lanes.
+  5 tests in 3.70 seconds; locked Rust Book fingerprint: `0d89ca2a3df1dfd9`.
+- [x] Windows/Linux/macOS × CPython 3.11/3.14 native matrix: GitHub Actions
+  [run 32594114165](https://github.com/krflol/crabwalk/actions/runs/32594114165).
+- [x] CPython 3.12/3.13 unit lanes in the same successful workflow run.
 - [ ] Miri or sanitizer harness for the focused unsafe helper crate.
 - [x] Record one post-hardening performance smoke sample; keep budgets disabled.
 - [ ] Repeated performance samples and budgets.
-- [ ] License, governance, support, and release-channel decision.
+- [x] Apache-2.0 license, maintainer-led governance, GitHub Issues support, private
+  vulnerability reporting, and stable `1.x` release channel documented.
 - [ ] Build, hash, inventory, install, and archive actual release artifacts.
 
 ## Verification commands

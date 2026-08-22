@@ -1,5 +1,10 @@
 # Crabwalk
 
+[![CI](https://github.com/krflol/crabwalk/actions/workflows/ci.yml/badge.svg)](https://github.com/krflol/crabwalk/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/crabwalk.svg)](https://pypi.org/project/crabwalk/)
+[![Python](https://img.shields.io/pypi/pyversions/crabwalk.svg)](https://pypi.org/project/crabwalk/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/krflol/crabwalk/blob/main/LICENSE)
+
 **Python outside. Rust inside.**
 
 Crabwalk is a compiler/runtime for opting an explicit subset of Python functions
@@ -72,11 +77,11 @@ trainer around **3.4x–5.5x** faster than its vectorized NumPy implementation a
 measurements—not universal speed claims—and exclude compilation, HTTP transport,
 serialization, evaluation, and plotting.
 
-![Logistic regression trained in Rust and plotted in Python](examples/showcase/ml_decision_curve.png)
+![Logistic regression trained in Rust and plotted in Python](https://raw.githubusercontent.com/krflol/crabwalk/main/examples/showcase/ml_decision_curve.png)
 
-See the [full showcase guide](examples/showcase/README.md) for routes, expected
-outputs, ownership observations, measurement boundaries, and precise wording for
-public claims.
+See the [full showcase guide](https://github.com/krflol/crabwalk/tree/main/examples/showcase)
+for routes, expected outputs, ownership observations, measurement boundaries, and
+precise wording for public claims.
 
 ## What works today
 
@@ -106,12 +111,15 @@ The current compiler surface includes:
 - a native linker suitable for CPython extensions
 
 Consumers installing a Crabwalk-built application wheel do not need Rust or
-Cargo. Run the readiness probe before developing from source:
+Cargo. Install Crabwalk and run the readiness probe before developing from source:
 
 ```text
-python -m pip install -e .
+python -m pip install crabwalk
 crabwalk doctor
 ```
+
+For an editable checkout, replace the install command with
+`python -m pip install -e .`.
 
 ## Commands
 
@@ -167,20 +175,29 @@ python examples/parallel/app.py
 python -m the_rust_book.run_all
 ```
 
-The [Rust Book adaptation](examples/the_rust_book/README.md) covers Chapters 1–21 and doubles as an end-to-end compiler evolution suite.
+The [Rust Book adaptation](https://github.com/krflol/crabwalk/tree/main/examples/the_rust_book)
+covers Chapters 1–21 and doubles as an end-to-end compiler evolution suite.
 
 ## Documentation
 
-- [Project hub](Crabwalk%20Project%20Hub.md)
-- [Getting started](Docs/Crabwalk%20Getting%20Started.md)
-- [Language reference](Docs/Crabwalk%20Language%20Reference.md)
-- [Ownership and domain types](Docs/Crabwalk%20Ownership%20and%20Domain%20Types.md)
-- [Tooling, packaging, and cache](Docs/Crabwalk%20Tooling%20Packaging%20and%20Cache.md)
-- [Security and limitations](Docs/Crabwalk%20Security%20and%20Limitations.md)
-- [Compatibility and verification](Docs/Crabwalk%20Compatibility%20and%20Verification.md)
-- [Invariant-hardening plan](Planning/Crabwalk%20Invariant%20Hardening.md)
-- [Changelog and migration notes](CHANGELOG.md)
+- [Project hub](https://github.com/krflol/crabwalk/blob/main/Crabwalk%20Project%20Hub.md)
+- [Getting started](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Getting%20Started.md)
+- [Language reference](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Language%20Reference.md)
+- [Ownership and domain types](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Ownership%20and%20Domain%20Types.md)
+- [Tooling, packaging, and cache](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Tooling%20Packaging%20and%20Cache.md)
+- [Security and limitations](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Security%20and%20Limitations.md)
+- [Compatibility and verification](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Compatibility%20and%20Verification.md)
+- [Governance](https://github.com/krflol/crabwalk/blob/main/GOVERNANCE.md)
+- [Security policy](https://github.com/krflol/crabwalk/blob/main/SECURITY.md)
+- [Invariant-hardening plan](https://github.com/krflol/crabwalk/blob/main/Planning/Crabwalk%20Invariant%20Hardening.md)
+- [Changelog and migration notes](https://github.com/krflol/crabwalk/blob/main/CHANGELOG.md)
 
-The original long-form vision remains in [crabwalk.md](crabwalk.md). The
-implemented contract is intentionally narrower; the reference documents state
-what is accepted today.
+The original long-form vision remains in
+[crabwalk.md](https://github.com/krflol/crabwalk/blob/main/crabwalk.md). The
+implemented contract is intentionally narrower; the reference documents state what
+is accepted today.
+
+## License
+
+Crabwalk is licensed under the
+[Apache License 2.0](https://github.com/krflol/crabwalk/blob/main/LICENSE).

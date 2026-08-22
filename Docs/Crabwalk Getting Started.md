@@ -16,11 +16,17 @@ time a Crabwalk decorator executes. Unchanged imports reuse a verified,
 content-addressed artifact. Installed application wheels load their embedded
 artifact and do not invoke Cargo.
 
-## Install for development
+## Install
+
+```powershell
+python -m pip install crabwalk
+crabwalk doctor
+```
+
+For an editable source checkout:
 
 ```powershell
 python -m pip install -e .
-crabwalk doctor
 python -m pytest tests/unit
 ```
 
@@ -88,7 +94,7 @@ my_package/
 
 Namespace packages are not currently compilation units. Pass a file or regular
 package directory to the CLI. Internal import cycles and `import *` are rejected
-in the alpha compiler; use an acyclic graph and explicit imported names.
+in the current compiler; use an acyclic graph and explicit imported names.
 
 For explicit, bounded project discovery:
 

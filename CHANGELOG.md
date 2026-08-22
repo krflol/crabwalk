@@ -1,9 +1,12 @@
 # Changelog
 
-All notable Crabwalk changes will be recorded here. The project has not published
-a release yet; the entries below describe the current `0.0.1` alpha candidate.
+All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
+
+No changes yet.
+
+## [1.0.0] - 2026-08-22
 
 ### Added
 
@@ -50,7 +53,7 @@ a release yet; the entries below describe the current `0.0.1` alpha candidate.
   explicit strict mode. Projects may declare `extra-files` and `extra-env` inputs.
 - Cache pruning uses access markers and coordinated prune/build/load locks.
 - Native-only decorators return compiler sentinels instead of executable Python
-  fallbacks. Package cycles and star imports are rejected for the alpha contract.
+  fallbacks. Package cycles and star imports are rejected by the current contract.
 - Mixed wheels enforce a runtime ABI version and include only Python/type files by
   default; extra data requires `wheel-include`.
 - Every compilation unit now fingerprints and persists the complete generated
@@ -80,14 +83,17 @@ a release yet; the entries below describe the current `0.0.1` alpha candidate.
 
 ### Migration notes
 
-This is the first candidate and has no prior stable release to migrate from.
+This is the first public release and has no prior stable release to migrate from.
 Generated artifacts, IR, source maps, cache manifests, and embedded-wheel manifests
-are versioned internal protocols and may still change before the first published
-alpha. Applications should commit `crabwalk-locks/` but not `.crabwalk/`.
+are versioned internal protocols and may change between releases. Applications
+should commit `crabwalk-locks/` but not `.crabwalk/`.
 
-### Release blockers
+### Release verification
 
-- Select and publish the project license/governance policy.
-- Pass the advertised CPython and OS CI matrix.
-- Establish repeated performance budgets.
-- Produce, hash, inventory, and smoke-test the actual release artifacts.
+- Apache-2.0 licensing, maintainer-led governance, and private vulnerability
+  reporting are documented in the repository.
+- The supported CPython and operating-system matrix is a required release gate.
+- Published distributions are checked, hashed, and smoke-installed in clean
+  environments before upload.
+- Showcase timings remain illustrative local measurements; they are not release
+  performance guarantees.
