@@ -190,6 +190,7 @@ covers Chapters 1–21 and doubles as an end-to-end compiler evolution suite.
 - [Tooling, packaging, and cache](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Tooling%20Packaging%20and%20Cache.md)
 - [Security and limitations](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Security%20and%20Limitations.md)
 - [Compatibility and verification](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Compatibility%20and%20Verification.md)
+- [Release process](https://github.com/krflol/crabwalk/blob/main/Docs/Release%20Process.md)
 - [Governance](https://github.com/krflol/crabwalk/blob/main/GOVERNANCE.md)
 - [Security policy](https://github.com/krflol/crabwalk/blob/main/SECURITY.md)
 - [Changelog and migration notes](https://github.com/krflol/crabwalk/blob/main/CHANGELOG.md)

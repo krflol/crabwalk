@@ -83,6 +83,76 @@ RUST_2024_RESERVED_KEYWORDS = frozenset(
 RUST_2024_WEAK_KEYWORDS = frozenset({"macro_rules", "raw", "safe", "union"})
 RUST_2024_FORBIDDEN_BINDINGS = RUST_2024_STRICT_KEYWORDS | RUST_2024_RESERVED_KEYWORDS
 
+# These names are legal Rust identifiers, but tuple-like enum constructors live
+# in the value namespace.  Rust therefore rejects them as local pattern
+# bindings, and Crabwalk also emits the corresponding standard constructors in
+# compiled expressions.
+RUST_PRELUDE_VALUE_CONSTRUCTORS = frozenset({"Some", "Ok", "Err"})
+
+# Compiler-owned identifiers are deliberately split by Rust namespace.  Keep
+# these prefixes centralized so source validation and code generation cannot
+# drift apart again.
+COMPILER_VALUE_PREFIX = "__cw_"
+COMPILER_TYPE_PREFIX = "__Cw"
+COMPILER_LIFETIME_PREFIX = "__cw_"
+
+# A generic parameter with one of these spellings would change how an existing
+# Crabwalk type renders in the generic function body.  This set intentionally
+# includes source marker names even when their emitted Rust path is qualified;
+# generic declarations should not make the meaning of ``rust.<type>`` depend on
+# an ambient type parameter.
+CRABWALK_BUILTIN_TYPE_NAMES = frozenset(
+    {
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+        "f32",
+        "f64",
+        "bool",
+        "char",
+        "String",
+        "Str",
+        "Vec",
+        "HashMap",
+        "Box",
+        "Rc",
+        "RefCell",
+        "Arc",
+        "Mutex",
+        "Sender",
+        "Receiver",
+        "ThreadHandle",
+        "TcpListener",
+        "TcpStream",
+        "ThreadPool",
+        "Tuple",
+        "Array",
+        "Borrow",
+        "Dyn",
+        "Option",
+        "Result",
+        "Owned",
+        "Ref",
+        "Mut",
+        "Unit",
+        "LifetimeRef",
+        "PartialOrd",
+        "Ord",
+        "Copy",
+        "Clone",
+        "Display",
+        "Debug",
+    }
+)
+
 
 def is_rust_2024_identifier(value: str) -> bool:
     """Return whether ``value`` is safe in Crabwalk's emitted name positions.
@@ -93,6 +163,28 @@ def is_rust_2024_identifier(value: str) -> bool:
 
     return bool(RUST_PORTABLE_IDENTIFIER.fullmatch(value)) and (
         value not in RUST_2024_FORBIDDEN_BINDINGS
+    )
+
+
+def is_crabwalk_type_parameter(value: str) -> bool:
+    """Return whether a source type variable is hygienic in generated Rust."""
+
+    return (
+        is_rust_2024_identifier(value)
+        and value not in CRABWALK_BUILTIN_TYPE_NAMES
+        and not value.startswith(COMPILER_TYPE_PREFIX)
+        and not value.startswith(COMPILER_VALUE_PREFIX)
+    )
+
+
+def is_crabwalk_lifetime_parameter(value: str) -> bool:
+    """Return whether a source lifetime is hygienic in generated Rust."""
+
+    return (
+        is_rust_2024_identifier(value)
+        and value not in CRABWALK_BUILTIN_TYPE_NAMES
+        and not value.startswith(COMPILER_LIFETIME_PREFIX)
+        and not value.startswith(COMPILER_TYPE_PREFIX)
     )
 
 

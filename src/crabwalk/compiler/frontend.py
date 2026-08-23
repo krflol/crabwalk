@@ -97,13 +97,20 @@ from .ir import (
     UnaryIR,
     WhileIR,
 )
-from .naming import is_rust_2024_identifier, mangle_dependency, mangle_item
+from .naming import (
+    COMPILER_VALUE_PREFIX,
+    RUST_PRELUDE_VALUE_CONSTRUCTORS,
+    is_crabwalk_lifetime_parameter,
+    is_crabwalk_type_parameter,
+    is_rust_2024_identifier,
+    mangle_dependency,
+    mangle_item,
+)
 
 _ANALYSIS_CACHE_LIMIT = 64
 _analysis_cache: OrderedDict[tuple[str, str, str], PackageIR] = OrderedDict()
 _analysis_cache_lock = threading.Lock()
 
-_COMPILER_BINDING_PREFIX = "__cw_"
 _PRIMITIVES = {
     name: TypeRef(name)
     for name in (
@@ -2756,7 +2763,7 @@ class _FunctionLowerer:
                     pattern.patterns[0],
                     expected.arguments[0],
                 )
-                return f"Some({rendered})", bindings
+                return f"std::option::Option::Some({rendered})", bindings
 
             enum = self.enums_by_symbol.get(expected.rust_name)
             if enum is not None:
@@ -4757,6 +4764,7 @@ def _analyze_enum(
             child.targets[0],
             "enum variant",
             reserved=ENUM_VARIANT_RESERVED_NAMES,
+            rust_namespace="member",
         )
         if variant_name in names:
             _fail(
@@ -5480,9 +5488,15 @@ def _discover_type_variables(tree: ast.Module, path: Path) -> dict[str, TypeRef]
         ):
             continue
         binding = node.targets[0].id
+        is_lifetime = node.value.func.attr == "lifetime"
+        identifier_is_valid = (
+            is_crabwalk_lifetime_parameter(binding)
+            if is_lifetime
+            else is_crabwalk_type_parameter(binding)
+        )
         if (
             binding in values
-            or not is_rust_2024_identifier(binding)
+            or not identifier_is_valid
             or len(node.value.args) != 1
             or node.value.keywords
             or not isinstance(node.value.args[0], ast.Constant)
@@ -5498,7 +5512,7 @@ def _discover_type_variables(tree: ast.Module, path: Path) -> dict[str, TypeRef]
         values[binding] = TypeRef(
             binding,
             is_generic=True,
-            is_lifetime=node.value.func.attr == "lifetime",
+            is_lifetime=is_lifetime,
         )
     return values
 
@@ -6188,7 +6202,7 @@ def _direct_function_effects(function: FunctionIR) -> set[Effect]:
 def _expression_effects(expression: ExpressionIR) -> set[Effect]:
     effects: set[Effect] = set()
     if isinstance(expression, CrateCallIR) and expression.path[0] != "std":
-        effects.add(Effect.OPAQUE_CRATE_CALL)
+        effects.update({Effect.OPAQUE_CRATE_CALL, Effect.MAY_PANIC})
     if isinstance(expression, PythonPrintIR):
         effects.add(Effect.PYTHON_RUNTIME)
     if isinstance(expression, PanicIR):
@@ -6494,16 +6508,23 @@ def _validate_source_binding(
     kind: str,
     *,
     reserved: Collection[str] | None = None,
+    rust_namespace: Literal["value", "member"] = "value",
 ) -> None:
     reserved = reserved or ()
+    prelude_collision = (
+        rust_namespace == "value" and name in RUST_PRELUDE_VALUE_CONSTRUCTORS
+    )
     if (
         not is_rust_2024_identifier(name)
-        or name.startswith(_COMPILER_BINDING_PREFIX)
+        or name.startswith(COMPILER_VALUE_PREFIX)
         or name in reserved
+        or prelude_collision
     ):
         reason = (
             "a compiler-reserved __cw_ name"
-            if name.startswith(_COMPILER_BINDING_PREFIX)
+            if name.startswith(COMPILER_VALUE_PREFIX)
+            else "a Rust prelude constructor in the value namespace"
+            if prelude_collision
             else "a generated or runtime-reserved Python member"
             if name in reserved
             else "a Rust keyword or unsupported Rust identifier"

@@ -29,6 +29,7 @@ tags:
 - [[Docs/Crabwalk Tooling Packaging and Cache|Tooling, packaging, and cache]]
 - [[Docs/Crabwalk Security and Limitations|Security and limitations]]
 - [[Docs/Crabwalk Compatibility and Verification|Compatibility and verification]]
+- [[Docs/Release Process|Release process]]
 - [[CHANGELOG|Changelog and migration notes]]
 - [[GOVERNANCE|Governance]]
 - [[SECURITY|Security policy]]
@@ -74,3 +75,14 @@ tags:
   developers must audit their behavior and build scripts.
 - Features are promoted only with semantics, diagnostics, cache/boundary evidence,
   documentation, and the supported platform matrix.
+
+## Next architectural milestone
+
+Before another broad syntax expansion, split source and emitted identities for
+parameters, locals, loops, closures, patterns, generic parameters, lifetimes, and
+domain members. A compiler-owned gensym allocator should make emitted Rust names
+injective without forcing natural Python spellings into an ever-growing denylist.
+
+After that consolidation, prioritize a real PEP 517 packaging path and then a
+narrow read-only, contiguous primitive buffer boundary. Writable/strided buffers,
+general async runtimes, arbitrary FFI, and free-threaded CPython remain deferred.

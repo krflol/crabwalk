@@ -52,6 +52,16 @@ def worker_and_outer_failure() -> rust.u64:
     return rust.panic("outer failed with live worker")
 
 
+@rust.fn
+def python_result(value: rust.u64) -> rust.Result[rust.u64, rust.String]:
+    print(value)
+    if value == 0:
+        return rust.Err("zero")
+    if value == 9:
+        return rust.panic("python result panic")
+    return rust.Ok(value)
+
+
 print("native-atomic", native_atomic_pair() == 3)
 
 results: list[int] = []
@@ -81,6 +91,16 @@ try:
     worker_and_outer_failure()
 except CrabwalkPanicError as error:
     print("combined", "outer failed with live worker" in str(error))
+
+print("python-result-ok", python_result(7) == 7)
+try:
+    python_result(0)
+except CrabwalkRustError as error:
+    print("python-result-err", error.rust_type, error.rust_message)
+try:
+    python_result(9)
+except CrabwalkPanicError as error:
+    print("python-result-panic", "python result panic" in str(error))
 """
 
 
@@ -113,4 +133,10 @@ def test_unsafe_and_double_panic_edges_survive_in_subprocess(tmp_path: Path) -> 
         "worker True",
         "outer True",
         "combined True",
+        "7",
+        "python-result-ok True",
+        "0",
+        "python-result-err rust.String zero",
+        "9",
+        "python-result-panic True",
     ]

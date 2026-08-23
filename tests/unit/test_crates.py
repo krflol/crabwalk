@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from crabwalk.compiler.codegen import generate_project
+from crabwalk.compiler.codegen import function_releases_gil, generate_project
 from crabwalk.compiler.frontend import analyze_path
 from crabwalk.compiler.ir import Effect
 from crabwalk.diagnostics import CrabwalkCompilationError
@@ -37,6 +37,8 @@ def test_static_crate_declaration_generates_cargo_and_rust_paths(
     assert r'::Regex::new("\\d+")' in generated.rust_source
     assert ".unwrap().is_match(value)" in generated.rust_source
     assert Effect.OPAQUE_CRATE_CALL in ir.functions[0].effects
+    assert Effect.MAY_PANIC in ir.functions[0].effects
+    assert function_releases_gil(ir.functions[0]) is False
     inspection = function_inspection(ir.functions[0])
     assert inspection["native_calls"][0]["name"] == f"{binding}::Regex::new"
 

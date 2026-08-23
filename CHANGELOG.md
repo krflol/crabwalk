@@ -10,6 +10,11 @@ All notable Crabwalk changes are recorded here.
   keeping `main` distinct from the immutable 1.0.1 artifacts.
 - The typed quality boundary now includes the shared Python-wrapper namespace
   contract used by both frontend validation and runtime regression tests.
+- Opaque external crate calls now also carry `MayPanic` and conservatively keep
+  the GIL attached until a future typed adapter declares their actual effects.
+- Version tags now run an immutable release workflow that reuses the complete CI
+  gate, builds distributions once, smoke-installs the exact files, publishes via
+  PyPI Trusted Publishing, and attaches artifacts plus hashes to GitHub.
 
 ### Fixed
 
@@ -24,6 +29,15 @@ All notable Crabwalk changes are recorded here.
 - Cache pruning carries uncertainty through post-inventory changes, lock races,
   and failed deletion, so its byte remainder and limit status are never presented
   as exact from a stale snapshot.
+- Exported functions that both reach Python and return `rust.Result[T, E]` now
+  unwrap the nested `PyResult` outside the panic-catching closure, preserving the
+  intended `CrabwalkRustError` and `CrabwalkPanicError` boundaries.
+- Direct value bindings can no longer collide with the Rust prelude constructors
+  `Some`, `Ok`, or `Err`; compiler-owned uses are fully qualified and generated
+  value/type prefixes are consistent.
+- Generic type and lifetime parameters can no longer shadow Crabwalk built-in or
+  generated runtime types. A rustc-backed oracle covers every supported weak
+  keyword across Crabwalk's emitted identifier positions.
 
 ## [1.0.1] - 2026-08-23
 

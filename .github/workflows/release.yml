@@ -1,0 +1,132 @@
+name: Crabwalk Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - id: version
+        name: Match immutable tag to package version
+        shell: bash
+        run: |
+          version="$(PYTHONPATH=src python -c 'from crabwalk._version import __version__; print(__version__)')"
+          test "v${version}" = "${GITHUB_REF_NAME}"
+          case "${version}" in
+            *dev*|*a*|*b*|*rc*)
+              echo "Release tags must identify a final version: ${version}" >&2
+              exit 1
+              ;;
+          esac
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+  required-checks:
+    needs: verify-version
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [verify-version, required-checks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Build wheel and source distribution once
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+          mkdir -p release/dist
+          mv dist/*.whl dist/*.tar.gz release/dist/
+          sha256sum release/dist/* > release/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crabwalk-release-${{ needs.verify-version.outputs.version }}
+          path: release
+          if-no-files-found: error
+          retention-days: 30
+
+  artifact-smoke:
+    needs: [verify-version, build]
+    strategy:
+      matrix:
+        python: ["3.11", "3.14"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabwalk-release-${{ needs.verify-version.outputs.version }}
+          path: release
+      - name: Install exact wheel in a clean environment
+        shell: bash
+        run: |
+          python -m venv .wheel-smoke
+          .wheel-smoke/bin/python -m pip install --upgrade pip
+          .wheel-smoke/bin/python -m pip install --no-index release/dist/*.whl
+          .wheel-smoke/bin/python -c "import crabwalk; assert crabwalk.__version__ == '${{ needs.verify-version.outputs.version }}'"
+      - name: Install exact source distribution in a clean environment
+        shell: bash
+        run: |
+          python -m venv .sdist-smoke
+          .sdist-smoke/bin/python -m pip install --upgrade pip
+          .sdist-smoke/bin/python -m pip install release/dist/*.tar.gz
+          .sdist-smoke/bin/python -c "import crabwalk; assert crabwalk.__version__ == '${{ needs.verify-version.outputs.version }}'"
+
+  publish-pypi:
+    needs: [verify-version, build, artifact-smoke]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/crabwalk-lang/${{ needs.verify-version.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabwalk-release-${{ needs.verify-version.outputs.version }}
+          path: release
+      - name: Publish exact distributions through PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: release/dist
+
+  github-release:
+    needs: [verify-version, build, artifact-smoke, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: crabwalk-release-${{ needs.verify-version.outputs.version }}
+          path: release
+      - name: Attach the published artifacts and hashes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" release/dist/* release/SHA256SUMS --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" release/dist/* release/SHA256SUMS \
+              --verify-tag \
+              --title "Crabwalk ${{ needs.verify-version.outputs.version }}" \
+              --generate-notes
+          fi

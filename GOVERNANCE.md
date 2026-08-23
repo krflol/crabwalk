@@ -17,6 +17,7 @@ follow the private reporting process in [SECURITY.md](SECURITY.md), not a public
 issue.
 
 Releases are cut from `main` after the repository's required quality and native
-platform checks pass. Maintainers may update this governance model as the
-contributor community grows; material changes will be documented in the
-repository history.
+platform checks pass. Version tags run the immutable, Trusted-Publishing workflow
+described in [Docs/Release Process.md](Docs/Release%20Process.md). Maintainers may
+update this governance model as the contributor community grows; material changes
+will be documented in the repository history.

@@ -105,6 +105,9 @@ Declared-crate calls carry `OpaqueCrateCall`. Crabwalk cannot infer whether an
 arbitrary dependency blocks, spawns threads, mutates global state, calls FFI, or
 reacquires Python through PyO3. The visible effect list and `python-boundaries`
 policy describe Crabwalk-lowered operations, not unaudited dependency internals.
+Opaque calls also carry `MayPanic` and are not automatically detached from the GIL;
+this remains conservative until a typed adapter can declare a dependency boundary's
+actual effects.
 
 No signature or publisher attestation is currently provided. SHA-256 detects
 accidental/stale corruption and local mismatch; it does not establish who produced

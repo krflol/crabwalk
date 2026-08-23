@@ -53,7 +53,8 @@ def test_native_only_generic_function_is_inferred_and_monomorphized(
     assert generic.type_parameters[0].name == "T"
     assert generic.type_parameters[0].bounds == ("PartialOrd", "Copy")
     assert (
-        f"fn __cw_native_{generic.rust_symbol}<T: PartialOrd + Copy>(values: &Vec<T>) -> T"
+        f"fn __cw_native_{generic.rust_symbol}"
+        "<T: std::cmp::PartialOrd + std::marker::Copy>(values: &Vec<T>) -> T"
         in generated.rust_source
     )
     assert f"fn {generic.rust_symbol}(" not in generated.rust_source

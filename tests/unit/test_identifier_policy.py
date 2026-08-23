@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_path
 from crabwalk.compiler.naming import (
+    COMPILER_LIFETIME_PREFIX,
+    COMPILER_TYPE_PREFIX,
+    COMPILER_VALUE_PREFIX,
+    CRABWALK_BUILTIN_TYPE_NAMES,
     RUST_2024_FORBIDDEN_BINDINGS,
+    RUST_PRELUDE_VALUE_CONSTRUCTORS,
     RUST_2024_RESERVED_KEYWORDS,
     RUST_2024_STRICT_KEYWORDS,
     RUST_2024_WEAK_KEYWORDS,
     dependency_crate_alias,
+    is_crabwalk_lifetime_parameter,
+    is_crabwalk_type_parameter,
     is_rust_2024_identifier,
 )
 from crabwalk.diagnostics import CrabwalkCompilationError
@@ -343,3 +352,210 @@ def union(union: rust.u64) -> rust.u64:
 def test_reserved_crate_package_name_uses_internal_cargo_key() -> None:
     assert dependency_crate_alias("gen") is None
     assert dependency_crate_alias("union") == "union"
+
+
+@pytest.mark.parametrize("name", sorted(RUST_PRELUDE_VALUE_CONSTRUCTORS))
+def test_prelude_constructors_are_rejected_as_value_bindings(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    source = tmp_path / f"invalid_{name.lower()}.py"
+    source.write_text(
+        f"""\
+from crabwalk import rust
+
+@rust.fn
+def invalid({name}: rust.u64) -> rust.u64:
+    return {name}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(source)
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB210"
+    assert "Rust prelude constructor" in diagnostic.message
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        """\
+from crabwalk import rust
+@rust.fn
+def invalid(value: rust.u64) -> rust.u64:
+    Ok: rust.u64 = value
+    return Ok
+""",
+        """\
+from crabwalk import rust
+@rust.fn
+def invalid() -> rust.u64:
+    total: rust.u64 = 0
+    for Some in range(1):
+        total += Some
+    return total
+""",
+        """\
+from crabwalk import rust
+@rust.fn
+def invalid() -> rust.u64:
+    values: rust.Vec[rust.u64] = rust.Vec([1])
+    return values.iter().map(lambda Err: Err).sum()
+""",
+        """\
+from crabwalk import rust
+@rust.fn
+def invalid(value: rust.u64) -> rust.u64:
+    match value:
+        case Some:
+            return Some
+""",
+        """\
+from crabwalk import rust
+@rust.struct
+class Invalid:
+    Ok: rust.u64
+""",
+        """\
+from crabwalk import rust
+@rust.enum
+class Invalid:
+    Ready = rust.variant(Err=rust.u64)
+""",
+    ],
+)
+def test_prelude_constructors_are_rejected_in_all_direct_binding_families(
+    tmp_path: Path,
+    source_text: str,
+) -> None:
+    source = tmp_path / "invalid_constructor_binding.py"
+    source.write_text(source_text, encoding="utf-8")
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(source)
+
+    assert captured.value.diagnostics[0].code == "CRAB210"
+
+
+def test_prelude_constructor_spelling_remains_valid_for_qualified_enum_variant(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "qualified_variant.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.enum
+class Status:
+    Ok = rust.variant()
+
+@rust.fn
+def identity(value: rust.u64) -> rust.u64:
+    return value
+""",
+        encoding="utf-8",
+    )
+
+    ir = analyze_path(source)
+    generated = generate_project(ir, "_crabwalk_qualified_variant")
+
+    assert ir.enums[0].variants[0].name == "Ok"
+    assert f"{ir.enums[0].symbol}::Ok" in generated.rust_source
+
+
+@pytest.mark.parametrize(
+    ("factory", "name"),
+    [
+        ("typevar", "String"),
+        ("typevar", "ThreadPool"),
+        ("typevar", "Copy"),
+        ("typevar", "__CwThreadPool"),
+        ("typevar", "__cw_type"),
+        ("lifetime", "String"),
+        ("lifetime", "__CwLifetime"),
+        ("lifetime", "__cw_lifetime"),
+    ],
+)
+def test_generic_names_cannot_shadow_builtin_or_compiler_types(
+    tmp_path: Path,
+    factory: str,
+    name: str,
+) -> None:
+    source = tmp_path / "invalid_generic_name.py"
+    source.write_text(
+        (
+            "from crabwalk import rust\n"
+            f"{name} = rust.{factory}({name!r})\n"
+            "@rust.fn\n"
+            "def identity(value: rust.u64) -> rust.u64:\n"
+            "    return value\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(source)
+
+    assert captured.value.diagnostics[0].code == "CRAB180"
+
+
+def test_namespace_policy_constants_cover_generated_prefixes_and_types() -> None:
+    assert COMPILER_VALUE_PREFIX == "__cw_"
+    assert COMPILER_TYPE_PREFIX == "__Cw"
+    assert COMPILER_LIFETIME_PREFIX == "__cw_"
+    assert {"String", "Vec", "Result", "ThreadPool"} <= (CRABWALK_BUILTIN_TYPE_NAMES)
+    assert is_crabwalk_type_parameter("T")
+    assert is_crabwalk_lifetime_parameter("a")
+
+
+def test_rustc_oracle_accepts_supported_weak_names_in_emitted_positions(
+    tmp_path: Path,
+) -> None:
+    rustc = shutil.which("rustc")
+    if rustc is None:
+        pytest.skip("rustc is required for the emitted-identifier oracle")
+    modules = []
+    for name in sorted(RUST_2024_WEAK_KEYWORDS):
+        modules.append(
+            f"""\
+mod oracle_{name} {{
+    extern crate core as {name};
+    struct Value {{ {name}: u64 }}
+    enum Status {{ {name} }}
+    trait Behavior {{ fn {name}(&self) -> u64; }}
+    impl Value {{ fn {name}(&self) -> u64 {{ self.{name} }} }}
+    fn {name}({name}: u64) -> u64 {{ {name} }}
+    fn locals() {{
+        let {name}: u64 = 1;
+        let _ = |{name}: u64| {name};
+        match 1u64 {{ {name} => {{ let _ = {name}; }} }}
+    }}
+    fn generic<{name}>(value: {name}) -> {name} {{ value }}
+    fn borrowed<'{name}>(value: &'{name} str) -> &'{name} str {{ value }}
+}}
+"""
+        )
+    program = (
+        "#![allow(dead_code, non_camel_case_types, non_snake_case, "
+        "unused_imports, unused_variables)]\n" + "\n".join(modules)
+    )
+    result = subprocess.run(
+        [
+            rustc,
+            "--edition=2024",
+            "--crate-type=lib",
+            "-o",
+            str(tmp_path / "identifier_oracle.rlib"),
+            "-",
+        ],
+        input=program,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr

@@ -434,7 +434,7 @@ def _validate_effect_annotations(
             elif expression.constructor == "UnsafeStaticIncrement":
                 required.update({Effect.GLOBAL_MUTATION, Effect.MAY_PANIC})
         elif isinstance(expression, CrateCallIR) and expression.path[0] != "std":
-            required.add(Effect.OPAQUE_CRATE_CALL)
+            required.update({Effect.OPAQUE_CRATE_CALL, Effect.MAY_PANIC})
     missing = required - effects
     if missing:
         names = ", ".join(sorted(effect.value for effect in missing))

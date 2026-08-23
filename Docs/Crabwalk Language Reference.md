@@ -244,13 +244,15 @@ The initial Python operation is `print(value)` for ABI-convertible scalar/string
 values. `rust.println(value)` remains native. The Python effect propagates through
 ordinary calls, inherent methods, concrete and dynamic trait dispatch, custom
 operators, and function-pointer targets. Wrapper policy consumes the typed effects:
-Python runtime, global mutation, unsafe memory, and unsafe FFI prevent GIL
-detachment even when the signature itself contains only primitives.
+Python runtime, opaque crate calls, global mutation, unsafe memory, and unsafe FFI
+prevent GIL detachment even when the signature itself contains only primitives.
 
 `OpaqueCrateCall` is visibility, not a claim that the external implementation is
-pure, nonblocking, or Python-free. Effect policy is complete for Crabwalk-visible
-operations; developers must audit declared crates and adapters for hidden blocking,
-threading, FFI, mutation, or PyO3 behavior.
+pure, nonblocking, or Python-free. Crabwalk conservatively also records `MayPanic`
+and keeps the GIL attached for an opaque call. Effect policy is complete for
+Crabwalk-visible operations; developers must audit declared crates and adapters for
+hidden blocking, threading, FFI, mutation, or PyO3 behavior. A future typed adapter
+surface can make those effects explicit and recover safe detachment.
 
 Before code generation, an IR validation pass checks effect consistency and rejects
 a Rust worker closure that directly or transitively reaches Python runtime state

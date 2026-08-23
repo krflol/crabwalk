@@ -97,45 +97,38 @@ machine, cold/warm boundary, and repeated samples beside the tested commit.
 
 ## Known local result
 
-On 2026-08-22, the invariant-hardened worktree was exercised on CPython 3.11.8 and Windows
-x86-64 with rustc/Cargo 1.97.0:
+On 2026-08-23, the 1.0.2 development worktree was exercised on CPython 3.11.8 and
+Windows x86-64 with rustc/Cargo 1.97.0:
 
-- the complete repository suite passed **124 tests in 812.82 seconds** on the
-  formatted, linted, scoped-mypy-clean worktree;
-- the final focused unit pass passed **89 tests in 8.62 seconds**, and the five
-  Chapter 11 teaching tests passed in **3.70 seconds**;
-- the single native Rust Book package passed its Chapter 1–21 assertions;
-- locked checking of `examples/the_rust_book` passed with fingerprint
-  `0d89ca2a3df1dfd9`;
-- dispatch/placement, semantic receiver/place, generated-namespace, mandatory-lock,
-  repaired-cache-age, and parent-initializer-cycle regressions passed, including a
-  real native `abs`/`String`/`pyo3` collision smoke;
-- unsafe `i32::MIN`, atomic concurrency, worker/outer/double-panic, and ambient
-  `panic=abort` cases passed in isolated subprocesses;
-- cache evidence covered corruption, interrupted/simultaneous publication,
-  same-process path-asset invalidation, process-lifetime load leases, and a second
-  crate-backed process validating without replacing the mapped DLL;
-- the clean mixed wheel installed beside the Crabwalk runtime wheel and imported
-  with Rust/Cargo removed from `PATH`;
-- `ruff format` accepted all 108 Python files unchanged, Ruff lint, scoped mypy, and
-  Python byte-compilation passed for `src`, `tests`, and `examples`;
-- rustfmt parsed/stabilized the generated Rust Book project and Clippy's
-  correctness lint group passed;
-- forced progress output reported analysis, fingerprinting, lock, cache, Cargo,
-  load, and ready phases on stderr; and
-- expanded Rust was inspected for real operator impls, UFCS, bounded unsafe
-  blocks, closure trait objects, TCP binding, and graceful thread-pool Drop.
+- all **231 unit tests** passed;
+- all **35 native integration tests** passed in four bounded batches, for **266
+  tests total**;
+- the Python-runtime plus `Result` subprocess proved that Python work executes,
+  `Ok` returns normally, `Err` becomes `CrabwalkRustError`, and a panic becomes
+  `CrabwalkPanicError`;
+- the rustc identifier oracle accepted every supported Rust 2024 weak keyword in
+  function, parameter, local, closure, pattern, field, variant, method, generic,
+  lifetime, and crate-alias positions;
+- cache corruption/concurrency, unsafe boundaries, ownership/load order, package
+  graphs, async/threading, the Chapter 1–21 Rust Book package, TCP, and consumer
+  wheel tests all passed through real native subprocesses;
+- Ruff format/lint passed across 115 Python files, scoped mypy passed across 14
+  hardening/build/compiler modules, and Python byte-compilation passed;
+- rustfmt and Clippy correctness passed on the generated Rust Book Cargo project;
+  and
+- a no-cache public install fetched `crabwalk-lang==1.0.1` from PyPI, after which a
+  second clean environment installed a generated application wheel through normal
+  dependency resolution and executed its embedded native function.
 
-The mypy gate intentionally covers 13 hardening/build/compiler modules, including
-the generated-name and code-generation modules; the large frontend, runtime binder,
-and CLI remain explicit typing debt.
+The large frontend, runtime binder, and CLI remain explicit typing debt outside the
+current scoped mypy boundary.
 
 GitHub Actions
-[run 32594114165](https://github.com/krflol/crabwalk/actions/runs/32594114165)
-passed all nine hardening jobs on 2026-08-22: the complete native suite on Windows,
-Linux, and macOS for CPython 3.11 and 3.14, unit lanes for CPython 3.12 and 3.13,
-and the quality gate. The release commit is subjected to the same matrix before
-publication.
+[run 32664652258](https://github.com/krflol/crabwalk/actions/runs/32664652258)
+passed all nine jobs for reviewed head `be1fb7d` on 2026-08-23: the complete native
+suite on Windows, Linux, and macOS for CPython 3.11 and 3.14, unit lanes for CPython
+3.12 and 3.13, and the quality gate. Every subsequent release candidate must pass
+the same matrix on its exact SHA.
 
 The exact release candidate must pass this nine-job matrix before publication;
 the repository changelog records candidate-specific fixes and migration notes.

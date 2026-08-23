@@ -67,7 +67,7 @@ from .ir import (
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
 PYO3_VERSION = "0.29.2"
-CODEGEN_SCHEMA_VERSION = 31
+CODEGEN_SCHEMA_VERSION = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +215,7 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
     for enum in ir.enums:
         _, rust_class = owned_class_names(enum.type_ref)
         writer.line(f"m.add_class::<{rust_class}>()?;")
-    writer.line("Ok(())")
+    writer.line("std::result::Result::Ok(())")
     writer.leave()
     writer.line("}")
 
@@ -289,8 +289,12 @@ def _write_native_function(
             else:
                 qualified_bounds = tuple(
                     {
+                        "Clone": "std::clone::Clone",
+                        "Copy": "std::marker::Copy",
                         "Debug": "std::fmt::Debug",
                         "Display": "std::fmt::Display",
+                        "Ord": "std::cmp::Ord",
+                        "PartialOrd": "std::cmp::PartialOrd",
                     }.get(value, value)
                     for value in parameter.bounds
                 )
@@ -318,7 +322,7 @@ def _write_native_function(
         function.body
     ):
         writer.line(
-            "Ok(())" if function.python_boundary else "()",
+            "std::result::Result::Ok(())" if function.python_boundary else "()",
             function.span,
             "implicit_unit_return",
         )
@@ -513,7 +517,7 @@ def _write_owned_enum_class(
         else:
             arguments = ", ".join(field.name for field in variant.fields)
             value = f"{enum.symbol}::{variant.name} {{ {arguments} }}"
-        writer.line(f"Self {{ value: Some({value}) }}")
+        writer.line(f"Self {{ value: std::option::Option::Some({value}) }}")
         writer.leave()
         writer.line("}")
         writer.line()
@@ -523,9 +527,14 @@ def _write_owned_enum_class(
     writer.enter()
     for variant in enum.variants:
         pattern = _enum_variant_pattern(enum, variant.name, (), variant.tuple_style)
-        writer.line(f'Some({pattern}) => Ok("{variant.name}"),')
+        writer.line(
+            f"std::option::Option::Some({pattern}) => "
+            f'std::result::Result::Ok("{variant.name}"),'
+        )
     writer.line(
-        f'None => Err({PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")),'
+        f"std::option::Option::None => std::result::Result::Err("
+        f"{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("
+        '"CrabwalkMoveError: value was moved")),'
     )
     writer.leave()
     writer.line("}")
@@ -572,7 +581,7 @@ def _write_owned_enum_class(
             if target is None:
                 continue
             bindings = tuple(
-                (field.name, "__target" if field.name == field_name else "")
+                (field.name, "__cw_target" if field.name == field_name else "")
                 for field in variant.fields
             )
             pattern = _enum_variant_pattern(
@@ -582,12 +591,15 @@ def _write_owned_enum_class(
                 variant.tuple_style,
             )
             converted = (
-                "__target.clone().into_py_any(py)?"
+                "__cw_target.clone().into_py_any(py)?"
                 if heterogeneous
-                else "__target.clone()"
+                else "__cw_target.clone()"
             )
-            writer.line(f"{pattern} => Ok(Some({converted})),")
-        writer.line("_ => Ok(None),")
+            writer.line(
+                f"{pattern} => std::result::Result::Ok("
+                f"std::option::Option::Some({converted})),"
+            )
+        writer.line("_ => std::result::Result::Ok(std::option::Option::None),")
         writer.leave()
         writer.line("}")
         writer.leave()
@@ -603,8 +615,10 @@ def _write_owned_enum_class(
     writer.enter()
     writer.line("match &self.value {")
     writer.enter()
-    writer.line(f'Some(value) => format!("{enum.name}({{:?}})", value),')
-    writer.line(f'None => String::from("{enum.name}(<moved>)"),')
+    writer.line(
+        f'std::option::Option::Some(value) => format!("{enum.name}({{:?}})", value),'
+    )
+    writer.line(f'std::option::Option::None => String::from("{enum.name}(<moved>)"),')
     writer.leave()
     writer.line("}")
     writer.leave()
@@ -672,7 +686,7 @@ def _write_owned_struct_class(writer: _Writer, struct: StructIR) -> None:
     writer.line("#[new]")
     writer.line(f"fn new({parameters}) -> Self {{")
     writer.enter()
-    writer.line("Self { value: Some(" + struct.symbol + " {")
+    writer.line("Self { value: std::option::Option::Some(" + struct.symbol + " {")
     writer.enter()
     for field in struct.fields:
         writer.line(f"{field.name},")
@@ -710,7 +724,7 @@ def _write_owned_struct_class(writer: _Writer, struct: StructIR) -> None:
         writer.leave()
         writer.line("})?;")
         writer.line(f"target.{field.name} = value;")
-        writer.line("Ok(())")
+        writer.line("std::result::Result::Ok(())")
         writer.leave()
         writer.line("}")
     writer.line()
@@ -745,8 +759,10 @@ def _write_owned_struct_class(writer: _Writer, struct: StructIR) -> None:
     writer.enter()
     writer.line("match &self.value {")
     writer.enter()
-    writer.line(f'Some(value) => format!("{struct.name}({{:?}})", value),')
-    writer.line(f'None => String::from("{struct.name}(<moved>)"),')
+    writer.line(
+        f'std::option::Option::Some(value) => format!("{struct.name}({{:?}})", value),'
+    )
+    writer.line(f'std::option::Option::None => String::from("{struct.name}(<moved>)"),')
     writer.leave()
     writer.line("}")
     writer.leave()
@@ -791,9 +807,7 @@ def _write_export_wrapper(
         _write_wrapper_extraction(writer, parameter)
     if function.return_type.rust_name == "Result":
         native_call = f"__cw_native_{function.rust_symbol}({arguments})"
-        if function.python_boundary:
-            native_call += "?"
-        elif releases_gil:
+        if releases_gil:
             native_call = f"__cw_py.detach(move || {native_call})"
         writer.line(
             f"let __cw_result = __cw_catch_panic(|| {native_call})?;",
@@ -808,10 +822,11 @@ def _write_export_wrapper(
             "abi_call",
         )
         writer.enter()
-        writer.line("Ok(value) => Ok(value),")
+        writer.line("std::result::Result::Ok(value) => std::result::Result::Ok(value),")
         error_type = function.return_type.arguments[1].display()
         writer.line(
-            f"Err(error) => Err({PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("
+            "std::result::Result::Err(error) => std::result::Result::Err("
+            f"{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("
             f'format!("CrabwalkRustError: {error_type}: {{}}", error))),'
         )
         writer.leave()
@@ -827,7 +842,7 @@ def _write_export_wrapper(
         if releases_gil:
             native_call = f"__cw_py.detach(move || {native_call})"
         writer.line(
-            f"Ok(__cw_catch_panic(|| {native_call})?)",
+            f"std::result::Result::Ok(__cw_catch_panic(|| {native_call})?)",
             function.span,
             "abi_call",
         )
@@ -840,11 +855,16 @@ def _write_panic_boundary(writer: _Writer) -> None:
         "fn __cw_panic_message(payload: Box<dyn std::any::Any + Send>) -> String {"
     )
     writer.enter()
-    writer.line("if let Some(value) = payload.downcast_ref::<&str>() {")
+    writer.line(
+        "if let std::option::Option::Some(value) = payload.downcast_ref::<&str>() {"
+    )
     writer.enter()
     writer.line("(*value).to_owned()")
     writer.leave()
-    writer.line("} else if let Some(value) = payload.downcast_ref::<String>() {")
+    writer.line(
+        "} else if let std::option::Option::Some(value) = "
+        "payload.downcast_ref::<String>() {"
+    )
     writer.enter()
     writer.line("value.clone()")
     writer.leave()
@@ -864,12 +884,12 @@ def _write_panic_boundary(writer: _Writer) -> None:
         "match std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)) {"
     )
     writer.enter()
-    writer.line("Ok(value) => Ok(value),")
-    writer.line("Err(payload) => {")
+    writer.line("std::result::Result::Ok(value) => std::result::Result::Ok(value),")
+    writer.line("std::result::Result::Err(payload) => {")
     writer.enter()
     writer.line("let message = __cw_panic_message(payload);")
     writer.line(
-        f'Err({PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err(format!("CrabwalkPanicError: {{}}", message)))'
+        f'std::result::Result::Err({PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err(format!("CrabwalkPanicError: {{}}", message)))'
     )
     writer.leave()
     writer.line("}")
@@ -892,7 +912,7 @@ def _write_thread_pool(writer: _Writer) -> None:
     writer.line(
         "let mut slot = failure.lock().unwrap_or_else(|poisoned| poisoned.into_inner());"
     )
-    writer.line("if slot.is_none() { *slot = Some(message); }")
+    writer.line("if slot.is_none() { *slot = std::option::Option::Some(message); }")
     writer.leave()
     writer.line("}")
     writer.line()
@@ -921,7 +941,7 @@ def _write_thread_pool(writer: _Writer) -> None:
     )
     writer.leave()
     writer.line("}")
-    writer.line("Self { workers, sender: Some(sender), failure }")
+    writer.line("Self { workers, sender: std::option::Option::Some(sender), failure }")
     writer.leave()
     writer.line("}")
     writer.line()
@@ -949,7 +969,11 @@ def _write_thread_pool(writer: _Writer) -> None:
     writer.line("slot.take()")
     writer.leave()
     writer.line("};")
-    writer.line("match failure { Some(message) => Err(message), None => Ok(()) }")
+    writer.line(
+        "match failure { "
+        "std::option::Option::Some(message) => std::result::Result::Err(message), "
+        "std::option::Option::None => std::result::Result::Ok(()) }"
+    )
     writer.leave()
     writer.line("}")
     writer.line()
@@ -958,7 +982,7 @@ def _write_thread_pool(writer: _Writer) -> None:
     writer.line("drop(self.sender.take());")
     writer.line("for worker in self.workers.drain(..) {")
     writer.enter()
-    writer.line("if let Err(payload) = worker.thread.join() {")
+    writer.line("if let std::result::Result::Err(payload) = worker.thread.join() {")
     writer.enter()
     writer.line(
         "__cw_record_worker_failure(&self.failure, __cw_panic_message(payload));"
@@ -1007,10 +1031,10 @@ def _write_thread_pool(writer: _Writer) -> None:
     writer.leave()
     writer.line("match message {")
     writer.enter()
-    writer.line("Ok(job) => {")
+    writer.line("std::result::Result::Ok(job) => {")
     writer.enter()
     writer.line(
-        "if let Err(payload) = std::panic::catch_unwind("
+        "if let std::result::Result::Err(payload) = std::panic::catch_unwind("
         "std::panic::AssertUnwindSafe(job)) {"
     )
     writer.enter()
@@ -1019,7 +1043,7 @@ def _write_thread_pool(writer: _Writer) -> None:
     writer.line("}")
     writer.leave()
     writer.line("}")
-    writer.line("Err(_) => break,")
+    writer.line("std::result::Result::Err(_) => break,")
     writer.leave()
     writer.line("}")
     writer.leave()
@@ -1110,7 +1134,7 @@ def _write_block_on_executor(writer: _Writer) -> None:
         "std::future::Future::poll(left.as_mut(), context) {"
     )
     writer.enter()
-    writer.line("left_output = Some(value);")
+    writer.line("left_output = std::option::Option::Some(value);")
     writer.leave()
     writer.line("}")
     writer.leave()
@@ -1122,7 +1146,7 @@ def _write_block_on_executor(writer: _Writer) -> None:
         "std::future::Future::poll(right.as_mut(), context) {"
     )
     writer.enter()
-    writer.line("right_output = Some(value);")
+    writer.line("right_output = std::option::Option::Some(value);")
     writer.leave()
     writer.line("}")
     writer.leave()
@@ -1184,15 +1208,16 @@ def _write_block_on_executor(writer: _Writer) -> None:
     writer.enter()
     writer.line("std::future::poll_fn(|context| match receiver.try_recv() {")
     writer.enter()
-    writer.line("Ok(value) => std::task::Poll::Ready(value),")
-    writer.line("Err(std::sync::mpsc::TryRecvError::Empty) => {")
+    writer.line("std::result::Result::Ok(value) => std::task::Poll::Ready(value),")
+    writer.line("std::result::Result::Err(std::sync::mpsc::TryRecvError::Empty) => {")
     writer.enter()
     writer.line("context.waker().wake_by_ref();")
     writer.line("std::task::Poll::Pending")
     writer.leave()
     writer.line("}")
     writer.line(
-        "Err(std::sync::mpsc::TryRecvError::Disconnected) => "
+        "std::result::Result::Err("
+        "std::sync::mpsc::TryRecvError::Disconnected) => "
         'panic!("async channel disconnected"),'
     )
     writer.leave()
@@ -1226,6 +1251,7 @@ def function_releases_gil(function: FunctionIR) -> bool:
 
     effects = set(function.effects)
     if effects & {
+        Effect.OPAQUE_CRATE_CALL,
         Effect.PYTHON_RUNTIME,
         Effect.GLOBAL_MUTATION,
         Effect.UNSAFE_MEMORY,
@@ -1272,10 +1298,11 @@ def _write_statement(
     if isinstance(statement, ReturnIR):
         if current_boundary:
             value = (
-                "return Ok(());"
+                "return std::result::Result::Ok(());"
                 if statement.value is None
                 else (
-                    f"return Ok({_render_expression(statement.value, boundary_names)});"
+                    "return std::result::Result::Ok("
+                    f"{_render_expression(statement.value, boundary_names)});"
                 )
             )
         else:
@@ -1414,7 +1441,7 @@ def _write_statement(
         subject = _render_expression(statement.subject, boundary_names)
         borrowed = subject if statement.subject_borrowed else f"&{subject}"
         writer.line(
-            f"match <{statement.enum_symbol} as Clone>::clone({borrowed}) {{",
+            f"match <{statement.enum_symbol} as std::clone::Clone>::clone({borrowed}) {{",
             statement.span,
             "match",
         )
@@ -1446,7 +1473,7 @@ def _write_statement(
         borrowed = subject if statement.subject_borrowed else f"&{subject}"
         subject_type = statement.subject_type.render()
         writer.line(
-            f"match <{subject_type} as Clone>::clone({borrowed}) {{",
+            f"match <{subject_type} as std::clone::Clone>::clone({borrowed}) {{",
             statement.span,
             "pattern_match",
         )
@@ -1614,13 +1641,13 @@ def _render_expression(
         if expression.constructor == "ArrayRepeat":
             return f"[{values}; {expression.type_ref.const_value}]"
         if expression.constructor == "Some":
-            return f"Some({values})"
+            return f"std::option::Option::Some({values})"
         if expression.constructor == "None":
-            return "None"
+            return "std::option::Option::None"
         if expression.constructor == "Ok":
-            return f"Ok({values})"
+            return f"std::result::Result::Ok({values})"
         if expression.constructor == "Err":
-            return f"Err({values})"
+            return f"std::result::Result::Err({values})"
         if expression.constructor == "UnsafeRead":
             value = _render_expression(expression.arguments[0], boundary_names)
             return (
@@ -1645,10 +1672,10 @@ def _render_expression(
         if expression.constructor == "UnsafeStaticIncrement":
             value = _render_expression(expression.arguments[0], boundary_names)
             return (
-                "{ static __CW_COUNTER: std::sync::atomic::AtomicU64 = "
+                "{ static __cw_counter: std::sync::atomic::AtomicU64 = "
                 "std::sync::atomic::AtomicU64::new(0); "
                 f"let __cw_amount: u64 = {value}; "
-                "let __cw_previous = __CW_COUNTER.fetch_update("
+                "let __cw_previous = __cw_counter.fetch_update("
                 "std::sync::atomic::Ordering::Relaxed, "
                 "std::sync::atomic::Ordering::Relaxed, "
                 "|current| current.checked_add(__cw_amount))"
@@ -1883,7 +1910,7 @@ def _render_expression(
         return (
             "Python::attach(|py| -> PyResult<()> { "
             'py.import("builtins")?.getattr("print")?.call1(('
-            f"{value},))?; Ok(()) }})?"
+            f"{value},))?; std::result::Result::Ok(()) }})?"
         )
     if isinstance(expression, TryIR):
         return f"{_render_expression(expression.value, boundary_names)}?"
@@ -2080,7 +2107,7 @@ def _write_owned_vector_class(writer: _Writer, vector_type: TypeRef) -> None:
     writer.line("#[new]")
     writer.line(f"fn new(value: {rendered}) -> Self {{")
     writer.enter()
-    writer.line("Self { value: Some(value) }")
+    writer.line("Self { value: std::option::Option::Some(value) }")
     writer.leave()
     writer.line("}")
     writer.line()
@@ -2118,8 +2145,10 @@ def _write_owned_vector_class(writer: _Writer, vector_type: TypeRef) -> None:
     writer.enter()
     writer.line("match &self.value {")
     writer.enter()
-    writer.line(f'Some(value) => format!("{python_name}({{:?}})", value),')
-    writer.line(f'None => String::from("{python_name}(<moved>)"),')
+    writer.line(
+        f'std::option::Option::Some(value) => format!("{python_name}({{:?}})", value),'
+    )
+    writer.line(f'std::option::Option::None => String::from("{python_name}(<moved>)"),')
     writer.leave()
     writer.line("}")
     writer.leave()

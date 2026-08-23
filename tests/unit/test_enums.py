@@ -71,7 +71,10 @@ def test_enum_variants_construction_and_match_lower_to_rust(tmp_path: Path) -> N
     assert f"fn __cw_native_{score.rust_symbol}(status: &{status_symbol}) -> u8" in (
         generated.rust_source
     )
-    assert f"match <{status_symbol} as Clone>::clone(status)" in generated.rust_source
+    assert (
+        f"match <{status_symbol} as std::clone::Clone>::clone(status)"
+        in generated.rust_source
+    )
     assert f"{status_symbol}::Running {{ progress: value }} =>" in generated.rust_source
     assert f"struct {owned_status}" in generated.rust_source
     assert f"value: Option<{status_symbol}>" in generated.rust_source

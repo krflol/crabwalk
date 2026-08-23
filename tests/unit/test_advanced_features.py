@@ -149,10 +149,10 @@ def test_advanced_features_lower_to_auditable_rust(tmp_path: Path) -> None:
     assert "pub(super) fn c_abs(input: i32) -> i32;" in rust_source
     assert "if __cw_value == i32::MIN" in rust_source
     assert "C abs is undefined for i32::MIN" in rust_source
-    assert "static __CW_COUNTER: std::sync::atomic::AtomicU64" in rust_source
+    assert "static __cw_counter: std::sync::atomic::AtomicU64" in rust_source
     assert "fetch_update" in rust_source
     assert "Ordering::Relaxed" in rust_source
-    assert "static mut __CW_COUNTER" not in rust_source
+    assert "static mut __cw_counter" not in rust_source
     assert "type __CwAlias = u64" in rust_source
     assert "let __cw_operation: fn(u64) -> u64" in rust_source
     assert "Box<dyn Fn(u64) -> u64>" in rust_source
