@@ -192,7 +192,6 @@ covers Chapters 1–21 and doubles as an end-to-end compiler evolution suite.
 - [Compatibility and verification](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Compatibility%20and%20Verification.md)
 - [Governance](https://github.com/krflol/crabwalk/blob/main/GOVERNANCE.md)
 - [Security policy](https://github.com/krflol/crabwalk/blob/main/SECURITY.md)
-- [Invariant-hardening plan](https://github.com/krflol/crabwalk/blob/main/Planning/Crabwalk%20Invariant%20Hardening.md)
 - [Changelog and migration notes](https://github.com/krflol/crabwalk/blob/main/CHANGELOG.md)
 
 The original long-form vision remains in

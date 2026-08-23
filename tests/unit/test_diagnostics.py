@@ -11,6 +11,7 @@ from crabwalk.diagnostics import (
     sanitize_external_text,
 )
 from crabwalk.service import _cargo_diagnostics
+from crabwalk.runtime import _validate_unicode_value_tree, _validated_primitive
 
 
 def test_diagnostic_renders_original_source(tmp_path: Path) -> None:
@@ -54,6 +55,44 @@ def bad(value: rust.u64) -> rust.u64:
     assert diagnostic.span.column == 12
     caret = diagnostic.render().splitlines()[4]
     assert caret.index("^") == len("   | ") + 11
+
+
+@pytest.mark.parametrize("rust_type", ["rust.String", "rust.char"])
+def test_lone_surrogate_literal_has_a_source_spanned_diagnostic(
+    tmp_path: Path,
+    rust_type: str,
+) -> None:
+    source = tmp_path / "surrogate.py"
+    source.write_text(
+        f"""\
+from crabwalk import rust
+
+@rust.fn
+def invalid() -> {rust_type}:
+    return "\\ud800"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(source)
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB212"
+    assert diagnostic.span is not None
+
+
+@pytest.mark.parametrize("rust_type", ["String", "Str", "char"])
+def test_lone_surrogate_is_rejected_at_the_python_runtime_boundary(
+    rust_type: str,
+) -> None:
+    with pytest.raises(ValueError, match="lone surrogate"):
+        _validated_primitive("\ud800", rust_type)
+
+
+def test_lone_surrogate_mapping_key_is_rejected_before_pyo3() -> None:
+    with pytest.raises(ValueError, match="lone surrogate"):
+        _validate_unicode_value_tree({"\ud800": 1})
 
 
 def test_external_diagnostics_strip_terminal_controls_and_credentials(

@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-22
+updated: 2026-08-23
 tags:
   - project/crabwalk
   - docs/language
@@ -227,6 +227,8 @@ Every `FunctionIR` stores one or more typed effects:
 
 - `NativeRust` — the generated body executes as Rust;
 - `ConversionBoundary` — the exported call converts a parameter or return value;
+- `OpaqueCrateCall` — a declared external crate call whose implementation effects
+  Crabwalk cannot infer;
 - `PythonRuntime` — the call graph reaches an allowlisted Python operation;
 - `Blocking` and `ThreadSpawn` — native scheduling/lifecycle behavior;
 - `GlobalMutation`, `UnsafeMemory`, and `UnsafeFfi` — reviewed safety-relevant work;
@@ -238,6 +240,11 @@ ordinary calls, inherent methods, concrete and dynamic trait dispatch, custom
 operators, and function-pointer targets. Wrapper policy consumes the typed effects:
 Python runtime, global mutation, unsafe memory, and unsafe FFI prevent GIL
 detachment even when the signature itself contains only primitives.
+
+`OpaqueCrateCall` is visibility, not a claim that the external implementation is
+pure, nonblocking, or Python-free. Effect policy is complete for Crabwalk-visible
+operations; developers must audit declared crates and adapters for hidden blocking,
+threading, FFI, mutation, or PyO3 behavior.
 
 Before code generation, an IR validation pass checks effect consistency and rejects
 a Rust worker closure that directly or transitively reaches Python runtime state
@@ -263,6 +270,9 @@ native helpers, ABI exports, ownership pyclasses, crate bindings, mandatory runt
 items, method glue, and the C FFI helper are kept collision-free. A pre-codegen
 table rejects any duplicate emitted value, type, method, dependency, or crate
 binding as `CRAB209` with the relevant source declaration.
+Function/type-local source bindings must also be valid Rust identifiers. Rust
+keywords, compiler-reserved `__cw_*` names, and generated pyclass member collisions
+are rejected as `CRAB210`; wrapper-owned temporaries use the reserved prefix.
 
 ## Async and parallel distinction
 

@@ -175,12 +175,23 @@ def _cache(arguments: argparse.Namespace) -> int:
         print(f"CRAB305 Cache pruning failed\n\n{error}", file=sys.stderr)
         return 1
     action = "would remove" if outcome.dry_run else "removed"
+    if outcome.bytes_remaining is None:
+        remaining = (
+            f"at least {outcome.bytes_remaining_known} known bytes; "
+            f"{outcome.busy_entries} busy entries unmeasured"
+        )
+    else:
+        remaining = f"{outcome.bytes_remaining} bytes"
     print(
         f"{action} {len(outcome.removed)} entries "
         f"({outcome.bytes_reclaimed} bytes); "
         f"{outcome.entries_remaining} entries remain "
-        f"({outcome.bytes_remaining} bytes)"
+        f"({remaining})"
     )
+    if outcome.limit_satisfied is None and arguments.max_bytes is not None:
+        print("byte limit status is unknown while cache entries are busy")
+    elif outcome.limit_satisfied is False:
+        print("byte limit is not satisfied because selected entries remain busy")
     for path in outcome.removed:
         print(path)
     return 0

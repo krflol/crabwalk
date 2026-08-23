@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from crabwalk.compiler.frontend import analyze_project_path
 from crabwalk.diagnostics import CrabwalkCompilationError
 from crabwalk.runtime import _load_prebuilt_compilation
 from crabwalk.service import CompilationResult
-from crabwalk import RUNTIME_ABI_VERSION, __version__
+from crabwalk import RUNTIME_ABI_VERSION, RUNTIME_DISTRIBUTION, __version__
 from crabwalk.wheel import _package_entries, build_wheel
 
 
@@ -99,11 +100,23 @@ def double(value: rust.u64) -> rust.u64:
         assert manifest["runtime_abi_version"] == RUNTIME_ABI_VERSION
         assert manifest["crabwalk_version"] == __version__
 
+        metadata = archive.read("sample_project-1.2.3.dist-info/METADATA").decode(
+            "utf-8"
+        )
+        assert f"Requires-Dist: {RUNTIME_DISTRIBUTION}=={__version__}\n" in metadata
+
         record_name = "sample_project-1.2.3.dist-info/RECORD"
         rows = list(csv.reader(io.StringIO(archive.read(record_name).decode())))
         recorded = {row[0] for row in rows}
         assert recorded == names
         assert next(row for row in rows if row[0] == record_name)[1:] == ["", ""]
+
+
+def test_project_and_generated_wheel_share_the_runtime_distribution_name() -> None:
+    root = Path(__file__).resolve().parents[2]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert project["project"]["name"] == RUNTIME_DISTRIBUTION
 
 
 def test_wheel_rejects_non_importable_package_name(tmp_path: Path) -> None:

@@ -140,6 +140,9 @@ _RUST_KEYWORDS = {
     "where",
     "while",
 }
+_COMPILER_BINDING_PREFIX = "__cw_"
+_STRUCT_PYCLASS_MEMBERS = {"new", "to_python", "is_moved", "__repr__"}
+_ENUM_PYCLASS_MEMBERS = {"variant", "is_moved", "__repr__"}
 _PRIMITIVES = {
     name: TypeRef(name)
     for name in (
@@ -1497,6 +1500,14 @@ class _FunctionLowerer:
                 and all(isinstance(value, ast.Name) for value in node.targets[0].elts)
             ):
                 target = node.targets[0]
+                for target_name in target.elts:
+                    assert isinstance(target_name, ast.Name)
+                    _validate_source_binding(
+                        target_name.id,
+                        self.path,
+                        target_name,
+                        "destructured local",
+                    )
                 names = tuple(
                     value.id for value in target.elts if isinstance(value, ast.Name)
                 )
@@ -1575,6 +1586,7 @@ class _FunctionLowerer:
             if existing is not None:
                 _require_type(value.type_ref, existing, self.path, node.value)
                 return AssignIR(target.id, value, SourceSpan.from_ast(self.path, node))
+            _validate_source_binding(target.id, self.path, target, "local")
             environment[target.id] = value.type_ref
             return LetIR(
                 target.id,
@@ -1585,6 +1597,12 @@ class _FunctionLowerer:
             )
 
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            _validate_source_binding(
+                node.target.id,
+                self.path,
+                node.target,
+                "local",
+            )
             if node.value is None:
                 _unsupported(
                     node, self.path, "Uninitialized local declarations are deferred."
@@ -1754,6 +1772,12 @@ class _FunctionLowerer:
                     _require_type(
                         start.type_ref, stop.type_ref, self.path, node.iter.args[0]
                     )
+                _validate_source_binding(
+                    node.target.id,
+                    self.path,
+                    node.target,
+                    "loop target",
+                )
                 loop_environment = dict(environment)
                 loop_environment[node.target.id] = stop.type_ref
                 self.loop_depth += 1
@@ -1780,6 +1804,12 @@ class _FunctionLowerer:
             loop_environment = dict(environment)
             if isinstance(node.target, ast.Name):
                 loop_target = node.target.id
+                _validate_source_binding(
+                    loop_target,
+                    self.path,
+                    node.target,
+                    "loop target",
+                )
                 loop_environment[loop_target] = item_type
             elif isinstance(node.target, (ast.Tuple, ast.List)):
                 if (
@@ -1799,6 +1829,14 @@ class _FunctionLowerer:
                     for value in node.target.elts
                     if isinstance(value, ast.Name)
                 )
+                for target_name in node.target.elts:
+                    assert isinstance(target_name, ast.Name)
+                    _validate_source_binding(
+                        target_name.id,
+                        self.path,
+                        target_name,
+                        "loop target",
+                    )
                 if len(set(target_names)) != len(target_names):
                     _fail(
                         "CRAB192",
@@ -1912,6 +1950,7 @@ class _FunctionLowerer:
             return FloatLiteralIR(node.value, type_ref, span)
 
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            _validate_unicode_text(node.value, self.path, node)
             if expected == CHAR:
                 if len(node.value) != 1:
                     _fail(
@@ -2582,6 +2621,13 @@ class _FunctionLowerer:
         expected: TypeRef,
     ) -> tuple[str, dict[str, TypeRef]]:
         if isinstance(pattern, ast.MatchAs):
+            if pattern.name is not None:
+                _validate_source_binding(
+                    pattern.name,
+                    self.path,
+                    pattern,
+                    "pattern binding",
+                )
             if pattern.pattern is None:
                 if pattern.name is None:
                     return "_", {}
@@ -2857,6 +2903,8 @@ class _FunctionLowerer:
         expected: TypeRef,
         node: ast.AST,
     ) -> str:
+        if isinstance(value, str):
+            _validate_unicode_text(value, self.path, node)
         if type(value) is int and expected.is_integer:
             if not _integer_fits(int(value), expected):
                 _fail(
@@ -4319,6 +4367,12 @@ class _FunctionLowerer:
                 node,
             )
         parameter = arguments.args[0].arg
+        _validate_source_binding(
+            parameter,
+            self.path,
+            arguments.args[0],
+            "closure parameter",
+        )
         closure_environment = dict(environment)
         closure_environment[parameter] = parameter_type
         body = self._lower_expression(
@@ -4524,6 +4578,13 @@ def _analyze_struct(
                 path,
                 child.target,
             )
+        _validate_source_binding(
+            child.target.id,
+            path,
+            child.target,
+            "struct field",
+            reserved=_STRUCT_PYCLASS_MEMBERS,
+        )
         names.add(child.target.id)
         field_type = _annotation_type(
             child.annotation,
@@ -4562,6 +4623,25 @@ def _analyze_struct(
             path,
             node,
         )
+    field_nodes = {
+        child.target.id: child.target
+        for child in node.body
+        if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name)
+    }
+    for field_name in names:
+        colliding_getter = f"set_{field_name}"
+        if colliding_getter in names:
+            _fail(
+                "CRAB210",
+                "Generated pyclass member collision",
+                (
+                    f"Field '{colliding_getter}' collides with the generated setter "
+                    f"for field '{field_name}'."
+                ),
+                path,
+                field_nodes[colliding_getter],
+                "Rename one field so no field is named set_<another field>.",
+            )
     derives = _domain_derives(node, path, crates, "struct")
     return replace(placeholder, fields=tuple(fields), derives=derives)
 
@@ -4710,7 +4790,14 @@ def _analyze_enum(
                 "@rust.enum bodies contain Name = rust.variant(...) declarations only.",
             )
         variant_name = child.targets[0].id
-        if variant_name in names or not _RUST_IDENTIFIER.match(variant_name):
+        _validate_source_binding(
+            variant_name,
+            path,
+            child.targets[0],
+            "enum variant",
+            reserved=_ENUM_PYCLASS_MEMBERS,
+        )
+        if variant_name in names:
             _fail(
                 "CRAB161",
                 "Invalid or duplicate enum variant",
@@ -4739,6 +4826,15 @@ def _analyze_enum(
         )
         if len(field_nodes) != len(call.args) + len(call.keywords):
             _unsupported(call, path, "Enum variants do not support **kwargs.")
+        for field_name, field_node in field_nodes:
+            if not field_name.startswith("_") or not field_name[1:].isdigit():
+                _validate_source_binding(
+                    field_name,
+                    path,
+                    field_node,
+                    "enum field",
+                    reserved=_ENUM_PYCLASS_MEMBERS,
+                )
         fields = tuple(
             StructFieldIR(
                 field_name,
@@ -4775,6 +4871,22 @@ def _analyze_enum(
             path,
             node,
         )
+    variant_names = {variant.name for variant in variants}
+    for variant in variants:
+        for field in variant.fields:
+            if field.name in variant_names:
+                raise CrabwalkCompilationError(
+                    Diagnostic(
+                        "CRAB210",
+                        "Generated pyclass member collision",
+                        (
+                            f"Enum field '{field.name}' collides with a generated "
+                            "variant constructor of the same name."
+                        ),
+                        field.span,
+                        "Rename the field or variant.",
+                    )
+                )
     return replace(
         placeholder,
         variants=tuple(variants),
@@ -4832,14 +4944,17 @@ def _analyze_signature(
     type_parameters = _generic_type_parameters(node, path, domain_types or {})
     is_async = isinstance(node, ast.AsyncFunctionDef)
     exported = not type_parameters and not is_async and method_name is None
-    parameters = tuple(
-        ParameterIR(
-            argument.arg,
-            _annotation_type(argument.annotation, path, argument, domain_types),
-            SourceSpan.from_ast(path, argument),
+    parameters_list: list[ParameterIR] = []
+    for argument in arguments.args:
+        _validate_source_binding(argument.arg, path, argument, "parameter")
+        parameters_list.append(
+            ParameterIR(
+                argument.arg,
+                _annotation_type(argument.annotation, path, argument, domain_types),
+                SourceSpan.from_ast(path, argument),
+            )
         )
-        for argument in arguments.args
-    )
+    parameters = tuple(parameters_list)
     for parameter, argument in zip(parameters, arguments.args):
         if parameter.type_ref == UNIT:
             _fail(
@@ -6053,6 +6168,7 @@ def _block_returns(statements: tuple[StatementIR, ...]) -> bool:
 _EFFECT_ORDER = (
     Effect.NATIVE_RUST,
     Effect.CONVERSION_BOUNDARY,
+    Effect.OPAQUE_CRATE_CALL,
     Effect.PYTHON_RUNTIME,
     Effect.BLOCKING,
     Effect.THREAD_SPAWN,
@@ -6118,6 +6234,8 @@ def _direct_function_effects(function: FunctionIR) -> set[Effect]:
 
 def _expression_effects(expression: ExpressionIR) -> set[Effect]:
     effects: set[Effect] = set()
+    if isinstance(expression, CrateCallIR) and expression.path[0] != "std":
+        effects.add(Effect.OPAQUE_CRATE_CALL)
     if isinstance(expression, PythonPrintIR):
         effects.add(Effect.PYTHON_RUNTIME)
     if isinstance(expression, PanicIR):
@@ -6414,6 +6532,52 @@ def _unsupported(
         node,
         help_text or "Move it outside @rust.fn or use a supported Rust equivalent.",
     )
+
+
+def _validate_source_binding(
+    name: str,
+    path: Path,
+    node: ast.AST,
+    kind: str,
+    *,
+    reserved: set[str] | None = None,
+) -> None:
+    reserved = reserved or set()
+    if (
+        not _RUST_IDENTIFIER.match(name)
+        or name in _RUST_KEYWORDS
+        or name.startswith(_COMPILER_BINDING_PREFIX)
+        or name in reserved
+    ):
+        reason = (
+            "a compiler-reserved __cw_ name"
+            if name.startswith(_COMPILER_BINDING_PREFIX)
+            else "a generated pyclass member"
+            if name in reserved
+            else "a Rust keyword or unsupported Rust identifier"
+        )
+        _fail(
+            "CRAB210",
+            "Unsupported Rust binding name",
+            f"The {kind} name '{name}' is {reason}.",
+            path,
+            node,
+            "Choose a source name that is not a Rust keyword and does not start with __cw_.",
+        )
+
+
+def _validate_unicode_text(value: str, path: Path, node: ast.AST) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        _fail(
+            "CRAB212",
+            "String is not valid Unicode scalar text",
+            "Rust strings and chars cannot contain an escaped lone surrogate.",
+            path,
+            node,
+            "Replace the surrogate with a Unicode scalar value or ordinary text.",
+        )
 
 
 def _fail(

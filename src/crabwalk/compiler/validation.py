@@ -12,6 +12,7 @@ from .ir import (
     CallIR,
     ClosureIR,
     ConstructorIR,
+    CrateCallIR,
     Effect,
     FunctionPointerTwiceIR,
     FunctionIR,
@@ -19,6 +20,7 @@ from .ir import (
     PackageIR,
     PanicIR,
     PythonPrintIR,
+    StringLiteralIR,
     TraitCallIR,
 )
 from .naming import (
@@ -32,10 +34,12 @@ def validate_package_ir(ir: PackageIR) -> None:
     """Assert compiler invariants and reject unsafe cross-feature interactions."""
 
     validate_function_symbol_identity(ir.functions)
+    _validate_trait_conformance(ir)
     _validate_emitted_identifiers(ir)
     functions = {function.rust_symbol: function for function in ir.functions}
     for function in ir.functions:
         expressions = tuple(_walk_ir(function.body))
+        _validate_unicode_literals(expressions)
         _validate_effect_annotations(function, expressions)
         _validate_function_boundary_placement(function, functions)
         worker_closures = {
@@ -91,6 +95,113 @@ def validate_package_ir(ir: PackageIR) -> None:
                     offender,
                     "Move the Python operation outside the closure.",
                 )
+
+
+def _validate_unicode_literals(expressions: tuple[object, ...]) -> None:
+    for expression in expressions:
+        if not isinstance(expression, StringLiteralIR):
+            continue
+        try:
+            expression.value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB212",
+                    "String is not valid Unicode scalar text",
+                    "Rust strings and chars cannot contain an escaped lone surrogate.",
+                    expression.span,
+                    "Replace the surrogate with a Unicode scalar value or ordinary text.",
+                )
+            ) from error
+
+
+def _validate_trait_conformance(ir: PackageIR) -> None:
+    traits = {trait.symbol: trait for trait in ir.traits}
+    implementations: dict[tuple[str, str], dict[str, FunctionIR]] = {}
+    for function in ir.functions:
+        if function.trait_symbol is None:
+            continue
+        trait = traits.get(function.trait_symbol)
+        if trait is None or function.method_for is None or function.method_name is None:
+            raise AssertionError(
+                f"incomplete trait implementation IR for {function.qualified_name}"
+            )
+        declared = next(
+            (method for method in trait.methods if method.name == function.method_name),
+            None,
+        )
+        if declared is None:
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB211",
+                    "Unknown trait implementation method",
+                    (
+                        f"{function.qualified_name} implements '{function.method_name}', "
+                        f"but {trait.qualified_name} does not declare that method."
+                    ),
+                    function.span,
+                    "Use one of the methods declared by rust.trait.",
+                )
+            )
+        if function.return_type != declared.return_type:
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB211",
+                    "Trait implementation return type mismatch",
+                    (
+                        f"{function.qualified_name} returns "
+                        f"{function.return_type.display()}, but "
+                        f"{trait.qualified_name}.{declared.name} requires "
+                        f"{declared.return_type.display()}."
+                    ),
+                    function.span,
+                    "Match the return type declared by rust.trait.",
+                )
+            )
+        key = (trait.symbol, function.method_for.rust_name)
+        group = implementations.setdefault(key, {})
+        previous = group.get(function.method_name)
+        if previous is not None:
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB211",
+                    "Duplicate trait implementation method",
+                    (
+                        f"{previous.qualified_name} and {function.qualified_name} both "
+                        f"implement {trait.qualified_name}.{function.method_name} for "
+                        f"{function.method_for.display()}."
+                    ),
+                    function.span,
+                    "Keep exactly one implementation of each required method.",
+                )
+            )
+        group[function.method_name] = function
+
+    for (trait_symbol, _concrete_symbol), methods in implementations.items():
+        trait = traits[trait_symbol]
+        missing = [
+            method.name for method in trait.methods if method.name not in methods
+        ]
+        if not missing:
+            continue
+        representative = next(iter(methods.values()))
+        concrete = representative.method_for
+        assert concrete is not None
+        raise CrabwalkCompilationError(
+            Diagnostic(
+                "CRAB211",
+                "Incomplete trait implementation",
+                (
+                    f"{concrete.display()} implements only part of "
+                    f"{trait.qualified_name}; missing: {', '.join(missing)}."
+                ),
+                representative.span,
+                (
+                    "Add exactly one @rust.impl declaration for every required "
+                    "trait method."
+                ),
+            )
+        )
 
 
 def validate_function_symbol_identity(functions: tuple[FunctionIR, ...]) -> None:
@@ -298,6 +409,8 @@ def _validate_effect_annotations(
                 required.update({Effect.UNSAFE_FFI, Effect.MAY_PANIC})
             elif expression.constructor == "UnsafeStaticIncrement":
                 required.update({Effect.GLOBAL_MUTATION, Effect.MAY_PANIC})
+        elif isinstance(expression, CrateCallIR) and expression.path[0] != "std":
+            required.add(Effect.OPAQUE_CRATE_CALL)
     missing = required - effects
     if missing:
         names = ", ".join(sorted(effect.value for effect in missing))

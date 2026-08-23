@@ -138,6 +138,7 @@ class _RustOwnedValue:
     def __setattr__(self, name: str, value: object) -> None:
         self._check_thread()
         if name in self._field_names:
+            _validate_unicode_value_tree(value)
             try:
                 setattr(self._native, name, value)
             except RuntimeError as error:
@@ -266,6 +267,10 @@ def construct_rust_value(
             "concrete type before constructing it."
         )
     try:
+        for value in values:
+            _validate_unicode_value_tree(value)
+        for value in keywords.values():
+            _validate_unicode_value_tree(value)
         if rust_type.name == "Vec" and len(rust_type.arguments) == 1:
             if keywords:
                 names = ", ".join(sorted(keywords))
@@ -325,12 +330,14 @@ def _validated_primitive(value: object, rust_name: str) -> object:
     if rust_name == "char":
         if type(value) is not str or len(value) != 1:
             raise TypeError("expected a one-character str for rust.char")
+        _validate_unicode_value_tree(value)
         return value
     if rust_name in {"String", "Str"}:
         if type(value) is not str:
             raise TypeError(
                 f"expected str for rust.{rust_name}, found {type(value).__name__}"
             )
+        _validate_unicode_value_tree(value)
         return value
     if rust_name in {"f32", "f64"}:
         if type(value) not in {int, float}:
@@ -364,6 +371,10 @@ def construct_rust_variant(
     if native_type is None:
         raise RuntimeError(f"No generated wrapper for {rust_type!r} is loaded.")
     try:
+        for value in values:
+            _validate_unicode_value_tree(value)
+        for value in keywords.values():
+            _validate_unicode_value_tree(value)
         constructor = getattr(native_type, variant)
         native = constructor(*values, **keywords)
     except (AttributeError, OverflowError, TypeError, ValueError) as error:
@@ -376,6 +387,25 @@ def construct_rust_variant(
         _owned_type_fields.get(type_key, ()),
         _owned_enum_variants.get(type_key),
     )
+
+
+def _validate_unicode_value_tree(value: object) -> None:
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError(
+                "Rust strings and chars cannot contain an escaped lone surrogate"
+            ) from error
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_unicode_value_tree(item)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _validate_unicode_value_tree(key)
+            _validate_unicode_value_tree(item)
 
 
 def construct_inferred_vector(

@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-22
+updated: 2026-08-23
 tags:
   - project/crabwalk
   - docs/testing
@@ -77,8 +77,8 @@ Record an isolated performance sample with:
 python benchmarks/run_baseline.py
 ```
 
-The benchmark policy and promotion requirements are in
-[[Planning/Crabwalk Performance Baseline]].
+Benchmark output is evidence only when it records the toolchain, interpreter,
+machine, cold/warm boundary, and repeated samples beside the tested commit.
 
 ## Evidence rules
 
@@ -137,5 +137,5 @@ Linux, and macOS for CPython 3.11 and 3.14, unit lanes for CPython 3.12 and 3.13
 and the quality gate. The release commit is subjected to the same matrix before
 publication.
 
-The deeper release checklist remains in
-[[Planning/Crabwalk Verification and Release]].
+The exact release candidate must pass this nine-job matrix before publication;
+the repository changelog records candidate-specific fixes and migration notes.

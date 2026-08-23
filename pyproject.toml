@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crabwalk-lang"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Compile an explicit Python subset into inspectable, rustc-checked native extensions"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -47,6 +47,9 @@ crabwalk = "crabwalk.cli:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {attr = "crabwalk._version.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

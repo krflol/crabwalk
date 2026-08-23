@@ -4,7 +4,9 @@ import pytest
 
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_path
+from crabwalk.compiler.ir import Effect
 from crabwalk.diagnostics import CrabwalkCompilationError
+from crabwalk.inspection import function_inspection
 
 
 REGEX_SOURCE = r"""from crabwalk import rust
@@ -34,6 +36,9 @@ def test_static_crate_declaration_generates_cargo_and_rust_paths(
     assert f"{binding}::Regex::new" in generated.rust_source
     assert r'::Regex::new("\\d+")' in generated.rust_source
     assert ".unwrap().is_match(value)" in generated.rust_source
+    assert Effect.OPAQUE_CRATE_CALL in ir.functions[0].effects
+    inspection = function_inspection(ir.functions[0])
+    assert inspection["native_calls"][0]["name"] == f"{binding}::Regex::new"
 
 
 def test_crate_options_must_be_static(tmp_path: Path) -> None:

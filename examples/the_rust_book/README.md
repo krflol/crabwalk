@@ -2,7 +2,7 @@
 
 This package is a runnable, explanatory adaptation of all 21 chapters of [*The Rust Programming Language*](https://doc.rust-lang.org/book/). Every `@rust.fn` body compiles into one native Rust extension; Python only orchestrates imports and checks values at explicit boundaries.
 
-The source baseline is rust-lang/book commit `917544888a55e4da7109bdba8c88c893c0da70f4` (captured 2026-08-21). See [COVERAGE.md](COVERAGE.md) for the chapter matrix and [the vault plan](../../Planning/Rust%20Book%20End-to-End%20Evolution.md) for the feature-evolution and verification process.
+The source baseline is rust-lang/book commit `917544888a55e4da7109bdba8c88c893c0da70f4` (captured 2026-08-21). See [COVERAGE.md](COVERAGE.md) for the chapter matrix, source links, implemented compiler surface, and verification status.
 
 ## Run it
 

@@ -137,3 +137,108 @@ def second(counter: rust.Ref[Counter]) -> rust.u64:
 
     assert captured.value.diagnostics[0].code == "CRAB209"
     assert "method glue namespace" in str(captured.value)
+
+
+def test_exported_py_parameter_uses_a_compiler_owned_python_token(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "py_parameter.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def identity(py: rust.u64) -> rust.u64:
+    return py
+""",
+        encoding="utf-8",
+    )
+
+    generated = generate_project(analyze_path(source), "_crabwalk_py_parameter")
+
+    assert "__cw_py: Python<'_>, py: u64" in generated.rust_source
+    assert "__cw_py.detach" in generated.rust_source
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        """\
+from crabwalk import rust
+
+@rust.fn
+def identity(self: rust.u64) -> rust.u64:
+    return self
+""",
+        """\
+from crabwalk import rust
+
+@rust.fn
+def invalid(value: rust.u64) -> rust.u64:
+    __cw_result = value
+    return __cw_result
+""",
+        """\
+from crabwalk import rust
+
+@rust.fn
+def invalid(value: rust.u64) -> rust.u64:
+    total: rust.u64 = 0
+    for ref in range(value):
+        total += ref
+    return total
+""",
+        """\
+from crabwalk import rust
+
+@rust.fn
+def invalid() -> rust.u64:
+    values: rust.Vec[rust.u64] = rust.Vec([1, 2, 3])
+    return values.iter().map(lambda ref: ref).sum()
+""",
+        """\
+from crabwalk import rust
+
+@rust.fn
+def invalid(value: rust.u64) -> rust.u64:
+    match value:
+        case ref:
+            return ref
+""",
+        """\
+from crabwalk import rust
+
+@rust.struct
+class Invalid:
+    to_python: rust.u64
+""",
+        """\
+from crabwalk import rust
+
+@rust.struct
+class Invalid:
+    value: rust.u64
+    set_value: rust.u64
+""",
+        """\
+from crabwalk import rust
+
+@rust.enum
+class Invalid:
+    variant = rust.variant()
+""",
+    ],
+)
+def test_unsafe_source_bindings_fail_before_rustc(
+    tmp_path: Path,
+    source_text: str,
+) -> None:
+    source = tmp_path / "invalid_binding.py"
+    source.write_text(source_text, encoding="utf-8")
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(source)
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB210"
+    assert diagnostic.span is not None

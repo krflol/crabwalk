@@ -114,7 +114,7 @@ def function_inspection(function: FunctionIR) -> dict[str, object]:
         elif isinstance(value, CrateCallIR):
             native_calls.append(
                 {
-                    "name": "::".join((value.crate, *value.path)),
+                    "name": "::".join(value.path),
                     "source": value.span.to_dict(),
                 }
             )

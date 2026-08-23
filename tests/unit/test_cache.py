@@ -7,6 +7,7 @@ from pathlib import Path
 import crabwalk.build.cache as cache_module
 from crabwalk.build.cache import (
     FileLock,
+    cache_load_lease_active,
     prune_artifact_cache,
     retain_cache_load_lease,
     touch_cache_access,
@@ -108,6 +109,10 @@ def test_pruning_does_not_inventory_a_busy_fingerprint(
 
     assert outcome.removed == ()
     assert outcome.entries_remaining == 1
+    assert outcome.bytes_remaining is None
+    assert outcome.bytes_remaining_known == 0
+    assert outcome.busy_entries == 1
+    assert outcome.limit_satisfied is None
     assert busy.is_dir()
 
 
@@ -170,6 +175,9 @@ def test_pruning_skips_an_entry_when_the_os_denies_deletion(
     assert outcome.removed == ()
     assert outcome.bytes_reclaimed == 0
     assert outcome.bytes_remaining == 10
+    assert outcome.bytes_remaining_known == 10
+    assert outcome.busy_entries == 0
+    assert outcome.limit_satisfied is False
     assert outcome.entries_remaining == 1
     assert candidate.is_dir()
 
@@ -196,6 +204,17 @@ def test_pruning_skips_a_process_load_lease(tmp_path: Path) -> None:
         max_age_seconds=None,
     )
     assert released.removed == (candidate,)
+
+
+def test_unlocked_lease_with_a_live_reused_pid_is_stale(tmp_path: Path) -> None:
+    state = tmp_path / ".crabwalk"
+    fingerprint = "2" * 64
+    lease = state / "locks" / "load-leases" / fingerprint / f"{os.getpid()}-stale.lock"
+    lease.parent.mkdir(parents=True)
+    lease.write_bytes(b"\0")
+
+    assert cache_load_lease_active(state, fingerprint) is False
+    assert not lease.exists()
 
 
 def test_atomic_text_write_preserves_unchanged_input_mtime(tmp_path: Path) -> None:

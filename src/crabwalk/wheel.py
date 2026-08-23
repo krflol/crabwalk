@@ -16,7 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
-from crabwalk._version import RUNTIME_ABI_VERSION, __version__
+from crabwalk._version import (
+    RUNTIME_ABI_VERSION,
+    RUNTIME_DISTRIBUTION,
+    __version__,
+)
 from crabwalk.build.cache import sha256_file
 from crabwalk.config import discover_project_config
 from crabwalk.diagnostics import CrabwalkCompilationError, Diagnostic
@@ -245,7 +249,7 @@ def _metadata(name: str, version: str) -> bytes:
         f"Version: {version}\n"
         "Summary: A Python package with native functions compiled by Crabwalk\n"
         "Requires-Python: >=3.11\n"
-        f"Requires-Dist: crabwalk=={__version__}\n"
+        f"Requires-Dist: {RUNTIME_DISTRIBUTION}=={__version__}\n"
         "\n"
     ).encode("utf-8")
 

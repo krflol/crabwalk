@@ -29,9 +29,17 @@ class ArtifactCacheInfo:
 class CachePruneResult:
     removed: tuple[Path, ...]
     bytes_reclaimed: int
-    bytes_remaining: int
+    bytes_remaining_known: int
     entries_remaining: int
+    busy_entries: int
+    limit_satisfied: bool | None
     dry_run: bool
+
+    @property
+    def bytes_remaining(self) -> int | None:
+        """Return the exact remainder, or None when busy bytes were unmeasurable."""
+
+        return None if self.busy_entries else self.bytes_remaining_known
 
 
 class FileLock:
@@ -268,10 +276,19 @@ def _prune_artifact_cache_locked(
         raise ValueError("max_age_seconds must be non-negative or None")
     root = (state_root / "cache" / "artifacts").resolve()
     if not root.is_dir():
-        return CachePruneResult((), 0, 0, 0, dry_run)
+        return CachePruneResult(
+            removed=(),
+            bytes_reclaimed=0,
+            bytes_remaining_known=0,
+            entries_remaining=0,
+            busy_entries=0,
+            limit_satisfied=None if max_bytes is None else True,
+            dry_run=dry_run,
+        )
 
     entries: list[tuple[Path, int, float]] = []
     discovered_entries = 0
+    busy_entries = 0
     for candidate in root.iterdir():
         if not re.fullmatch(r"[0-9a-f]{64}", candidate.name):
             continue
@@ -288,10 +305,14 @@ def _prune_artifact_cache_locked(
                 timeout=0.0,
             ):
                 size, last_used = _entry_size_and_mtime(resolved)
-        except (FileNotFoundError, PermissionError, TimeoutError):
+        except FileNotFoundError:
+            discovered_entries -= 1
+            continue
+        except (PermissionError, TimeoutError):
             # Inventory reads must obey the same entry lock as publication.
             # In particular, opening .last-access for reading can prevent an
             # atomic replacement in another process on Windows.
+            busy_entries += 1
             continue
         entries.append((resolved, size, last_used))
 
@@ -352,11 +373,16 @@ def _prune_artifact_cache_locked(
     reclaimed = sum(removed_sizes[path] for path in removed)
     remaining_entries = discovered_entries - len(removed)
     remaining_size = sum(size for _, size, _ in entries) - reclaimed
+    limit_satisfied = (
+        None if max_bytes is None or busy_entries else remaining_size <= max_bytes
+    )
     return CachePruneResult(
         removed=removed,
         bytes_reclaimed=reclaimed,
-        bytes_remaining=remaining_size,
+        bytes_remaining_known=remaining_size,
         entries_remaining=remaining_entries,
+        busy_entries=busy_entries,
+        limit_satisfied=limit_satisfied,
         dry_run=dry_run,
     )
 
@@ -395,9 +421,6 @@ def cache_load_lease_active(state_root: Path, fingerprint: str) -> bool:
         return False
     stale: list[Path] = []
     for path in lease_root.glob("*.lock"):
-        owner = _lease_owner_pid(path)
-        if owner is not None and _process_is_alive(owner):
-            return True
         try:
             with FileLock(path, timeout=0.0):
                 pass
@@ -411,59 +434,6 @@ def cache_load_lease_active(state_root: Path, fingerprint: str) -> bool:
     except OSError:
         pass
     return False
-
-
-def _lease_owner_pid(path: Path) -> int | None:
-    try:
-        return int(path.stem.split("-", 1)[0])
-    except ValueError:
-        return None
-
-
-def _process_is_alive(process_id: int) -> bool:
-    if process_id == os.getpid():
-        return True
-    if os.name == "nt":
-        import ctypes
-
-        process_query_limited_information = 0x1000
-        still_active = 259
-        ctypes_module: Any = ctypes
-        kernel32 = ctypes_module.windll.kernel32
-        kernel32.OpenProcess.argtypes = [
-            ctypes.c_ulong,
-            ctypes.c_int,
-            ctypes.c_ulong,
-        ]
-        kernel32.OpenProcess.restype = ctypes.c_void_p
-        kernel32.GetExitCodeProcess.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_ulong),
-        ]
-        kernel32.GetExitCodeProcess.restype = ctypes.c_int
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel32.CloseHandle.restype = ctypes.c_int
-        handle = kernel32.OpenProcess(
-            process_query_limited_information,
-            False,
-            process_id,
-        )
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return False
-            return exit_code.value == still_active
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(process_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def _remove_scoped_entry(root: Path, path: Path) -> None:

@@ -765,7 +765,7 @@ def _write_export_wrapper(
     ]
     releases_gil = function_releases_gil(function)
     if releases_gil:
-        wrapper_parameters.insert(0, "py: Python<'_>")
+        wrapper_parameters.insert(0, "__cw_py: Python<'_>")
     parameters = ", ".join(wrapper_parameters)
     arguments = ", ".join(
         (
@@ -794,7 +794,7 @@ def _write_export_wrapper(
         if function.python_boundary:
             native_call += "?"
         elif releases_gil:
-            native_call = f"py.detach(move || {native_call})"
+            native_call = f"__cw_py.detach(move || {native_call})"
         writer.line(
             f"let __cw_result = __cw_catch_panic(|| {native_call})?;",
             function.span,
@@ -825,7 +825,7 @@ def _write_export_wrapper(
     else:
         native_call = f"__cw_native_{function.rust_symbol}({arguments})"
         if releases_gil:
-            native_call = f"py.detach(move || {native_call})"
+            native_call = f"__cw_py.detach(move || {native_call})"
         writer.line(
             f"Ok(__cw_catch_panic(|| {native_call})?)",
             function.span,

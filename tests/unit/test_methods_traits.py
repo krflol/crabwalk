@@ -83,6 +83,82 @@ def test_inherent_methods_and_trait_objects_lower_to_rust(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize(
+    ("trait_methods", "implementation", "message"),
+    [
+        (
+            "draw=rust.u64, label=rust.String",
+            """\
+@rust.impl(Draw, Button, name="draw")
+def draw(button: rust.Ref[Button]) -> rust.u64:
+    return button.width
+""",
+            "Incomplete trait implementation",
+        ),
+        (
+            "draw=rust.u64",
+            """\
+@rust.impl(Draw, Button, name="label")
+def label(button: rust.Ref[Button]) -> rust.u64:
+    return button.width
+""",
+            "Unknown trait implementation method",
+        ),
+        (
+            "draw=rust.String",
+            """\
+@rust.impl(Draw, Button, name="draw")
+def draw(button: rust.Ref[Button]) -> rust.u64:
+    return button.width
+""",
+            "Trait implementation return type mismatch",
+        ),
+        (
+            "draw=rust.u64",
+            """\
+@rust.impl(Draw, Button, name="draw")
+def first_draw(button: rust.Ref[Button]) -> rust.u64:
+    return button.width
+
+@rust.impl(Draw, Button, name="draw")
+def second_draw(button: rust.Ref[Button]) -> rust.u64:
+    return button.width
+""",
+            "Duplicate trait implementation method",
+        ),
+    ],
+)
+def test_trait_contract_is_validated_before_codegen(
+    tmp_path: Path,
+    trait_methods: str,
+    implementation: str,
+    message: str,
+) -> None:
+    source = tmp_path / "invalid_trait.py"
+    source.write_text(
+        f"""\
+from crabwalk import rust
+
+Draw = rust.trait("Draw", {trait_methods})
+
+@rust.struct
+class Button:
+    width: rust.u64
+
+{implementation}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        generate_project(analyze_path(source), "_crabwalk_invalid_trait")
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB211"
+    assert diagnostic.title == message
+    assert diagnostic.span is not None
+
+
+@pytest.mark.parametrize(
     "body",
     [
         "values.push(1)",

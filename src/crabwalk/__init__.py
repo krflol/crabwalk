@@ -1,7 +1,7 @@
 """Crabwalk's public Python package."""
 
 from . import rust
-from ._version import RUNTIME_ABI_VERSION, __version__
+from ._version import RUNTIME_ABI_VERSION, RUNTIME_DISTRIBUTION, __version__
 from .diagnostics import (
     CrabwalkBorrowError,
     CrabwalkCompilationError,
@@ -21,6 +21,7 @@ __all__ = [
     "CrabwalkRustError",
     "CrabwalkThreadError",
     "RUNTIME_ABI_VERSION",
+    "RUNTIME_DISTRIBUTION",
     "__version__",
     "rust",
 ]

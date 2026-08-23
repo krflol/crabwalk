@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-22
+updated: 2026-08-23
 tags:
   - project/crabwalk
   - docs/security
@@ -66,6 +66,11 @@ Generated Rust names are component-injective and checked across value, type,
 method-glue, Cargo-dependency, and crate-binding namespaces. Mandatory PyO3 and the
 narrow C `abs` declaration use isolated internal identities, preventing user names
 such as `abs`, `String`, or `pyo3` from changing compiler/runtime resolution.
+Parameters, locals, closure/pattern bindings, fields, and variants reject Rust
+keywords and compiler-reserved `__cw_*` names before code generation. Generated
+pyclass member collisions are rejected at their source declarations. Rust strings
+and chars accept Unicode scalar text only; escaped lone surrogates fail at both
+literal lowering and Python runtime boundaries.
 
 The generated ThreadPool catches each worker job, records the first failure, and
 reports it through explicit `finish()`. Its `Drop` path closes and joins without
@@ -93,6 +98,11 @@ Arbitrary build scripts can consume inputs Cargo and Crabwalk cannot infer. Decl
 those with `[tool.crabwalk].extra-files` and `extra-env`. Cargo is re-invoked for
 every cache hit, but undeclared external inputs remain outside the
 content-addressed fingerprint contract.
+
+Declared-crate calls carry `OpaqueCrateCall`. Crabwalk cannot infer whether an
+arbitrary dependency blocks, spawns threads, mutates global state, calls FFI, or
+reacquires Python through PyO3. The visible effect list and `python-boundaries`
+policy describe Crabwalk-lowered operations, not unaudited dependency internals.
 
 No signature or publisher attestation is currently provided. SHA-256 detects
 accidental/stale corruption and local mismatch; it does not establish who produced
