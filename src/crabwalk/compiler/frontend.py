@@ -9,7 +9,7 @@ import math
 import re
 import threading
 from collections import Counter, OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
@@ -18,6 +18,11 @@ from crabwalk.diagnostics import (
     CrabwalkCompilationError,
     Diagnostic,
     SourceSpan,
+)
+from crabwalk.namespaces import (
+    ENUM_FIELD_RESERVED_NAMES,
+    ENUM_VARIANT_RESERVED_NAMES,
+    STRUCT_FIELD_RESERVED_NAMES,
 )
 
 from .ir import (
@@ -92,57 +97,13 @@ from .ir import (
     UnaryIR,
     WhileIR,
 )
-from .naming import mangle_dependency, mangle_item
+from .naming import is_rust_2024_identifier, mangle_dependency, mangle_item
 
 _ANALYSIS_CACHE_LIMIT = 64
 _analysis_cache: OrderedDict[tuple[str, str, str], PackageIR] = OrderedDict()
 _analysis_cache_lock = threading.Lock()
 
-_RUST_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_RUST_KEYWORDS = {
-    "as",
-    "async",
-    "await",
-    "break",
-    "const",
-    "continue",
-    "crate",
-    "dyn",
-    "else",
-    "enum",
-    "extern",
-    "false",
-    "fn",
-    "for",
-    "if",
-    "impl",
-    "in",
-    "let",
-    "loop",
-    "match",
-    "mod",
-    "move",
-    "mut",
-    "pub",
-    "ref",
-    "return",
-    "self",
-    "Self",
-    "static",
-    "struct",
-    "super",
-    "trait",
-    "true",
-    "type",
-    "union",
-    "unsafe",
-    "use",
-    "where",
-    "while",
-}
 _COMPILER_BINDING_PREFIX = "__cw_"
-_STRUCT_PYCLASS_MEMBERS = {"new", "to_python", "is_moved", "__repr__"}
-_ENUM_PYCLASS_MEMBERS = {"variant", "is_moved", "__repr__"}
 _PRIMITIVES = {
     name: TypeRef(name)
     for name in (
@@ -4510,7 +4471,7 @@ def _struct_placeholder(
     module_name: str,
     symbol: str,
 ) -> StructIR:
-    if not _RUST_IDENTIFIER.match(node.name) or node.name in _RUST_KEYWORDS:
+    if not is_rust_2024_identifier(node.name):
         _fail(
             "CRAB150",
             "Unsupported Rust struct name",
@@ -4583,7 +4544,7 @@ def _analyze_struct(
             path,
             child.target,
             "struct field",
-            reserved=_STRUCT_PYCLASS_MEMBERS,
+            reserved=STRUCT_FIELD_RESERVED_NAMES,
         )
         names.add(child.target.id)
         field_type = _annotation_type(
@@ -4738,7 +4699,7 @@ def _enum_placeholder(
     module_name: str,
     symbol: str,
 ) -> EnumIR:
-    if not _RUST_IDENTIFIER.match(node.name) or node.name in _RUST_KEYWORDS:
+    if not is_rust_2024_identifier(node.name):
         _fail(
             "CRAB160",
             "Unsupported Rust enum name",
@@ -4795,7 +4756,7 @@ def _analyze_enum(
             path,
             child.targets[0],
             "enum variant",
-            reserved=_ENUM_PYCLASS_MEMBERS,
+            reserved=ENUM_VARIANT_RESERVED_NAMES,
         )
         if variant_name in names:
             _fail(
@@ -4833,7 +4794,7 @@ def _analyze_enum(
                     path,
                     field_node,
                     "enum field",
-                    reserved=_ENUM_PYCLASS_MEMBERS,
+                    reserved=ENUM_FIELD_RESERVED_NAMES,
                 )
         fields = tuple(
             StructFieldIR(
@@ -4899,11 +4860,7 @@ def _analyze_signature(
     path: Path,
     domain_types: dict[str, TypeRef] | None = None,
 ) -> _Signature:
-    if (
-        not _RUST_IDENTIFIER.match(node.name)
-        or node.name in _RUST_KEYWORDS
-        or keyword.iskeyword(node.name)
-    ):
+    if not is_rust_2024_identifier(node.name) or keyword.iskeyword(node.name):
         _fail(
             "CRAB105",
             "Unsupported function name",
@@ -5440,7 +5397,7 @@ def _discover_traits(
                 path,
                 call,
             )
-        if not _RUST_IDENTIFIER.match(binding) or binding in _RUST_KEYWORDS:
+        if not is_rust_2024_identifier(binding):
             _fail(
                 "CRAB191",
                 "Unsupported Rust trait name",
@@ -5460,11 +5417,7 @@ def _discover_traits(
                     option,
                 )
             method_name = option.arg
-            if (
-                method_name in seen
-                or not _RUST_IDENTIFIER.match(method_name)
-                or method_name in _RUST_KEYWORDS
-            ):
+            if method_name in seen or not is_rust_2024_identifier(method_name):
                 _fail(
                     "CRAB191",
                     "Invalid Rust trait method",
@@ -5529,7 +5482,7 @@ def _discover_type_variables(tree: ast.Module, path: Path) -> dict[str, TypeRef]
         binding = node.targets[0].id
         if (
             binding in values
-            or binding in _RUST_KEYWORDS
+            or not is_rust_2024_identifier(binding)
             or len(node.value.args) != 1
             or node.value.keywords
             or not isinstance(node.value.args[0], ast.Constant)
@@ -5701,7 +5654,7 @@ def _method_decorator_metadata(
             path,
             explicit_name,
         )
-    if not _RUST_IDENTIFIER.match(method_name) or method_name in _RUST_KEYWORDS:
+    if not is_rust_2024_identifier(method_name):
         _fail(
             "CRAB190",
             "Unsupported Rust method name",
@@ -5779,7 +5732,7 @@ def _discover_crates(tree: ast.Module, path: Path) -> dict[str, CrateIR]:
         ):
             continue
         binding = node.targets[0].id
-        if not _RUST_IDENTIFIER.match(binding) or binding in _RUST_KEYWORDS:
+        if not is_rust_2024_identifier(binding):
             _fail(
                 "CRAB130",
                 "Invalid crate binding",
@@ -6540,19 +6493,18 @@ def _validate_source_binding(
     node: ast.AST,
     kind: str,
     *,
-    reserved: set[str] | None = None,
+    reserved: Collection[str] | None = None,
 ) -> None:
-    reserved = reserved or set()
+    reserved = reserved or ()
     if (
-        not _RUST_IDENTIFIER.match(name)
-        or name in _RUST_KEYWORDS
+        not is_rust_2024_identifier(name)
         or name.startswith(_COMPILER_BINDING_PREFIX)
         or name in reserved
     ):
         reason = (
             "a compiler-reserved __cw_ name"
             if name.startswith(_COMPILER_BINDING_PREFIX)
-            else "a generated pyclass member"
+            else "a generated or runtime-reserved Python member"
             if name in reserved
             else "a Rust keyword or unsupported Rust identifier"
         )
@@ -6562,7 +6514,10 @@ def _validate_source_binding(
             f"The {kind} name '{name}' is {reason}.",
             path,
             node,
-            "Choose a source name that is not a Rust keyword and does not start with __cw_.",
+            (
+                "Choose a source name that is valid in Rust 2024, does not start "
+                "with __cw_, and does not overlap Crabwalk's Python wrapper API."
+            ),
         )
 
 

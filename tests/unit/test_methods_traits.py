@@ -125,6 +125,15 @@ def second_draw(button: rust.Ref[Button]) -> rust.u64:
 """,
             "Duplicate trait implementation method",
         ),
+        (
+            "draw=rust.u64",
+            """\
+@rust.impl(Draw, Button, name="draw")
+def draw(button: rust.Ref[Button], scale: rust.u64) -> rust.u64:
+    return button.width * scale
+""",
+            "Trait implementation parameter mismatch",
+        ),
     ],
 )
 def test_trait_contract_is_validated_before_codegen(

@@ -143,6 +143,30 @@ def _validate_trait_conformance(ir: PackageIR) -> None:
                     "Use one of the methods declared by rust.trait.",
                 )
             )
+        if len(function.parameters) != 1:
+            extra_count = max(0, len(function.parameters) - 1)
+            span = (
+                function.parameters[1].span
+                if len(function.parameters) > 1
+                else function.span
+            )
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB211",
+                    "Trait implementation parameter mismatch",
+                    (
+                        f"{trait.qualified_name}.{declared.name} currently accepts "
+                        "only its shared receiver, but "
+                        f"{function.qualified_name} declares "
+                        f"{extra_count} additional parameter(s)."
+                    ),
+                    span,
+                    (
+                        "Remove the additional parameter; Crabwalk trait declarations "
+                        "do not yet describe method arguments."
+                    ),
+                )
+            )
         if function.return_type != declared.return_type:
             raise CrabwalkCompilationError(
                 Diagnostic(

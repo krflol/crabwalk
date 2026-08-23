@@ -178,7 +178,7 @@ def _cache(arguments: argparse.Namespace) -> int:
     if outcome.bytes_remaining is None:
         remaining = (
             f"at least {outcome.bytes_remaining_known} known bytes; "
-            f"{outcome.busy_entries} busy entries unmeasured"
+            f"{outcome.uncertain_entries} entries unmeasured or changed"
         )
     else:
         remaining = f"{outcome.bytes_remaining} bytes"
@@ -189,9 +189,9 @@ def _cache(arguments: argparse.Namespace) -> int:
         f"({remaining})"
     )
     if outcome.limit_satisfied is None and arguments.max_bytes is not None:
-        print("byte limit status is unknown while cache entries are busy")
+        print("byte limit status is unknown while cache entries are uncertain")
     elif outcome.limit_satisfied is False:
-        print("byte limit is not satisfied because selected entries remain busy")
+        print("byte limit is not satisfied because selected entries remain")
     for path in outcome.removed:
         print(path)
     return 0

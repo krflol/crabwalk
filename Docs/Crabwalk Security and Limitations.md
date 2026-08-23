@@ -67,8 +67,10 @@ method-glue, Cargo-dependency, and crate-binding namespaces. Mandatory PyO3 and 
 narrow C `abs` declaration use isolated internal identities, preventing user names
 such as `abs`, `String`, or `pyo3` from changing compiler/runtime resolution.
 Parameters, locals, closure/pattern bindings, fields, and variants reject Rust
-keywords and compiler-reserved `__cw_*` names before code generation. Generated
-pyclass member collisions are rejected at their source declarations. Rust strings
+2024 strict/reserved keywords and compiler-reserved `__cw_*` names before code
+generation. Generated pyclass, Python owned-handle, and enum-marker member
+collisions are rejected at their source declarations. Contextual weak keywords are
+allowed only in the emitted contexts where Edition 2024 accepts them. Rust strings
 and chars accept Unicode scalar text only; escaped lone surrogates fail at both
 literal lowering and Python runtime boundaries.
 

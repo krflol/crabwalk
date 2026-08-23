@@ -8,6 +8,22 @@ All notable Crabwalk changes are recorded here.
 
 - Post-release development builds now identify themselves as `1.0.2.dev0`,
   keeping `main` distinct from the immutable 1.0.1 artifacts.
+- The typed quality boundary now includes the shared Python-wrapper namespace
+  contract used by both frontend validation and runtime regression tests.
+
+### Fixed
+
+- Source binding validation now follows the complete Rust 2024 strict and
+  reserved keyword sets, including `_` and `gen`, while allowing contextual weak
+  keywords such as `union` in Crabwalk's supported emitted positions.
+- Struct fields, enum payload fields, and enum variants can no longer shadow the
+  Python owned-value wrapper or `RustType` enum-marker APIs; collisions fail as
+  source-spanned `CRAB210` diagnostics.
+- Trait implementations with parameters after the shared receiver now fail as
+  `CRAB211` before code generation, matching the current no-argument trait shape.
+- Cache pruning carries uncertainty through post-inventory changes, lock races,
+  and failed deletion, so its byte remainder and limit status are never presented
+  as exact from a stale snapshot.
 
 ## [1.0.1] - 2026-08-23
 

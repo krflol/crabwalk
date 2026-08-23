@@ -111,6 +111,7 @@ def test_pruning_does_not_inventory_a_busy_fingerprint(
     assert outcome.entries_remaining == 1
     assert outcome.bytes_remaining is None
     assert outcome.bytes_remaining_known == 0
+    assert outcome.uncertain_entries == 1
     assert outcome.busy_entries == 1
     assert outcome.limit_satisfied is None
     assert busy.is_dir()
@@ -146,6 +147,11 @@ def test_pruning_revalidates_selection_after_taking_entry_lock(
     )
 
     assert outcome.removed == ()
+    assert outcome.bytes_remaining is None
+    assert outcome.bytes_remaining_known == 0
+    assert outcome.uncertain_entries == 1
+    assert outcome.busy_entries == 1
+    assert outcome.limit_satisfied is None
     assert candidate.is_dir()
 
 
@@ -174,10 +180,11 @@ def test_pruning_skips_an_entry_when_the_os_denies_deletion(
 
     assert outcome.removed == ()
     assert outcome.bytes_reclaimed == 0
-    assert outcome.bytes_remaining == 10
-    assert outcome.bytes_remaining_known == 10
-    assert outcome.busy_entries == 0
-    assert outcome.limit_satisfied is False
+    assert outcome.bytes_remaining is None
+    assert outcome.bytes_remaining_known == 0
+    assert outcome.uncertain_entries == 1
+    assert outcome.busy_entries == 1
+    assert outcome.limit_satisfied is None
     assert outcome.entries_remaining == 1
     assert candidate.is_dir()
 

@@ -106,6 +106,12 @@ Passing the object to a native function requires `rust.Ref[User]`,
 `rust.Mut[User]`, or `rust.Owned[User]`. Domain values are not implicitly copied
 through exported parameters or returns.
 
+Domain declarations have a checked Python namespace contract. Fields cannot reuse
+owned-handle members such as `moved`, `rust_type`, `to_python`, or internal wrapper
+slots because Python attribute lookup would otherwise bypass the native field.
+Crabwalk reports these declarations as `CRAB210`; ordinary neighboring names such
+as `name` remain available.
+
 ## Enums and match
 
 ```python
@@ -129,6 +135,10 @@ def score(status: rust.Ref[Status]) -> rust.u8:
 Enums support unit, record, and tuple payload variants. Python constructors are
 `Status.Pending()`, `Status.Running(progress=7)`, and `Status.Failed("message")`.
 `to_python()` produces a dictionary with `variant` and payload fields.
+
+Variant names also cannot shadow the `RustType` marker API (for example `name`,
+`variants`, or `rust_key`), and payload fields follow the same owned-handle rule as
+struct fields. These restrictions keep constructor and field lookup unambiguous.
 
 Payload patterns accept captures, `_`, nested domain patterns, tuple/rest forms,
 or-patterns, ranges, at-bindings, and typed guards. rustc remains the exhaustiveness

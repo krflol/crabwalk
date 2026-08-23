@@ -91,10 +91,13 @@ process-lifetime native load leases, and revalidates the selected size/access
 snapshot after acquiring it. Busy, mapped, or changed entries are left for a later
 pass. A dry run lists the exact candidates and reclaimed byte count without
 acquiring deletion leases. If an entry lock is busy, Crabwalk does not inspect its
-files. Prune results therefore report known remaining bytes, the number of
-unmeasured busy entries, and an unknown byte-limit status instead of claiming a
-ceiling was met from incomplete information. Lease-file locks—not reusable process
-IDs—are authoritative for mapped-artifact lifetime.
+files. If an inventoried entry changes, becomes locked, disappears, or cannot be
+deleted during the second phase, its earlier snapshot is also discarded. Prune
+results therefore report known remaining bytes, `uncertain_entries`, and an unknown
+byte-limit status instead of claiming a ceiling was met from incomplete or stale
+information. `busy_entries` remains a compatibility alias for that broader count.
+Lease-file locks—not reusable process IDs—are authoritative for mapped-artifact
+lifetime.
 
 ## Declaring nonstandard build inputs
 

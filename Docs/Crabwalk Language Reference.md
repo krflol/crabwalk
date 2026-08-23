@@ -142,6 +142,12 @@ index projections, so `bucket.items.push(value)` and mutable field reborrows mar
 the owned `bucket` root mutable while the same operation through a shared root is
 rejected as `CRAB208`.
 
+Trait conformance is also checked before emission: every declared method must be
+implemented exactly once, names and return types must match, and the implementation
+must contain only the shared receiver. An additional implementation parameter is a
+source-spanned `CRAB211`; trait method arguments are not part of the current trait
+declaration shape.
+
 Nested domain enum payloads are currently native-only at Python construction and
 getter boundaries. Construct and inspect them inside compiled functions; direct
 Python constructors/getters are omitted until consuming conversion semantics are
@@ -271,8 +277,20 @@ items, method glue, and the C FFI helper are kept collision-free. A pre-codegen
 table rejects any duplicate emitted value, type, method, dependency, or crate
 binding as `CRAB209` with the relevant source declaration.
 Function/type-local source bindings must also be valid Rust identifiers. Rust
-keywords, compiler-reserved `__cw_*` names, and generated pyclass member collisions
-are rejected as `CRAB210`; wrapper-owned temporaries use the reserved prefix.
+2024 strict and reserved keywords (including `_` and `gen`), compiler-reserved
+`__cw_*` names, and generated pyclass member collisions are rejected as `CRAB210`;
+wrapper-owned temporaries use the reserved prefix. Crabwalk retains a portable
+ASCII identifier subset and does not lower raw identifiers such as `r#gen`.
+Contextual weak keywords (`macro_rules`, `raw`, `safe`, and `union`) remain valid in
+the binding positions Crabwalk emits; weak-keyword treatment is context-specific,
+not a global ban.
+
+The same validation protects Python lookup after a native value returns. Struct
+and enum payload fields may not shadow the owned-value handle API (`moved`,
+`rust_type`, `to_python`, or its internal slots), and enum variants may not shadow
+the `RustType` marker API (`name`, `arguments`, `variants`, `rust_key`, and related
+members). These collisions also fail as `CRAB210` rather than making reads and
+writes resolve to different Python objects.
 
 ## Async and parallel distinction
 

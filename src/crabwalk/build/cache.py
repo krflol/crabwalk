@@ -31,15 +31,21 @@ class CachePruneResult:
     bytes_reclaimed: int
     bytes_remaining_known: int
     entries_remaining: int
-    busy_entries: int
+    uncertain_entries: int
     limit_satisfied: bool | None
     dry_run: bool
 
     @property
     def bytes_remaining(self) -> int | None:
-        """Return the exact remainder, or None when busy bytes were unmeasurable."""
+        """Return the exact remainder, or None when some bytes were unmeasurable."""
 
-        return None if self.busy_entries else self.bytes_remaining_known
+        return None if self.uncertain_entries else self.bytes_remaining_known
+
+    @property
+    def busy_entries(self) -> int:
+        """Compatibility alias for callers of the initial uncertainty API."""
+
+        return self.uncertain_entries
 
 
 class FileLock:
@@ -281,14 +287,14 @@ def _prune_artifact_cache_locked(
             bytes_reclaimed=0,
             bytes_remaining_known=0,
             entries_remaining=0,
-            busy_entries=0,
+            uncertain_entries=0,
             limit_satisfied=None if max_bytes is None else True,
             dry_run=dry_run,
         )
 
     entries: list[tuple[Path, int, float]] = []
     discovered_entries = 0
-    busy_entries = 0
+    uncertain_entries = 0
     for candidate in root.iterdir():
         if not re.fullmatch(r"[0-9a-f]{64}", candidate.name):
             continue
@@ -312,7 +318,7 @@ def _prune_artifact_cache_locked(
             # Inventory reads must obey the same entry lock as publication.
             # In particular, opening .last-access for reading can prevent an
             # atomic replacement in another process on Windows.
-            busy_entries += 1
+            uncertain_entries += 1
             continue
         entries.append((resolved, size, last_used))
 
@@ -342,6 +348,7 @@ def _prune_artifact_cache_locked(
     }
     removed = ordered
     removed_sizes = {path: selected_snapshots[path][0] for path in removed}
+    uncertain_paths: set[Path] = set()
     if not dry_run:
         actual: list[Path] = []
         removed_sizes = {}
@@ -351,13 +358,16 @@ def _prune_artifact_cache_locked(
                     state_root / "locks" / f"{path.name}.lock",
                     timeout=0.0,
                 ):
-                    if cache_load_lease_active(state_root, path.name):
-                        continue
                     current = _entry_size_and_mtime(path)
                     if current != selected_snapshots[path]:
                         # A verified hit or publication changed the entry after
                         # selection. Leave it for a future prune pass that can
-                        # assess the new access time and size consistently.
+                        # assess the new access time and size consistently. The
+                        # inventory snapshot can no longer support an exact
+                        # final byte count for this pass.
+                        uncertain_paths.add(path)
+                        continue
+                    if cache_load_lease_active(state_root, path.name):
                         continue
                     _remove_scoped_entry(root, path)
             except (FileNotFoundError, PermissionError, TimeoutError):
@@ -366,22 +376,27 @@ def _prune_artifact_cache_locked(
                 # reports that state as PermissionError when rmtree reaches
                 # the loaded .pyd. Treat the operating-system mapping as one
                 # more busy-entry signal and retry during a later prune pass.
+                uncertain_paths.add(path)
                 continue
             actual.append(path)
             removed_sizes[path] = current[0]
         removed = tuple(actual)
     reclaimed = sum(removed_sizes[path] for path in removed)
     remaining_entries = discovered_entries - len(removed)
-    remaining_size = sum(size for _, size, _ in entries) - reclaimed
+    remaining_size = (
+        sum(size for path, size, _ in entries if path not in uncertain_paths)
+        - reclaimed
+    )
+    total_uncertain = uncertain_entries + len(uncertain_paths)
     limit_satisfied = (
-        None if max_bytes is None or busy_entries else remaining_size <= max_bytes
+        None if max_bytes is None or total_uncertain else remaining_size <= max_bytes
     )
     return CachePruneResult(
         removed=removed,
         bytes_reclaimed=reclaimed,
         bytes_remaining_known=remaining_size,
         entries_remaining=remaining_entries,
-        busy_entries=busy_entries,
+        uncertain_entries=total_uncertain,
         limit_satisfied=limit_satisfied,
         dry_run=dry_run,
     )
