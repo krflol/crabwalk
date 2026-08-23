@@ -25,6 +25,7 @@ PYTHON_USER_CLASS_RESERVED_NAMES = frozenset(
         "__mro__",
         "__name__",
         "__qualname__",
+        "__replace__",
         "__static_attributes__",
         "__type_params__",
     }
