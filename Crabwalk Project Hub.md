@@ -4,21 +4,21 @@ aliases:
   - Crabwalk Project
 type: project
 project: Crabwalk
-status: release-candidate
-phase: 1.0.1 patch hardening
+status: active
+phase: 1.0.2 development
 created: 2026-08-21
 updated: 2026-08-23
 tags:
   - project/crabwalk
-  - status/release-candidate
+  - status/active
 ---
 
 # Crabwalk Project Hub
 
 > [!abstract] Current outcome
 > Crabwalk is a published Apache-2.0 compiler/runtime that lowers an explicit,
-> source-spanned Python subset into inspectable Rust and CPython extensions. The
-> current target is the 1.0.1 packaging and compiler-hygiene patch.
+> source-spanned Python subset into inspectable Rust and CPython extensions.
+> Version 1.0.1 is published; `main` now identifies as 1.0.2.dev0.
 
 ## Sources of truth
 
@@ -51,16 +51,17 @@ tags:
   integration tests;
 - CPython 3.11–3.14 validation across Windows, Linux, and macOS.
 
-## 1.0.1 exit gate
+## 1.0.1 release evidence
 
 1. Generated wheels resolve `crabwalk-lang` normally through pip.
-2. Release metadata, runtime manifests, CLI, and source all identify 1.0.1.
+2. Release metadata, runtime manifests, CLI, and artifacts identify 1.0.1.
 3. Local-name, pyclass-member, trait-contract, and Unicode-scalar diagnostics pass.
 4. Busy cache entries never produce falsely exact size-limit claims.
 5. Ruff, mypy, byte-compilation, unit tests, generated Rust formatting/Clippy, and
    the complete native suite pass.
-6. The exact candidate passes all nine GitHub Actions jobs before publication.
-7. Published wheel and sdist hashes are recorded and clean-install smoke tests pass.
+6. The exact release commit passed all nine GitHub Actions jobs.
+7. The wheel and sdist are published on PyPI and attached to GitHub release
+   `v1.0.1`; public-index clean-install and SHA-256 checks pass.
 
 ## Guardrails
 
