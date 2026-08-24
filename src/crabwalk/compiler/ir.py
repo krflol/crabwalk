@@ -286,6 +286,8 @@ class CrateCallIR:
     arguments: tuple["ExpressionIR", ...]
     type_ref: TypeRef
     span: SourceSpan
+    declared_effects: tuple[Effect, ...] | None = None
+    adapter_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

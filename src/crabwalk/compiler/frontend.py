@@ -111,7 +111,7 @@ from .package_graph import (
     package_python_paths,
     single_file_source_graph,
 )
-from .types import IteratorExecution, IteratorItemMode, IteratorType
+from .types import ExternalType, IteratorExecution, IteratorItemMode, IteratorType
 
 _ANALYSIS_CACHE_LIMIT = 64
 _analysis_cache: OrderedDict[tuple[str, str, str], PackageIR] = OrderedDict()
@@ -161,6 +161,7 @@ _GENERIC_ARITY = {
     "Owned": 1,
     "Ref": 1,
     "Mut": 1,
+    "Closure": 2,
 }
 _OWNED_VECTOR_ELEMENTS = {
     "i8",
@@ -197,6 +198,8 @@ class _Signature:
     method_for: TypeRef | None = None
     trait_symbol: str | None = None
     operator_kind: str | None = None
+    external_path: tuple[str, ...] | None = None
+    external_effects: tuple[Effect, ...] | None = None
 
     @property
     def rust_symbol(self) -> str:
@@ -314,6 +317,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
         )
         for local_name, crate in discovered_crates.items()
     }
+    external_types = _discover_external_types(tree, source_path, crates)
     type_variables = _discover_type_variables(tree, source_path)
     struct_placeholders = {
         node.name: _struct_placeholder(
@@ -338,6 +342,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
         {name: value.type_ref for name, value in enum_placeholders.items()}
     )
     domain_types.update({name: value.type_ref for name, value in traits.items()})
+    domain_types.update(external_types)
     for name, type_ref in type_variables.items():
         if name in domain_types:
             _fail(
@@ -370,7 +375,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     }
     signatures = {
         declaration.name: replace(
-            _analyze_signature(declaration, source_path, domain_types),
+            _analyze_signature(declaration, source_path, domain_types, crates),
             module_name=identity,
             symbol=mangle_item(identity, declaration.name, namespace="fn"),
         )
@@ -388,7 +393,17 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
             domain_traits=traits,
         ).lower()
         for declaration in declarations
+        if signatures[declaration.name].external_path is None
     )
+    if not functions and not structs and not enums and not traits:
+        raise CrabwalkCompilationError(
+            Diagnostic(
+                "CRAB101",
+                "No Rust functions found",
+                "Typed extern declarations require at least one compiled function or domain type.",
+                SourceSpan.from_ast(source_path, tree),
+            )
+        )
     functions = _propagate_effects(functions)
     source_graph = single_file_source_graph(source_path)
     return assign_package_identities(
@@ -422,6 +437,7 @@ class _PackageModule:
     enums: dict[str, EnumIR]
     traits: dict[str, TraitIR]
     crates: dict[str, CrateIR]
+    external_types: dict[str, ExternalType]
     type_variables: dict[str, TypeRef]
     is_package: bool
 
@@ -627,6 +643,7 @@ def _analyze_regular_package(
             )
             for local_name, crate in discovered_crates.items()
         }
+        external_types = _discover_external_types(tree, source_path, crates)
         modules[name] = _PackageModule(
             name=name,
             path=source_path,
@@ -640,20 +657,23 @@ def _analyze_regular_package(
             enums=enums,
             traits=traits,
             crates=crates,
+            external_types=external_types,
             type_variables=type_variables,
             is_package=source_path.name == "__init__.py",
         )
 
     _validate_package_import_graph(modules)
 
-    domain_cache: dict[str, dict[str, _DomainIR | _ModuleRef]] = {}
+    domain_cache: dict[str, dict[str, _DomainIR | ExternalType | _ModuleRef]] = {}
 
-    def domain_bindings(name: str) -> dict[str, _DomainIR | _ModuleRef]:
+    def domain_bindings(
+        name: str,
+    ) -> dict[str, _DomainIR | ExternalType | _ModuleRef]:
         cached = domain_cache.get(name)
         if cached is not None:
             return cached
         module = modules[name]
-        values: dict[str, _DomainIR | _ModuleRef] = {}
+        values: dict[str, _DomainIR | ExternalType | _ModuleRef] = {}
         domain_cache[name] = values
         for node in module.tree.body:
             if isinstance(node, ast.ClassDef):
@@ -673,8 +693,11 @@ def _analyze_regular_package(
                 for target in targets:
                     if isinstance(target, ast.Name):
                         trait = module.traits.get(target.id)
+                        external_type = module.external_types.get(target.id)
                         if trait is not None:
                             values[target.id] = trait
+                        elif external_type is not None:
+                            values[target.id] = external_type
                         else:
                             values.pop(target.id, None)
                 continue
@@ -779,6 +802,8 @@ def _analyze_regular_package(
             elif isinstance(value, TraitIR):
                 domain_types[local_name] = value.type_ref
                 domain_traits[local_name] = value
+            elif isinstance(value, ExternalType):
+                domain_types[local_name] = value
             elif isinstance(value, _ModuleRef):
                 _collect_domain_members(
                     (local_name,),
@@ -840,7 +865,12 @@ def _analyze_regular_package(
         module_domain_traits[name] = domain_traits
         module.signatures = {
             declaration.name: replace(
-                _analyze_signature(declaration, module.path, domain_types),
+                _analyze_signature(
+                    declaration,
+                    module.path,
+                    domain_types,
+                    visible_crates,
+                ),
                 module_name=name,
                 symbol=_package_rust_symbol(name, declaration.name),
             )
@@ -971,6 +1001,8 @@ def _analyze_regular_package(
                     set(),
                 )
         for declaration in module.declarations.values():
+            if module.signatures[declaration.name].external_path is not None:
+                continue
             functions.append(
                 _FunctionLowerer(
                     declaration,
@@ -1071,7 +1103,7 @@ def _collect_module_members(
 def _collect_domain_members(
     prefix: tuple[str, ...],
     module_name: str,
-    domain_bindings: Callable[[str], dict[str, _DomainIR | _ModuleRef]],
+    domain_bindings: Callable[[str], dict[str, _DomainIR | ExternalType | _ModuleRef]],
     types: dict[str, TypeRef],
     structs: dict[str, StructIR],
     enums: dict[str, EnumIR],
@@ -1093,6 +1125,8 @@ def _collect_domain_members(
         elif isinstance(value, TraitIR):
             types[qualified] = value.type_ref
             traits[qualified] = value
+        elif isinstance(value, ExternalType):
+            types[qualified] = value
         elif isinstance(value, _ModuleRef):
             _collect_domain_members(
                 path,
@@ -1561,6 +1595,21 @@ class _FunctionLowerer:
             if existing is not None:
                 _require_type(value.type_ref, existing, self.path, node.value)
                 return AssignIR(target.id, value, SourceSpan.from_ast(self.path, node))
+            if value.type_ref == INFERRED:
+                _fail(
+                    "CRAB222",
+                    "Opaque crate value has no semantic type",
+                    (
+                        "An inferred crate result cannot be stored and used across "
+                        "expressions."
+                    ),
+                    self.path,
+                    node.value,
+                    (
+                        "Add a concrete annotation for a primitive result or declare "
+                        "the crate type and function with rust.extern_type/rust.extern."
+                    ),
+                )
             _validate_source_binding(target.id, self.path, target, "local")
             environment[target.id] = value.type_ref
             return LetIR(
@@ -2351,7 +2400,7 @@ class _FunctionLowerer:
         signature: _Signature,
         environment: dict[str, TypeRef],
         expected: TypeRef | None,
-    ) -> CallIR:
+    ) -> CallIR | CrateCallIR:
         if node.keywords or len(node.args) != len(signature.parameters):
             _fail(
                 "CRAB114",
@@ -2408,9 +2457,36 @@ class _FunctionLowerer:
                     )
                 )
             else:
-                lowered_arguments.append(
-                    self._lower_call_argument(argument, environment, parameter.type_ref)
-                )
+                parameter_type = parameter.type_ref
+                if (
+                    signature.external_path is not None
+                    and parameter_type.rust_name == "Closure"
+                ):
+                    closure_input, closure_output = parameter_type.arguments
+                    closure = (
+                        self._lower_zero_closure(
+                            argument,
+                            environment,
+                            expected_result=closure_output,
+                        )
+                        if closure_input == UNIT
+                        else self._lower_closure(
+                            argument,
+                            environment,
+                            closure_input,
+                            borrowed_parameter=False,
+                            expected_result=closure_output,
+                        )
+                    )
+                    lowered_arguments.append(closure)
+                else:
+                    lowered_arguments.append(
+                        self._lower_call_argument(
+                            argument,
+                            environment,
+                            parameter_type,
+                        )
+                    )
         arguments = tuple(lowered_arguments)
         return_type = _substitute_generics(signature.return_type, substitutions)
         if _contains_generic_type(return_type):
@@ -2429,6 +2505,15 @@ class _FunctionLowerer:
         )
         if expected is not None:
             _require_type(call_type, expected, self.path, node)
+        if signature.external_path is not None:
+            return CrateCallIR(
+                signature.external_path,
+                arguments,
+                call_type,
+                SourceSpan.from_ast(self.path, node),
+                signature.external_effects,
+                signature.name,
+            )
         return CallIR(
             signature.rust_symbol,
             arguments,
@@ -4868,9 +4953,19 @@ def _has_rust_fn_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool
             isinstance(item, ast.Call)
             and isinstance(item.func, ast.Attribute)
             and _is_rust_attribute(item.func)
-            and item.func.attr in {"generic", "method", "impl", "operator"}
+            and item.func.attr in {"generic", "method", "impl", "operator", "extern"}
         )
         for item in node.decorator_list
+    )
+
+
+def _is_extern_declaration(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    return bool(
+        len(node.decorator_list) == 1
+        and isinstance(node.decorator_list[0], ast.Call)
+        and isinstance(node.decorator_list[0].func, ast.Attribute)
+        and _is_rust_attribute(node.decorator_list[0].func)
+        and node.decorator_list[0].func.attr == "extern"
     )
 
 
@@ -5335,6 +5430,7 @@ def _analyze_signature(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     path: Path,
     domain_types: dict[str, TypeRef] | None = None,
+    crates: dict[str, CrateIR] | None = None,
 ) -> _Signature:
     if not node.name.isidentifier() or keyword.iskeyword(node.name):
         _fail(
@@ -5369,14 +5465,33 @@ def _analyze_signature(
             path,
             node,
         )
-    method_name, method_for, trait_symbol, operator_kind = _method_decorator_metadata(
+    external_path, external_effects = _extern_decorator_metadata(
         node,
         path,
-        domain_types or {},
+        crates or {},
     )
-    type_parameters = _generic_type_parameters(node, path, domain_types or {})
+    if external_path is None:
+        method_name, method_for, trait_symbol, operator_kind = (
+            _method_decorator_metadata(
+                node,
+                path,
+                domain_types or {},
+            )
+        )
+        type_parameters = _generic_type_parameters(node, path, domain_types or {})
+    else:
+        method_name = None
+        method_for = None
+        trait_symbol = None
+        operator_kind = None
+        type_parameters = ()
     is_async = isinstance(node, ast.AsyncFunctionDef)
-    exported = not type_parameters and not is_async and method_name is None
+    exported = (
+        external_path is None
+        and not type_parameters
+        and not is_async
+        and method_name is None
+    )
     parameters_list: list[ParameterIR] = []
     for argument in arguments.args:
         _validate_source_binding(argument.arg, path, argument, "parameter")
@@ -5585,6 +5700,8 @@ def _analyze_signature(
         method_for=method_for,
         trait_symbol=trait_symbol,
         operator_kind=operator_kind,
+        external_path=external_path,
+        external_effects=external_effects,
     )
 
 
@@ -6233,6 +6350,189 @@ def _method_decorator_metadata(
         trait_symbol,
         method_name if kind == "operator" else None,
     )
+
+
+def _discover_external_types(
+    tree: ast.Module,
+    path: Path,
+    crates: dict[str, CrateIR],
+) -> dict[str, ExternalType]:
+    """Discover statically typed crate-owned values used by adapter signatures."""
+
+    values: dict[str, ExternalType] = {}
+    for node in tree.body:
+        if not (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and _is_rust_call_named(node.value, "extern_type")
+        ):
+            continue
+        binding = node.targets[0].id
+        _validate_source_binding(
+            binding,
+            path,
+            node.targets[0],
+            "external type",
+            rust_namespace="type",
+        )
+        call = node.value
+        crate_path = _crate_path(call.args[0], crates) if len(call.args) == 1 else None
+        path_nodes = [value for value in call.keywords if value.arg == "path"]
+        if (
+            crate_path is None
+            or len(crate_path) != 1
+            or len(path_nodes) != 1
+            or len(call.keywords) != 1
+            or not isinstance(path_nodes[0].value, ast.Constant)
+            or not isinstance(path_nodes[0].value.value, str)
+        ):
+            _fail(
+                "CRAB224",
+                "Invalid external Rust type declaration",
+                "Use TypeName = rust.extern_type(crate_name, path='module::Type').",
+                path,
+                call,
+            )
+        rust_path = tuple(path_nodes[0].value.value.split("::"))
+        if not rust_path or any(
+            not is_rust_2024_identifier(part) for part in rust_path
+        ):
+            _fail(
+                "CRAB224",
+                "Invalid external Rust type path",
+                "Every component must be a static Rust identifier.",
+                path,
+                path_nodes[0].value,
+            )
+        values[binding] = ExternalType(crate_path[0], rust_path, binding)
+    return values
+
+
+_EXTERN_EFFECTS: dict[str, Effect] = {
+    "PythonRuntime": Effect.PYTHON_RUNTIME,
+    "Blocking": Effect.BLOCKING,
+    "ThreadSpawn": Effect.THREAD_SPAWN,
+    "GlobalMutation": Effect.GLOBAL_MUTATION,
+    "UnsafeMemory": Effect.UNSAFE_MEMORY,
+    "UnsafeFfi": Effect.UNSAFE_FFI,
+    "MayPanic": Effect.MAY_PANIC,
+}
+
+
+def _extern_decorator_metadata(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    path: Path,
+    crates: dict[str, CrateIR],
+) -> tuple[tuple[str, ...] | None, tuple[Effect, ...] | None]:
+    if not _is_extern_declaration(node):
+        return None, None
+    if isinstance(node, ast.AsyncFunctionDef):
+        _fail(
+            "CRAB225",
+            "External adapter cannot be async",
+            "Declare a synchronous crate function and wrap it in a compiled async helper.",
+            path,
+            node,
+        )
+    decorator = node.decorator_list[0]
+    assert isinstance(decorator, ast.Call)
+    crate_path = (
+        _crate_path(decorator.args[0], crates) if len(decorator.args) == 1 else None
+    )
+    options = {value.arg: value for value in decorator.keywords if value.arg}
+    path_option = options.get("path")
+    effects_option = options.get("effects")
+    if (
+        crate_path is None
+        or len(crate_path) != 1
+        or set(options) - {"path", "effects"}
+        or path_option is None
+        or not isinstance(path_option.value, ast.Constant)
+        or not isinstance(path_option.value.value, str)
+    ):
+        _fail(
+            "CRAB225",
+            "Invalid external crate adapter",
+            "Use @rust.extern(crate_name, path='module::function', effects=[...]).",
+            path,
+            decorator,
+        )
+    rust_path = tuple(path_option.value.value.split("::"))
+    if not rust_path or any(not is_rust_2024_identifier(part) for part in rust_path):
+        _fail(
+            "CRAB225",
+            "Invalid external adapter path",
+            "Every path component must be a static Rust identifier.",
+            path,
+            path_option.value,
+        )
+
+    if effects_option is None:
+        effects = (Effect.OPAQUE_CRATE_CALL, Effect.MAY_PANIC)
+    else:
+        effects_node = effects_option.value
+        if not isinstance(effects_node, (ast.List, ast.Tuple)) or not effects_node.elts:
+            _fail(
+                "CRAB225",
+                "External adapter effects must be explicit",
+                "Use [rust.Pure] or a non-empty list of declared effects.",
+                path,
+                effects_node,
+            )
+        names: list[str] = []
+        for value in effects_node.elts:
+            if not _is_rust_attribute(value) or not isinstance(value, ast.Attribute):
+                _fail(
+                    "CRAB225",
+                    "Invalid external adapter effect",
+                    "Use effect markers from the canonical rust namespace.",
+                    path,
+                    value,
+                )
+            names.append(value.attr)
+        if "Pure" in names:
+            if names != ["Pure"]:
+                _fail(
+                    "CRAB225",
+                    "Pure adapter has conflicting effects",
+                    "rust.Pure must be the only effect marker.",
+                    path,
+                    effects_node,
+                )
+            effects = ()
+        else:
+            unknown = sorted(set(names) - set(_EXTERN_EFFECTS))
+            if unknown:
+                _fail(
+                    "CRAB225",
+                    "Unknown external adapter effect",
+                    f"Unsupported effect marker(s): {', '.join(unknown)}.",
+                    path,
+                    effects_node,
+                )
+            effects = tuple(dict.fromkeys(_EXTERN_EFFECTS[name] for name in names))
+
+    if not (
+        len(node.body) == 1
+        and (
+            isinstance(node.body[0], ast.Pass)
+            or (
+                isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and node.body[0].value.value is Ellipsis
+            )
+        )
+    ):
+        _fail(
+            "CRAB225",
+            "External adapter has a Python body",
+            "Use pass or ...; the declaration describes an existing Rust function.",
+            path,
+            node,
+        )
+    return (*crate_path, *rust_path), effects
 
 
 def _discover_crates(tree: ast.Module, path: Path) -> dict[str, CrateIR]:

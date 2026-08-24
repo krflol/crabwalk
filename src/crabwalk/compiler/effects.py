@@ -110,6 +110,8 @@ def direct_expression_effects(expression: ExpressionIR) -> frozenset[Effect]:
             else frozenset()
         )
     if isinstance(expression, CrateCallIR):
+        if expression.declared_effects is not None:
+            return frozenset(expression.declared_effects)
         effects: set[Effect] = set()
         if expression.path[0] != "std":
             effects.update({Effect.OPAQUE_CRATE_CALL, Effect.MAY_PANIC})

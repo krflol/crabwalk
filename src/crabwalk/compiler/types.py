@@ -16,6 +16,7 @@ from typing import Literal
 class TypeKind(StrEnum):
     PRIMITIVE = "primitive"
     DOMAIN = "domain"
+    EXTERNAL = "external"
     GENERIC = "generic"
     LIFETIME_REFERENCE = "lifetime_reference"
     OWNERSHIP = "ownership"
@@ -316,6 +317,30 @@ class DomainType(TypeRef):
     @property
     def python_name(self) -> str:
         return self.qualified_name
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalType(TypeRef):
+    """One crate-owned Rust type declared through a static adapter."""
+
+    crate_binding: str
+    path: tuple[str, ...]
+    source_name: str
+    kind: TypeKind = TypeKind.EXTERNAL
+
+    def __post_init__(self) -> None:
+        if not self.crate_binding or not self.path:
+            raise ValueError("external types require a crate binding and path")
+
+    @property
+    def rust_name(self) -> str:
+        return "::".join((self.crate_binding, *self.path))
+
+    def render(self) -> str:
+        return self.rust_name
+
+    def display(self) -> str:
+        return self.source_name
 
 
 @dataclass(frozen=True, slots=True)

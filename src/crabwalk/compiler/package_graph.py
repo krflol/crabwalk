@@ -22,6 +22,8 @@ _CRABWALK_DECLARATION_MEMBERS = frozenset(
         "async_fn",
         "crate",
         "enum",
+        "extern",
+        "extern_type",
         "fn",
         "generic",
         "impl",
