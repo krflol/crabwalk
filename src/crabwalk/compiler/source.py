@@ -17,6 +17,20 @@ class ParsedSource:
     tree: ast.Module
 
 
+def attribute_parts(node: ast.AST) -> tuple[str, ...]:
+    """Return the dotted source path represented by a Name/Attribute tree."""
+
+    values: list[str] = []
+    current: ast.AST = node
+    while isinstance(current, ast.Attribute):
+        values.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        values.append(current.id)
+        return tuple(reversed(values))
+    return ()
+
+
 def parse_source(path: str | Path) -> ParsedSource:
     source_path = Path(path).resolve()
     try:

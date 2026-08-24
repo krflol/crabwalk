@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-from crabwalk.diagnostics import SourceSpan
 from crabwalk.native_exceptions import (
     NATIVE_BORROW_ERROR,
     NATIVE_MOVE_ERROR,
@@ -14,66 +13,22 @@ from crabwalk.native_exceptions import (
 )
 
 from .ir import (
-    ArrayLiteralIR,
-    AssignIR,
-    AwaitIR,
-    BinaryIR,
-    BoolLiteralIR,
-    BorrowIR,
-    BreakIR,
-    CallIR,
-    ClosureIR,
-    CompareIR,
-    ConstructorIR,
-    ContinueIR,
-    CrateCallIR,
-    DestructureIR,
     Effect,
-    EnumConstructorIR,
     EnumIR,
-    ExpressionIR,
-    ExpressionStatementIR,
-    FloatLiteralIR,
-    FieldAccessIR,
-    FieldAssignIR,
-    ForEachIR,
-    ForRangeIR,
     FunctionIR,
-    FunctionPointerTwiceIR,
-    IfIR,
-    IndexIR,
-    IntLiteralIR,
-    LetIR,
-    LocalConstIR,
-    MatchIR,
-    MethodCallIR,
-    NameIR,
-    NativePrintlnIR,
-    NoneLiteralIR,
     PackageIR,
-    PanicIR,
     ParameterIR,
-    PassIR,
-    PatternMatchIR,
-    PythonPrintIR,
-    ReturnIR,
-    StatementIR,
-    StringLiteralIR,
     StructFieldIR,
-    StructConstructorIR,
     StructIR,
     TraitIR,
-    TraitCallIR,
     TypeRef,
-    TupleLiteralIR,
-    TryIR,
-    UnaryIR,
-    WhileIR,
 )
 from .cargo_emission import render_build_rs, render_cargo_toml
+from .emission import EmissionNames, Writer as _Writer
+from .rust_emission import write_native_function as _write_native_function
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
-CODEGEN_SCHEMA_VERSION = 34
+CODEGEN_SCHEMA_VERSION = 35
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
@@ -90,46 +45,6 @@ class GeneratedProject:
     rust_source: str
     source_map: dict[str, object]
     ir_json: str
-
-
-class _Writer:
-    def __init__(self) -> None:
-        self._lines: list[str] = []
-        self._indent = 0
-        self._map: list[dict[str, object]] = []
-
-    def line(
-        self,
-        value: str = "",
-        span: SourceSpan | None = None,
-        kind: str = "generated",
-    ) -> None:
-        self._lines.append(f"{'    ' * self._indent}{value}" if value else "")
-        if span is not None:
-            self._map.append(
-                {
-                    "generated_line": len(self._lines),
-                    "source": span.to_dict(),
-                    "kind": kind,
-                }
-            )
-
-    def enter(self) -> None:
-        self._indent += 1
-
-    def leave(self) -> None:
-        if self._indent == 0:
-            raise AssertionError("unbalanced writer indentation")
-        self._indent -= 1
-
-    def render(self) -> str:
-        if self._indent:
-            raise AssertionError("unbalanced writer indentation")
-        return "\n".join(self._lines) + "\n"
-
-    @property
-    def mappings(self) -> list[dict[str, object]]:
-        return list(self._map)
 
 
 def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
@@ -253,74 +168,6 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
     )
 
 
-def _write_native_function(
-    writer: _Writer,
-    function: FunctionIR,
-    boundary_names: set[str],
-) -> None:
-    parameters = ", ".join(
-        (
-            f"mut {parameter.rust_name}: {parameter.type_ref.render()}"
-            if parameter.mutable
-            else f"{parameter.rust_name}: {parameter.type_ref.render()}"
-        )
-        for parameter in function.parameters
-    )
-    native_return = (
-        f"PyResult<{function.return_type.render()}>"
-        if function.python_boundary
-        else function.return_type.render()
-    )
-    generic_parameters = ""
-    if function.type_parameters:
-        rendered = []
-        for parameter in function.type_parameters:
-            if parameter.is_lifetime:
-                rendered.append(f"'{parameter.rust_name}")
-            else:
-                qualified_bounds = tuple(
-                    {
-                        "Clone": "std::clone::Clone",
-                        "Copy": "std::marker::Copy",
-                        "Debug": "std::fmt::Debug",
-                        "Display": "std::fmt::Display",
-                        "Ord": "std::cmp::Ord",
-                        "PartialOrd": "std::cmp::PartialOrd",
-                    }.get(value, value)
-                    for value in parameter.bounds
-                )
-                bounds = f": {' + '.join(qualified_bounds)}" if qualified_bounds else ""
-                rendered.append(f"{parameter.rust_name}{bounds}")
-        generic_parameters = f"<{', '.join(rendered)}>"
-    writer.line(
-        (
-            f"{'async ' if function.is_async else ''}fn "
-            f"__cw_native_{function.rust_symbol}{generic_parameters}"
-            f"({parameters}) -> {native_return} {{"
-        ),
-        function.span,
-        "function",
-    )
-    writer.enter()
-    for statement in function.body:
-        _write_statement(
-            writer,
-            statement,
-            boundary_names,
-            function.python_boundary,
-        )
-    if function.return_type.rust_name == "Unit" and not _ends_with_return(
-        function.body
-    ):
-        writer.line(
-            "std::result::Result::Ok(())" if function.python_boundary else "()",
-            function.span,
-            "implicit_unit_return",
-        )
-    writer.leave()
-    writer.line("}")
-
-
 def _write_native_struct(writer: _Writer, struct: StructIR) -> None:
     derives = ["Clone", "Debug"] + ["::".join(value) for value in struct.derives]
     writer.line(f"#[derive({', '.join(derives)})]", struct.span, "struct_derive")
@@ -328,7 +175,7 @@ def _write_native_struct(writer: _Writer, struct: StructIR) -> None:
     writer.enter()
     for field in struct.fields:
         writer.line(
-            f"pub {field.name}: {field.type_ref.render()},",
+            f"pub {field.rust_name}: {field.type_ref.render()},",
             field.span,
             "struct_field",
         )
@@ -341,7 +188,7 @@ def _write_native_trait(writer: _Writer, trait: TraitIR) -> None:
     writer.enter()
     for method in trait.methods:
         writer.line(
-            f"fn {method.name}(&self) -> {method.return_type.render()};",
+            f"fn {method.rust_name}(&self) -> {method.return_type.render()};",
             method.span,
             "trait_method",
         )
@@ -350,6 +197,11 @@ def _write_native_trait(writer: _Writer, trait: TraitIR) -> None:
 
 
 def _write_method_impls(writer: _Writer, package: PackageIR) -> None:
+    trait_method_names = {
+        (trait.symbol, method.name): method.rust_name
+        for trait in package.traits
+        for method in trait.methods
+    }
     inherent = [
         function
         for function in package.functions
@@ -409,13 +261,22 @@ def _write_method_impls(writer: _Writer, package: PackageIR) -> None:
         writer.line(f"impl {trait_symbol} for {target.render()} {{")
         writer.enter()
         for function in functions:
-            _write_method_glue(writer, function)
+            assert function.method_name is not None
+            _write_method_glue(
+                writer,
+                function,
+                trait_method_names[(trait_symbol, function.method_name)],
+            )
         writer.leave()
         writer.line("}")
         writer.line()
 
 
-def _write_method_glue(writer: _Writer, function: FunctionIR) -> None:
+def _write_method_glue(
+    writer: _Writer,
+    function: FunctionIR,
+    emitted_method_name: str | None = None,
+) -> None:
     assert function.method_name is not None and function.parameters
     receiver_type = function.parameters[0].type_ref
     receiver = {
@@ -432,7 +293,8 @@ def _write_method_glue(writer: _Writer, function: FunctionIR) -> None:
         ("self", *(parameter.rust_name for parameter in function.parameters[1:]))
     )
     writer.line(
-        f"fn {function.method_name}({parameters}) -> {function.return_type.render()} {{",
+        f"fn {emitted_method_name or function.method_name}({parameters}) "
+        f"-> {function.return_type.render()} {{",
         function.span,
         "method_impl",
     )
@@ -449,16 +311,16 @@ def _write_native_enum(writer: _Writer, enum: EnumIR) -> None:
     writer.enter()
     for variant in enum.variants:
         if not variant.fields:
-            writer.line(f"{variant.name},", variant.span, "enum_variant")
+            writer.line(f"{variant.rust_name},", variant.span, "enum_variant")
         elif variant.tuple_style:
             fields = ", ".join(field.type_ref.render() for field in variant.fields)
-            writer.line(f"{variant.name}({fields}),", variant.span, "enum_variant")
+            writer.line(f"{variant.rust_name}({fields}),", variant.span, "enum_variant")
         else:
-            writer.line(f"{variant.name} {{", variant.span, "enum_variant")
+            writer.line(f"{variant.rust_name} {{", variant.span, "enum_variant")
             writer.enter()
             for field in variant.fields:
                 writer.line(
-                    f"{field.name}: {field.type_ref.render()},",
+                    f"{field.rust_name}: {field.type_ref.render()},",
                     field.span,
                     "enum_field",
                 )
@@ -491,52 +353,60 @@ def _write_owned_enum_class(
         return owned_class_names(domain)[1] if domain is not None else None
 
     for variant in enum.variants:
+        constructor_names = EmissionNames.reserving(
+            *(field.rust_name for field in variant.fields)
+        )
+        extracted_fields: dict[str, str] = {}
         parameters = ", ".join(
             (
-                f"{field.name}: PyRef<'_, {domain_class(field.type_ref)}>"
+                f"{field.rust_name}: PyRef<'_, {domain_class(field.type_ref)}>"
                 if domain_class(field.type_ref) is not None
-                else f"{field.name}: {field.type_ref.render()}"
+                else f"{field.rust_name}: {field.type_ref.render()}"
             )
             for field in variant.fields
         )
         fallible = any(domain_class(field.type_ref) for field in variant.fields)
         writer.line("#[staticmethod]")
         return_type = "PyResult<Self>" if fallible else "Self"
-        writer.line(f"fn {variant.name}({parameters}) -> {return_type} {{")
+        if variant.rust_name != variant.name:
+            writer.line(f'#[pyo3(name = "{variant.name}")]')
+        writer.line(f"fn {variant.rust_name}({parameters}) -> {return_type} {{")
         writer.enter()
         for field in variant.fields:
             if domain_class(field.type_ref) is None:
                 continue
+            extracted_field = constructor_names.temporary(f"field_{field.name}")
+            extracted_fields[field.name] = extracted_field
             writer.line(
-                f"let __cw_field_{field.name} = "
-                f"{field.name}.value.as_ref().ok_or_else(|| {{"
+                f"let {extracted_field} = "
+                f"{field.rust_name}.value.as_ref().ok_or_else(|| {{"
             )
             writer.enter()
             writer.line(_native_move_error(field.name))
             writer.leave()
             writer.line("})?.clone();")
         if not variant.fields:
-            value = f"{enum.symbol}::{variant.name}"
+            value = f"{enum.symbol}::{variant.rust_name}"
         elif variant.tuple_style:
             arguments = ", ".join(
                 (
-                    f"__cw_field_{field.name}"
+                    extracted_fields[field.name]
                     if domain_class(field.type_ref) is not None
-                    else field.name
+                    else field.rust_name
                 )
                 for field in variant.fields
             )
-            value = f"{enum.symbol}::{variant.name}({arguments})"
+            value = f"{enum.symbol}::{variant.rust_name}({arguments})"
         else:
             arguments = ", ".join(
                 (
-                    f"{field.name}: __cw_field_{field.name}"
+                    f"{field.rust_name}: {extracted_fields[field.name]}"
                     if domain_class(field.type_ref) is not None
-                    else field.name
+                    else f"{field.rust_name}: {field.rust_name}"
                 )
                 for field in variant.fields
             )
-            value = f"{enum.symbol}::{variant.name} {{ {arguments} }}"
+            value = f"{enum.symbol}::{variant.rust_name} {{ {arguments} }}"
         wrapped = f"Self {{ value: std::option::Option::Some({value}) }}"
         writer.line(f"std::result::Result::Ok({wrapped})" if fallible else wrapped)
         writer.leave()
@@ -568,29 +438,39 @@ def _write_owned_enum_class(
         heterogeneous = len(candidate_types) > 1
         field_type = next(iter(candidate_types))
         nested_class = domain_class(field_type) if not heterogeneous else None
+        getter_names = EmissionNames.reserving("self", "py")
+        stored_value = getter_names.temporary("stored_value")
+        target_name = getter_names.temporary("variant_target")
+        getter_field = next(
+            field
+            for variant in enum.variants
+            for field in variant.fields
+            if field.name == field_name
+        )
         writer.line()
-        writer.line("#[getter]")
+        writer.line(f'#[getter("{field_name}")]')
         if heterogeneous:
             writer.line(
-                f"fn {field_name}(&self, py: Python<'_>) -> "
+                f"fn get_{getter_field.rust_name}(&self, py: Python<'_>) -> "
                 "PyResult<Option<Py<PyAny>>> {"
             )
         elif nested_class is not None:
             writer.line(
-                f"fn {field_name}(&self, py: Python<'_>) -> "
+                f"fn get_{getter_field.rust_name}(&self, py: Python<'_>) -> "
                 f"PyResult<Option<Py<{nested_class}>>> {{"
             )
         else:
             writer.line(
-                f"fn {field_name}(&self) -> PyResult<Option<{field_type.render()}>> {{"
+                f"fn get_{getter_field.rust_name}(&self) "
+                f"-> PyResult<Option<{field_type.render()}>> {{"
             )
         writer.enter()
-        writer.line("let value = self.value.as_ref().ok_or_else(|| {")
+        writer.line(f"let {stored_value} = self.value.as_ref().ok_or_else(|| {{")
         writer.enter()
         writer.line(_native_move_error(""))
         writer.leave()
         writer.line("})?;")
-        writer.line("match value {")
+        writer.line(f"match {stored_value} {{")
         writer.enter()
         for variant in enum.variants:
             target = next(
@@ -599,7 +479,7 @@ def _write_owned_enum_class(
             if target is None:
                 continue
             bindings = tuple(
-                (field.name, "__cw_target" if field.name == field_name else "")
+                (field.name, target_name if field.name == field_name else "")
                 for field in variant.fields
             )
             pattern = _enum_variant_pattern(
@@ -612,14 +492,14 @@ def _write_owned_enum_class(
             if target_class is not None:
                 native = (
                     f"Py::new(py, {target_class} {{ value: "
-                    "std::option::Option::Some(__cw_target.clone()) })?"
+                    f"std::option::Option::Some({target_name}.clone()) }})?"
                 )
                 converted = f"{native}.into_any()" if heterogeneous else native
             else:
                 converted = (
-                    "__cw_target.clone().into_py_any(py)?"
+                    f"{target_name}.clone().into_py_any(py)?"
                     if heterogeneous
-                    else "__cw_target.clone()"
+                    else f"{target_name}.clone()"
                 )
             writer.line(
                 f"{pattern} => std::result::Result::Ok("
@@ -677,15 +557,16 @@ def _enum_variant_pattern(
 ) -> str:
     variant = next(value for value in enum.variants if value.name == variant_name)
     if not variant.fields:
-        return f"{enum.symbol}::{variant.name}"
+        return f"{enum.symbol}::{variant.rust_name}"
     values = {field: local for field, local in bindings}
     if tuple_style:
         patterns = ", ".join(values.get(field.name) or "_" for field in variant.fields)
-        return f"{enum.symbol}::{variant.name}({patterns})"
+        return f"{enum.symbol}::{variant.rust_name}({patterns})"
     patterns = ", ".join(
-        f"{field.name}: {values.get(field.name) or '_'}" for field in variant.fields
+        f"{field.rust_name}: {values.get(field.name) or '_'}"
+        for field in variant.fields
     )
-    return f"{enum.symbol}::{variant.name} {{ {patterns} }}"
+    return f"{enum.symbol}::{variant.rust_name} {{ {patterns} }}"
 
 
 def _write_owned_struct_class(
@@ -711,20 +592,26 @@ def _write_owned_struct_class(
 
     parameters = ", ".join(
         (
-            f"{field.name}: PyRef<'_, {domain_class(field)}>"
+            f"{field.rust_name}: PyRef<'_, {domain_class(field)}>"
             if domain_class(field) is not None
-            else f"{field.name}: {field.type_ref.render()}"
+            else f"{field.rust_name}: {field.type_ref.render()}"
         )
         for field in struct.fields
     )
     writer.line("#[new]")
     writer.line(f"fn new({parameters}) -> PyResult<Self> {{")
     writer.enter()
+    constructor_names = EmissionNames.reserving(
+        *(field.rust_name for field in struct.fields)
+    )
+    extracted_fields: dict[str, str] = {}
     for field in struct.fields:
         if domain_class(field) is None:
             continue
+        extracted_field = constructor_names.temporary(f"field_{field.name}")
+        extracted_fields[field.name] = extracted_field
         writer.line(
-            f"let __cw_field_{field.name} = {field.name}.value.as_ref().ok_or_else(|| {{"
+            f"let {extracted_field} = {field.rust_name}.value.as_ref().ok_or_else(|| {{"
         )
         writer.enter()
         writer.line(_native_move_error(field.name))
@@ -738,66 +625,76 @@ def _write_owned_struct_class(
     writer.enter()
     for field in struct.fields:
         value = (
-            f"__cw_field_{field.name}"
+            extracted_fields[field.name]
             if domain_class(field) is not None
-            else field.name
+            else field.rust_name
         )
-        writer.line(f"{field.name}: {value},")
+        writer.line(f"{field.rust_name}: {value},")
     writer.leave()
     writer.line("}) })")
     writer.leave()
     writer.line("}")
     for field in struct.fields:
         nested_class = domain_class(field)
+        getter_names = EmissionNames.reserving("self", "py")
+        stored_value = getter_names.temporary("stored_value")
         writer.line()
-        writer.line("#[getter]")
+        writer.line(f'#[getter("{field.name}")]')
         if nested_class is None:
             writer.line(
-                f"fn {field.name}(&self) -> PyResult<{field.type_ref.render()}> {{"
+                f"fn get_{field.rust_name}(&self) "
+                f"-> PyResult<{field.type_ref.render()}> {{"
             )
         else:
             writer.line(
-                f"fn {field.name}(&self, py: Python<'_>) -> "
+                f"fn get_{field.rust_name}(&self, py: Python<'_>) -> "
                 f"PyResult<Py<{nested_class}>> {{"
             )
         writer.enter()
-        writer.line("let value = self.value.as_ref().ok_or_else(|| {")
+        writer.line(f"let {stored_value} = self.value.as_ref().ok_or_else(|| {{")
         writer.enter()
         writer.line(_native_move_error(""))
         writer.leave()
         writer.line("})?;")
         if nested_class is None:
-            writer.line(f"std::result::Result::Ok(value.{field.name}.clone())")
+            writer.line(
+                f"std::result::Result::Ok({stored_value}.{field.rust_name}.clone())"
+            )
         else:
             writer.line(
                 f"Py::new(py, {nested_class} {{ value: std::option::Option::Some("
-                f"value.{field.name}.clone()) }})"
+                f"{stored_value}.{field.rust_name}.clone()) }})"
             )
         writer.leave()
         writer.line("}")
         writer.line()
-        writer.line("#[setter]")
+        writer.line(f'#[setter("{field.name}")]')
         setter_type = (
             f"PyRef<'_, {nested_class}>"
             if nested_class is not None
             else field.type_ref.render()
         )
         writer.line(
-            f"fn set_{field.name}(&mut self, value: {setter_type}) -> PyResult<()> {{"
+            f"fn set_{field.rust_name}(&mut self, value: {setter_type}) "
+            "-> PyResult<()> {"
         )
         writer.enter()
+        setter_names = EmissionNames.reserving("self", "value")
+        assigned_value = "value"
         if nested_class is not None:
-            writer.line("let value = value.value.as_ref().ok_or_else(|| {")
+            assigned_value = setter_names.temporary("assigned_value")
+            writer.line(f"let {assigned_value} = value.value.as_ref().ok_or_else(|| {{")
             writer.enter()
             writer.line(_native_move_error(field.name))
             writer.leave()
             writer.line("})?.clone();")
-        writer.line("let target = self.value.as_mut().ok_or_else(|| {")
+        target = setter_names.temporary("target")
+        writer.line(f"let {target} = self.value.as_mut().ok_or_else(|| {{")
         writer.enter()
         writer.line(_native_move_error(""))
         writer.leave()
         writer.line("})?;")
-        writer.line(f"target.{field.name} = value;")
+        writer.line(f"{target}.{field.rust_name} = {assigned_value};")
         writer.line("std::result::Result::Ok(())")
         writer.leave()
         writer.line("}")
@@ -810,18 +707,8 @@ def _write_owned_struct_class(
         )
         for field in struct.fields
     )
-    tuple_values = ", ".join(
-        (
-            f"Py::new(py, {domain_class(field)} {{ value: "
-            f"std::option::Option::Some(value.{field.name}.clone()) }})?"
-            if domain_class(field) is not None
-            else f"value.{field.name}.clone()"
-        )
-        for field in struct.fields
-    )
     if len(struct.fields) == 1:
         tuple_types += ","
-        tuple_values += ","
     python_parameter = (
         ", py: Python<'_>"
         if any(domain_class(field) for field in struct.fields)
@@ -831,7 +718,20 @@ def _write_owned_struct_class(
         f"fn to_python(&self{python_parameter}) -> PyResult<({tuple_types})> {{"
     )
     writer.enter()
-    writer.line("let value = self.value.as_ref().ok_or_else(|| {")
+    to_python_names = EmissionNames.reserving("self", "py")
+    stored_value = to_python_names.temporary("stored_value")
+    tuple_values = ", ".join(
+        (
+            f"Py::new(py, {domain_class(field)} {{ value: "
+            f"std::option::Option::Some({stored_value}.{field.rust_name}.clone()) }})?"
+            if domain_class(field) is not None
+            else f"{stored_value}.{field.rust_name}.clone()"
+        )
+        for field in struct.fields
+    )
+    if len(struct.fields) == 1:
+        tuple_values += ","
+    writer.line(f"let {stored_value} = self.value.as_ref().ok_or_else(|| {{")
     writer.enter()
     writer.line(_native_move_error(""))
     writer.leave()
@@ -867,16 +767,24 @@ def _write_export_wrapper(
     function: FunctionIR,
     boundary_names: set[str],
 ) -> None:
+    emission_names = EmissionNames.for_function(function)
     wrapper_parameters = [
         _wrapper_parameter(parameter) for parameter in function.parameters
     ]
     releases_gil = function_releases_gil(function)
+    python_token = emission_names.temporary("python_token") if releases_gil else None
     if releases_gil:
-        wrapper_parameters.insert(0, "__cw_py: Python<'_>")
+        assert python_token is not None
+        wrapper_parameters.insert(0, f"{python_token}: Python<'_>")
     parameters = ", ".join(wrapper_parameters)
+    extracted_arguments = {
+        parameter.rust_name: emission_names.temporary(f"argument_{parameter.name}")
+        for parameter in function.parameters
+        if parameter.type_ref.ownership is not None
+    }
     arguments = ", ".join(
         (
-            _wrapper_argument_name(parameter)
+            extracted_arguments[parameter.rust_name]
             if parameter.type_ref.ownership is not None
             else parameter.rust_name
         )
@@ -902,33 +810,44 @@ def _write_export_wrapper(
     for parameter in function.parameters:
         _write_wrapper_ownership_preflight(writer, parameter)
     for parameter in function.parameters:
-        _write_wrapper_extraction(writer, parameter)
+        _write_wrapper_extraction(
+            writer,
+            parameter,
+            extracted_arguments.get(parameter.rust_name),
+        )
     if owned_return:
         native_call = f"__cw_native_{function.rust_symbol}({arguments})"
+        caught_result = emission_names.temporary("caught_result")
         writer.line(
-            f"let __cw_result = __cw_catch_panic(|| {native_call})?;",
+            f"let {caught_result} = __cw_catch_panic(|| {native_call})?;",
             function.span,
             "panic_boundary",
         )
+        final_result = caught_result
         if function.python_boundary:
-            writer.line("let __cw_result = __cw_result?;")
+            final_result = emission_names.temporary("python_result")
+            writer.line(f"let {final_result} = {caught_result}?;")
         writer.line(
             "std::result::Result::Ok("
-            f"{return_class} {{ value: std::option::Option::Some(__cw_result) }})"
+            f"{return_class} {{ value: std::option::Option::Some({final_result}) }})"
         )
     elif function.return_type.rust_name == "Result":
         native_call = f"__cw_native_{function.rust_symbol}({arguments})"
         if releases_gil:
-            native_call = f"__cw_py.detach(move || {native_call})"
+            assert python_token is not None
+            native_call = f"{python_token}.detach(move || {native_call})"
+        caught_result = emission_names.temporary("caught_result")
         writer.line(
-            f"let __cw_result = __cw_catch_panic(|| {native_call})?;",
+            f"let {caught_result} = __cw_catch_panic(|| {native_call})?;",
             function.span,
             "panic_boundary",
         )
+        final_result = caught_result
         if function.python_boundary:
-            writer.line("let __cw_result = __cw_result?;")
+            final_result = emission_names.temporary("python_result")
+            writer.line(f"let {final_result} = {caught_result}?;")
         writer.line(
-            "match __cw_result {",
+            f"match {final_result} {{",
             function.span,
             "abi_call",
         )
@@ -951,7 +870,8 @@ def _write_export_wrapper(
     else:
         native_call = f"__cw_native_{function.rust_symbol}({arguments})"
         if releases_gil:
-            native_call = f"__cw_py.detach(move || {native_call})"
+            assert python_token is not None
+            native_call = f"{python_token}.detach(move || {native_call})"
         writer.line(
             f"std::result::Result::Ok(__cw_catch_panic(|| {native_call})?)",
             function.span,
@@ -1416,783 +1336,6 @@ def function_releases_gil(function: FunctionIR) -> bool:
     )
 
 
-def _write_statement(
-    writer: _Writer,
-    statement: StatementIR,
-    boundary_names: set[str],
-    current_boundary: bool,
-) -> None:
-    if isinstance(statement, ReturnIR):
-        if current_boundary:
-            value = (
-                "return std::result::Result::Ok(());"
-                if statement.value is None
-                else (
-                    "return std::result::Result::Ok("
-                    f"{_render_expression(statement.value, boundary_names)});"
-                )
-            )
-        else:
-            value = (
-                "return;"
-                if statement.value is None
-                else (f"return {_render_expression(statement.value, boundary_names)};")
-            )
-        writer.line(value, statement.span, "return")
-        return
-    if isinstance(statement, LetIR):
-        mutability = "mut " if statement.mutable else ""
-        writer.line(
-            (
-                f"let {mutability}{statement.rust_name}: {statement.type_ref.render()} "
-                f"= {_render_expression(statement.value, boundary_names)};"
-            ),
-            statement.span,
-            "let",
-        )
-        return
-    if isinstance(statement, AssignIR):
-        writer.line(
-            (
-                f"{statement.rust_name} = "
-                f"{_render_expression(statement.value, boundary_names)};"
-            ),
-            statement.span,
-            "assign",
-        )
-        return
-    if isinstance(statement, FieldAssignIR):
-        writer.line(
-            (
-                f"{_render_place_expression(statement.receiver, boundary_names)}."
-                f"{statement.field} = "
-                f"{_render_expression(statement.value, boundary_names)};"
-            ),
-            statement.span,
-            "field_assign",
-        )
-        return
-    if isinstance(statement, DestructureIR):
-        names = ", ".join(
-            f"mut {name}" if mutable else name
-            for name, mutable in zip(statement.rust_names, statement.mutable)
-        )
-        writer.line(
-            (
-                f"let ({names}): {statement.type_ref.render()} = "
-                f"{_render_expression(statement.value, boundary_names)};"
-            ),
-            statement.span,
-            "tuple_destructure",
-        )
-        return
-    if isinstance(statement, LocalConstIR):
-        writer.line(
-            (
-                f"const {statement.rust_name}: {statement.type_ref.render()} = "
-                f"{_render_expression(statement.value, boundary_names)};"
-            ),
-            statement.span,
-            "local_const",
-        )
-        return
-    if isinstance(statement, ExpressionStatementIR):
-        writer.line(
-            f"{_render_expression(statement.value, boundary_names)};",
-            statement.span,
-            "expression_statement",
-        )
-        return
-    if isinstance(statement, IfIR):
-        writer.line(
-            f"if {_render_expression(statement.condition, boundary_names)} {{",
-            statement.condition.span,
-            "if_condition",
-        )
-        writer.enter()
-        for child in statement.body:
-            _write_statement(writer, child, boundary_names, current_boundary)
-        writer.leave()
-        if statement.otherwise:
-            writer.line("} else {", statement.span, "else")
-            writer.enter()
-            for child in statement.otherwise:
-                _write_statement(writer, child, boundary_names, current_boundary)
-            writer.leave()
-        writer.line("}")
-        return
-    if isinstance(statement, WhileIR):
-        writer.line(
-            f"while {_render_expression(statement.condition, boundary_names)} {{",
-            statement.condition.span,
-            "while_condition",
-        )
-        writer.enter()
-        for child in statement.body:
-            _write_statement(writer, child, boundary_names, current_boundary)
-        writer.leave()
-        writer.line("}")
-        return
-    if isinstance(statement, ForRangeIR):
-        writer.line(
-            (
-                f"for {statement.rust_variable} in "
-                f"{_render_expression(statement.start, boundary_names)}.."
-                f"{_render_expression(statement.stop, boundary_names)} {{"
-            ),
-            statement.span,
-            "for_range",
-        )
-        writer.enter()
-        for child in statement.body:
-            _write_statement(writer, child, boundary_names, current_boundary)
-        writer.leave()
-        writer.line("}")
-        return
-    if isinstance(statement, ForEachIR):
-        writer.line(
-            (
-                f"for {statement.rust_variable} in "
-                f"{_render_expression(statement.iterator, boundary_names)} {{"
-            ),
-            statement.span,
-            "for_each",
-        )
-        writer.enter()
-        for child in statement.body:
-            _write_statement(writer, child, boundary_names, current_boundary)
-        writer.leave()
-        writer.line("}")
-        return
-    if isinstance(statement, MatchIR):
-        subject = _render_expression(statement.subject, boundary_names)
-        borrowed = subject if statement.subject_borrowed else f"&{subject}"
-        writer.line(
-            f"match <{statement.enum_symbol} as std::clone::Clone>::clone({borrowed}) {{",
-            statement.span,
-            "match",
-        )
-        writer.enter()
-        for match_arm in statement.arms:
-            if match_arm.variant is None:
-                pattern = "_"
-            elif not match_arm.bindings:
-                pattern = f"{match_arm.enum_symbol}::{match_arm.variant}"
-            elif match_arm.tuple_style:
-                values = ", ".join(local or "_" for _, local in match_arm.bindings)
-                pattern = f"{match_arm.enum_symbol}::{match_arm.variant}({values})"
-            else:
-                values = ", ".join(
-                    f"{field}: {local or '_'}" for field, local in match_arm.bindings
-                )
-                pattern = f"{match_arm.enum_symbol}::{match_arm.variant} {{ {values} }}"
-            writer.line(f"{pattern} => {{", match_arm.span, "match_arm")
-            writer.enter()
-            for child in match_arm.body:
-                _write_statement(writer, child, boundary_names, current_boundary)
-            writer.leave()
-            writer.line("},")
-        writer.leave()
-        writer.line("}")
-        return
-    if isinstance(statement, PatternMatchIR):
-        subject = _render_expression(statement.subject, boundary_names)
-        borrowed = subject if statement.subject_borrowed else f"&{subject}"
-        subject_type = statement.subject_type.render()
-        writer.line(
-            f"match <{subject_type} as std::clone::Clone>::clone({borrowed}) {{",
-            statement.span,
-            "pattern_match",
-        )
-        writer.enter()
-        for pattern_arm in statement.arms:
-            guard = (
-                ""
-                if pattern_arm.guard is None
-                else f" if {_render_expression(pattern_arm.guard, boundary_names)}"
-            )
-            writer.line(
-                f"{pattern_arm.pattern}{guard} => {{",
-                pattern_arm.span,
-                "pattern_match_arm",
-            )
-            writer.enter()
-            for child in pattern_arm.body:
-                _write_statement(writer, child, boundary_names, current_boundary)
-            writer.leave()
-            writer.line("},")
-        writer.leave()
-        writer.line("}")
-        return
-    if isinstance(statement, BreakIR):
-        writer.line("break;", statement.span, "break")
-        return
-    if isinstance(statement, ContinueIR):
-        writer.line("continue;", statement.span, "continue")
-        return
-    if isinstance(statement, PassIR):
-        writer.line("();", statement.span, "pass")
-        return
-    raise AssertionError(f"unhandled statement IR: {type(statement).__name__}")
-
-
-def _render_expression(
-    expression: ExpressionIR,
-    boundary_names: set[str] | None = None,
-) -> str:
-    boundary_names = boundary_names or set()
-    if isinstance(expression, IntLiteralIR):
-        return f"{expression.value}{expression.type_ref.render()}"
-    if isinstance(expression, FloatLiteralIR):
-        value = repr(expression.value)
-        if "." not in value and "e" not in value.lower():
-            value += ".0"
-        return f"{value}{expression.type_ref.render()}"
-    if isinstance(expression, BoolLiteralIR):
-        return "true" if expression.value else "false"
-    if isinstance(expression, StringLiteralIR):
-        if expression.type_ref.rust_name == "char":
-            return _rust_char_literal(expression.value)
-        literal = _rust_string_literal(expression.value)
-        return (
-            f"String::from({literal})"
-            if expression.type_ref.rust_name == "String"
-            else literal
-        )
-    if isinstance(expression, TupleLiteralIR):
-        values = ", ".join(
-            _render_expression(value, boundary_names) for value in expression.values
-        )
-        return f"({values}{',' if len(expression.values) == 1 else ''})"
-    if isinstance(expression, ArrayLiteralIR):
-        values = ", ".join(
-            _render_expression(value, boundary_names) for value in expression.values
-        )
-        return f"[{values}]"
-    if isinstance(expression, IndexIR):
-        receiver = _render_expression(expression.receiver, boundary_names)
-        if expression.receiver.type_ref.rust_name == "Tuple" and isinstance(
-            expression.index, IntLiteralIR
-        ):
-            rendered = f"{receiver}.{expression.index.value}"
-        else:
-            rendered = (
-                f"{receiver}[{_render_expression(expression.index, boundary_names)}]"
-            )
-        return rendered if _is_copy_type(expression.type_ref) else f"{rendered}.clone()"
-    if isinstance(expression, NoneLiteralIR):
-        return "()"
-    if isinstance(expression, NameIR):
-        return expression.rust_name
-    if isinstance(expression, BorrowIR):
-        operator = "&mut " if expression.kind == "mutable" else "&"
-        return f"{operator}{_render_place_expression(expression.value, boundary_names)}"
-    if isinstance(expression, UnaryIR):
-        operator = {"positive": "+", "negative": "-", "not": "!"}[expression.operator]
-        return f"({operator}{_render_expression(expression.operand, boundary_names)})"
-    if isinstance(expression, BinaryIR):
-        operator = {
-            "add": "+",
-            "subtract": "-",
-            "multiply": "*",
-            "divide": "/",
-            "remainder": "%",
-            "and": "&&",
-            "or": "||",
-        }[expression.operator]
-        return (
-            f"({_render_expression(expression.left, boundary_names)} {operator} "
-            f"{_render_expression(expression.right, boundary_names)})"
-        )
-    if isinstance(expression, CompareIR):
-        operator = {
-            "eq": "==",
-            "not_eq": "!=",
-            "lt": "<",
-            "lt_eq": "<=",
-            "gt": ">",
-            "gt_eq": ">=",
-        }[expression.operator]
-        return (
-            f"({_render_expression(expression.left, boundary_names)} {operator} "
-            f"{_render_expression(expression.right, boundary_names)})"
-        )
-    if isinstance(expression, CallIR):
-        arguments = ", ".join(
-            _render_expression(value, boundary_names) for value in expression.arguments
-        )
-        suffix = "?" if expression.target in boundary_names else ""
-        return f"__cw_native_{expression.target}({arguments}){suffix}"
-    if isinstance(expression, CrateCallIR):
-        arguments = ", ".join(
-            _render_expression(value, boundary_names) for value in expression.arguments
-        )
-        return f"{'::'.join(expression.path)}({arguments})"
-    if isinstance(expression, ConstructorIR):
-        values = ", ".join(
-            _render_expression(value, boundary_names) for value in expression.arguments
-        )
-        if expression.constructor == "String":
-            return f"String::from({values})"
-        if expression.constructor == "Vec":
-            return f"vec![{values}]"
-        if expression.constructor == "HashMap":
-            return "std::collections::HashMap::new()"
-        if expression.constructor == "Box":
-            return f"Box::new({values})"
-        if expression.constructor == "Rc":
-            return f"std::rc::Rc::new({values})"
-        if expression.constructor == "RefCell":
-            return f"std::cell::RefCell::new({values})"
-        if expression.constructor == "Arc":
-            return f"std::sync::Arc::new({values})"
-        if expression.constructor == "Mutex":
-            return f"std::sync::Mutex::new({values})"
-        if expression.constructor == "Channel":
-            message_type = expression.type_ref.arguments[0].arguments[0].render()
-            return f"std::sync::mpsc::channel::<{message_type}>()"
-        if expression.constructor == "Spawn":
-            return f"std::thread::spawn({values})"
-        if expression.constructor == "BlockOn":
-            return f"__cw_block_on({values})"
-        if expression.constructor == "Join":
-            return f"__cw_join2({values})"
-        if expression.constructor == "Select":
-            return f"__cw_select2({values})"
-        if expression.constructor == "YieldNow":
-            return "__cw_yield_now()"
-        if expression.constructor == "SleepMillis":
-            return f"__cw_sleep_millis({values})"
-        if expression.constructor == "DynBox":
-            return f"Box::new({values}) as {expression.type_ref.render()}"
-        if expression.constructor == "ArrayRepeat":
-            return f"[{values}; {expression.type_ref.const_value}]"
-        if expression.constructor == "Some":
-            return f"std::option::Option::Some({values})"
-        if expression.constructor == "None":
-            return "std::option::Option::None"
-        if expression.constructor == "Ok":
-            return f"std::result::Result::Ok({values})"
-        if expression.constructor == "Err":
-            return f"std::result::Result::Err({values})"
-        if expression.constructor == "UnsafeRead":
-            value = _render_expression(expression.arguments[0], boundary_names)
-            return (
-                "{ let __cw_pointer = &raw const "
-                f"{value}; unsafe {{ *__cw_pointer }} }}"
-            )
-        if expression.constructor == "UnsafeWrite":
-            target = _render_expression(expression.arguments[0], boundary_names)
-            value = _render_expression(expression.arguments[1], boundary_names)
-            return (
-                "{ let __cw_pointer = &raw mut "
-                f"{target}; unsafe {{ *__cw_pointer = {value}; }} }}"
-            )
-        if expression.constructor == "CAbs":
-            value = _render_expression(expression.arguments[0], boundary_names)
-            return (
-                "{ let __cw_value: i32 = "
-                f"{value}; if __cw_value == i32::MIN {{ "
-                'panic!("C abs is undefined for i32::MIN"); } '
-                "unsafe { __crabwalk_ffi::c_abs(__cw_value) } }"
-            )
-        if expression.constructor == "UnsafeStaticIncrement":
-            value = _render_expression(expression.arguments[0], boundary_names)
-            return (
-                "{ static __cw_counter: std::sync::atomic::AtomicU64 = "
-                "std::sync::atomic::AtomicU64::new(0); "
-                f"let __cw_amount: u64 = {value}; "
-                "let __cw_previous = __cw_counter.fetch_update("
-                "std::sync::atomic::Ordering::Relaxed, "
-                "std::sync::atomic::Ordering::Relaxed, "
-                "|current| current.checked_add(__cw_amount))"
-                '.expect("unsafe static counter overflow"); '
-                "__cw_previous.checked_add(__cw_amount)"
-                '.expect("unsafe static counter overflow") }'
-            )
-        if expression.constructor == "TypeAliasIdentity":
-            value = _render_expression(expression.arguments[0], boundary_names)
-            type_name = expression.type_ref.render()
-            return (
-                f"{{ type __CwAlias = {type_name}; "
-                f"let __cw_value: __CwAlias = {value}; __cw_value }}"
-            )
-        if expression.constructor == "BoxedClosureCall":
-            value = _render_expression(expression.arguments[0], boundary_names)
-            addend = _render_expression(expression.arguments[1], boundary_names)
-            return (
-                "{ fn __cw_returns_closure(addend: u64) -> "
-                "Box<dyn Fn(u64) -> u64> { Box::new(move |value| value + addend) } "
-                f"__cw_returns_closure({addend})({value}) }}"
-            )
-        if expression.constructor == "ClosureVectorTotal":
-            value = _render_expression(expression.arguments[0], boundary_names)
-            return (
-                "{ let __cw_callbacks: Vec<Box<dyn Fn(u64) -> u64>> = "
-                "vec![Box::new(|item| item + 1), Box::new(|item| item * 2)]; "
-                f"__cw_callbacks.iter().map(|callback| callback({value})).sum::<u64>() }}"
-            )
-        if expression.constructor == "TcpListener":
-            address = _render_expression(expression.arguments[0], boundary_names)
-            return f"std::net::TcpListener::bind({address}).unwrap()"
-        if expression.constructor == "TcpStream":
-            port = _render_expression(expression.arguments[0], boundary_names)
-            return (
-                "std::net::TcpStream::connect("
-                f'format!("127.0.0.1:{{}}", {port})).unwrap()'
-            )
-        if expression.constructor == "ThreadPool":
-            size = _render_expression(expression.arguments[0], boundary_names)
-            return f"__CwThreadPool::new({size})"
-    if isinstance(expression, StructConstructorIR):
-        fields = ", ".join(
-            f"{name}: {_render_expression(value, boundary_names)}"
-            for name, value in expression.arguments
-        )
-        return f"{expression.struct_symbol} {{ {fields} }}"
-    if isinstance(expression, EnumConstructorIR):
-        values = ", ".join(
-            _render_expression(value, boundary_names)
-            for _, value in expression.arguments
-        )
-        if not expression.arguments:
-            return f"{expression.enum_symbol}::{expression.variant}"
-        if expression.tuple_style:
-            return f"{expression.enum_symbol}::{expression.variant}({values})"
-        fields = ", ".join(
-            f"{name}: {_render_expression(value, boundary_names)}"
-            for name, value in expression.arguments
-        )
-        return f"{expression.enum_symbol}::{expression.variant} {{ {fields} }}"
-    if isinstance(expression, FieldAccessIR):
-        rendered = (
-            f"{_render_expression(expression.receiver, boundary_names)}."
-            f"{expression.field}"
-        )
-        return rendered if _is_copy_type(expression.type_ref) else f"{rendered}.clone()"
-    if isinstance(expression, MethodCallIR):
-        rendered_receiver = _render_method_receiver(
-            expression.receiver,
-            boundary_names,
-        )
-        rendered_arguments = [
-            _render_expression(value, boundary_names) for value in expression.arguments
-        ]
-        semantic_receiver = expression.receiver.type_ref.underlying
-        if semantic_receiver.rust_name in {"String", "Str"}:
-            if expression.method == "parse":
-                target = expression.type_ref.arguments[0].render()
-                return (
-                    f"{rendered_receiver}.parse::<{target}>()"
-                    ".map_err(|error| error.to_string())"
-                )
-            if expression.method == "join":
-                separator = (
-                    f"{rendered_receiver}.as_str()"
-                    if semantic_receiver.rust_name == "String"
-                    else rendered_receiver
-                )
-                return f"{rendered_arguments[0]}.join({separator})"
-        if expression.receiver.type_ref.rust_name == "Arc":
-            if expression.method == "strong_count":
-                return f"std::sync::Arc::strong_count(&{rendered_receiver})"
-            if expression.method == "add_locked":
-                return (
-                    f"{{ *{rendered_receiver}.lock().unwrap() += "
-                    f"{rendered_arguments[0]}; }}"
-                )
-            if expression.method == "get_locked":
-                return f"*{rendered_receiver}.lock().unwrap()"
-        if expression.receiver.type_ref.rust_name == "Box":
-            if expression.method == "deref_copy":
-                return f"*{rendered_receiver}"
-        if expression.receiver.type_ref.rust_name == "Rc":
-            if expression.method == "strong_count":
-                return f"std::rc::Rc::strong_count(&{rendered_receiver})"
-            if expression.method == "deref_copy":
-                return f"*{rendered_receiver}"
-        if expression.receiver.type_ref.rust_name == "RefCell":
-            if expression.method == "borrow_copy":
-                return f"*{rendered_receiver}.borrow()"
-        if expression.receiver.type_ref.rust_name == "Sender":
-            if expression.method == "send":
-                return f"{rendered_receiver}.send({rendered_arguments[0]}).unwrap()"
-        if expression.receiver.type_ref.rust_name == "Receiver":
-            if expression.method == "recv":
-                return f"{rendered_receiver}.recv().unwrap()"
-            if expression.method == "recv_async":
-                return f"__cw_recv_async(&{rendered_receiver})"
-        if expression.receiver.type_ref.rust_name == "ThreadHandle":
-            if expression.method == "join":
-                return f"{rendered_receiver}.join().unwrap()"
-        if expression.receiver.type_ref.rust_name == "TcpListener":
-            if expression.method == "local_port":
-                return f"u64::from({rendered_receiver}.local_addr().unwrap().port())"
-            if expression.method == "serve_http_once":
-                hello, missing = rendered_arguments
-                return (
-                    "{ let (mut __cw_stream, _) = "
-                    f"{rendered_receiver}.accept().unwrap(); "
-                    "let mut __cw_request = String::new(); "
-                    "std::io::Read::read_to_string(&mut __cw_stream, "
-                    "&mut __cw_request).unwrap(); "
-                    "let (__cw_status, __cw_body, __cw_code) = "
-                    'if __cw_request.starts_with("GET / HTTP/1.1\\r\\n") { '
-                    f'("HTTP/1.1 200 OK", {hello}, 200u64) '
-                    '} else if __cw_request.starts_with("GET /sleep HTTP/1.1\\r\\n") { '
-                    "std::thread::sleep(std::time::Duration::from_millis(50)); "
-                    f'("HTTP/1.1 200 OK", {hello}, 200u64) '
-                    f'}} else {{ ("HTTP/1.1 404 NOT FOUND", {missing}, 404u64) }}; '
-                    "let __cw_response = format!("
-                    '"{}\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}", '
-                    "__cw_status, __cw_body.len(), __cw_body); "
-                    "std::io::Write::write_all(&mut __cw_stream, "
-                    "__cw_response.as_bytes()).unwrap(); "
-                    "std::io::Write::flush(&mut __cw_stream).unwrap(); "
-                    "let _ = __cw_stream.shutdown(std::net::Shutdown::Both); "
-                    "__cw_code }"
-                )
-        if expression.receiver.type_ref.rust_name == "TcpStream":
-            if expression.method == "write_get":
-                path = rendered_arguments[0]
-                return (
-                    "{ let __cw_request = format!("
-                    '"GET {} HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n", '
-                    f"{path}); std::io::Write::write_all(&mut {rendered_receiver}, "
-                    "__cw_request.as_bytes()).unwrap(); }"
-                )
-            if expression.method == "shutdown_write":
-                return (
-                    f"{rendered_receiver}.shutdown(std::net::Shutdown::Write).unwrap()"
-                )
-            if expression.method == "read_to_string":
-                return (
-                    "{ let mut __cw_response = String::new(); "
-                    f"std::io::Read::read_to_string(&mut {rendered_receiver}, "
-                    "&mut __cw_response).unwrap(); __cw_response }"
-                )
-        if expression.receiver.type_ref.rust_name == "HashMap":
-            if expression.method in {"contains_key", "remove", "get", "get_mut"}:
-                return (
-                    f"{rendered_receiver}.{expression.method}(&{rendered_arguments[0]})"
-                )
-            if expression.method == "iter_ref":
-                return f"{rendered_receiver}.iter()"
-            if expression.method == "get_or":
-                return (
-                    f"{rendered_receiver}.get(&{rendered_arguments[0]})"
-                    f".cloned().unwrap_or({rendered_arguments[1]})"
-                )
-            if expression.method == "entry_or_insert":
-                return (
-                    f"{rendered_receiver}.entry({rendered_arguments[0]})"
-                    f".or_insert({rendered_arguments[1]}).clone()"
-                )
-            if expression.method == "add":
-                value_type = expression.receiver.type_ref.underlying.arguments[1]
-                return (
-                    "{ *"
-                    f"{rendered_receiver}.entry({rendered_arguments[0]})"
-                    f".or_insert({_numeric_zero(value_type)}) "
-                    f"+= {rendered_arguments[1]}; }}"
-                )
-        if (
-            expression.receiver.type_ref.rust_name == "Vec"
-            and expression.method == "iter"
-        ):
-            return f"{rendered_receiver}.iter().copied()"
-        if (
-            expression.receiver.type_ref.rust_name == "Vec"
-            and expression.method == "iter_ref"
-        ):
-            return f"{rendered_receiver}.iter()"
-        if (
-            expression.receiver.type_ref.rust_name == "Vec"
-            and expression.method == "split_at_mut_sum"
-        ):
-            midpoint = rendered_arguments[0]
-            element = expression.receiver.type_ref.arguments[0].render()
-            return (
-                f"{{ let __cw_mid: usize = {midpoint}; "
-                f"let __cw_len = {rendered_receiver}.len(); "
-                'assert!(__cw_mid <= __cw_len, "midpoint out of bounds"); '
-                f"let __cw_pointer = {rendered_receiver}.as_mut_ptr(); "
-                "let (__cw_left, __cw_right) = unsafe { "
-                "(std::slice::from_raw_parts_mut(__cw_pointer, __cw_mid), "
-                "std::slice::from_raw_parts_mut(__cw_pointer.add(__cw_mid), "
-                "__cw_len - __cw_mid)) }; "
-                f"__cw_left.iter().copied().sum::<{element}>() + "
-                f"__cw_right.iter().copied().sum::<{element}>() }}"
-            )
-        if expression.receiver.type_ref.rust_name in {
-            "Iterator",
-            "ParallelIterator",
-            "ParallelIteratorRef",
-        }:
-            if expression.method == "collect_vec":
-                return f"{rendered_receiver}.collect::<Vec<_>>()"
-            if expression.method == "collect_map":
-                return (
-                    f"{rendered_receiver}.collect::<std::collections::HashMap<_, _>>()"
-                )
-            if (
-                expression.method == "reduce"
-                and expression.receiver.type_ref.rust_name != "Iterator"
-            ):
-                return f"{rendered_receiver}.reduce_with({rendered_arguments[0]})"
-        arguments = ", ".join(rendered_arguments)
-        return f"{rendered_receiver}.{expression.method}({arguments})"
-    if isinstance(expression, TraitCallIR):
-        receiver = _render_expression(expression.receiver, boundary_names)
-        return (
-            f"<{expression.concrete_type.render()} as "
-            f"{expression.trait_symbol}>::{expression.method}(&{receiver})"
-        )
-    if isinstance(expression, FunctionPointerTwiceIR):
-        argument = _render_expression(expression.argument, boundary_names)
-        parameter = expression.parameter_type.render()
-        result = expression.type_ref.render()
-        return (
-            f"{{ let __cw_operation: fn({parameter}) -> {result} = "
-            f"__cw_native_{expression.target}; "
-            f"let __cw_argument: {parameter} = {argument}; "
-            "__cw_operation(__cw_argument) + __cw_operation(__cw_argument) }"
-        )
-    if isinstance(expression, NativePrintlnIR):
-        return (
-            f'println!("{{}}", {_render_expression(expression.value, boundary_names)})'
-        )
-    if isinstance(expression, PythonPrintIR):
-        value = _render_expression(expression.value, boundary_names)
-        if expression.value.type_ref.rust_name == "String":
-            value = f"{value}.clone()"
-        return (
-            "Python::attach(|py| -> PyResult<()> { "
-            'py.import("builtins")?.getattr("print")?.call1(('
-            f"{value},))?; std::result::Result::Ok(()) }})?"
-        )
-    if isinstance(expression, TryIR):
-        return f"{_render_expression(expression.value, boundary_names)}?"
-    if isinstance(expression, AwaitIR):
-        return f"{_render_expression(expression.value, boundary_names)}.await"
-    if isinstance(expression, PanicIR):
-        return (
-            f'panic!("{{}}", {_render_expression(expression.message, boundary_names)})'
-        )
-    if isinstance(expression, ClosureIR):
-        body = _render_expression(expression.body, boundary_names)
-        if expression.parameter is None:
-            return f"move || {body}"
-        closure_parameter = expression.rust_parameter
-        assert closure_parameter is not None
-        second_parameter = expression.rust_second_parameter
-        if second_parameter is not None:
-            return f"|{closure_parameter}, {second_parameter}| {body}"
-        if expression.borrowed_parameter:
-            projection = (
-                "__cw_item"
-                if expression.parameter_projection == "borrow"
-                else "*__cw_item"
-            )
-            return f"|__cw_item| {{ let {closure_parameter} = {projection}; {body} }}"
-        return f"|{closure_parameter}| {body}"
-    raise AssertionError(f"unhandled expression IR: {type(expression).__name__}")
-
-
-def _render_method_receiver(
-    expression: ExpressionIR,
-    boundary_names: set[str],
-) -> str:
-    """Render a borrowed method receiver without cloning an owned struct field."""
-
-    if isinstance(expression, (FieldAccessIR, IndexIR)):
-        return _render_place_expression(expression, boundary_names)
-    return _render_expression(expression, boundary_names)
-
-
-def _render_place_expression(
-    expression: ExpressionIR,
-    boundary_names: set[str],
-) -> str:
-    """Render a storage place without cloning an intermediate projection."""
-
-    if isinstance(expression, NameIR):
-        return expression.rust_name
-    if isinstance(expression, FieldAccessIR):
-        return (
-            f"{_render_place_expression(expression.receiver, boundary_names)}."
-            f"{expression.field}"
-        )
-    if isinstance(expression, IndexIR):
-        receiver = _render_place_expression(expression.receiver, boundary_names)
-        index = _render_expression(expression.index, boundary_names)
-        return f"{receiver}[{index}]"
-    return _render_expression(expression, boundary_names)
-
-
-def _ends_with_return(statements: tuple[StatementIR, ...]) -> bool:
-    return bool(statements) and isinstance(statements[-1], ReturnIR)
-
-
-def _is_copy_type(type_ref: TypeRef) -> bool:
-    return (
-        type_ref.ownership == "Ref"
-        or type_ref.is_numeric
-        or type_ref.rust_name in {"bool", "char"}
-        or type_ref.rust_name == "Unit"
-        or (
-            type_ref.rust_name in {"Tuple", "Array"}
-            and all(_is_copy_type(value) for value in type_ref.arguments)
-        )
-    )
-
-
-def _rust_string_literal(value: str) -> str:
-    pieces = ['"']
-    for character in value:
-        code = ord(character)
-        if character == '"':
-            pieces.append('\\"')
-        elif character == "\\":
-            pieces.append("\\\\")
-        elif character == "\n":
-            pieces.append("\\n")
-        elif character == "\r":
-            pieces.append("\\r")
-        elif character == "\t":
-            pieces.append("\\t")
-        elif code < 0x20 or code == 0x7F:
-            pieces.append(f"\\u{{{code:x}}}")
-        else:
-            pieces.append(character)
-    pieces.append('"')
-    return "".join(pieces)
-
-
-def _rust_char_literal(value: str) -> str:
-    character = value[0]
-    escapes = {
-        "'": "\\'",
-        "\\": "\\\\",
-        "\n": "\\n",
-        "\r": "\\r",
-        "\t": "\\t",
-        "\0": "\\0",
-    }
-    escaped = escapes.get(character)
-    if escaped is None:
-        code = ord(character)
-        escaped = f"\\u{{{code:x}}}" if code < 0x20 or code == 0x7F else character
-    return f"'{escaped}'"
-
-
-def _numeric_zero(type_ref: TypeRef) -> str:
-    """Render the additive identity with the map value's concrete Rust type."""
-
-    prefix = "0.0" if type_ref.is_float else "0"
-    return f"{prefix}{type_ref.render()}"
-
-
 def _owned_vector_types(ir: PackageIR) -> tuple[TypeRef, ...]:
     values: dict[str, TypeRef] = {}
     for function in ir.functions:
@@ -2248,20 +1391,24 @@ def _write_owned_vector_class(
             f"fn new(value: Vec<PyRef<'_, {domain_class}>>) -> PyResult<Self> {{"
         )
         writer.enter()
-        writer.line("let mut __cw_values = Vec::with_capacity(value.len());")
-        writer.line("for __cw_item in value {")
+        constructor_names = EmissionNames.reserving("value")
+        values = constructor_names.temporary("owned_values")
+        item = constructor_names.temporary("owned_item")
+        item_value = constructor_names.temporary("owned_item_value")
+        writer.line(f"let mut {values} = Vec::with_capacity(value.len());")
+        writer.line(f"for {item} in value {{")
         writer.enter()
-        writer.line("let __cw_value = __cw_item.value.as_ref().ok_or_else(|| {")
+        writer.line(f"let {item_value} = {item}.value.as_ref().ok_or_else(|| {{")
         writer.enter()
         writer.line(_native_move_error(""))
         writer.leave()
         writer.line("})?;")
-        writer.line("__cw_values.push(__cw_value.clone());")
+        writer.line(f"{values}.push({item_value}.clone());")
         writer.leave()
         writer.line("}")
         writer.line(
             "std::result::Result::Ok(Self { "
-            "value: std::option::Option::Some(__cw_values) })"
+            f"value: std::option::Option::Some({values}) }})"
         )
         writer.leave()
         writer.line("}")
@@ -2287,19 +1434,23 @@ def _write_owned_vector_class(
         writer.leave()
         writer.line("}")
     else:
+        to_python_names = EmissionNames.reserving("self", "py")
+        values = to_python_names.temporary("stored_values")
+        item = to_python_names.temporary("stored_item")
         writer.line(
             f"fn to_python(&self, py: Python<'_>) -> PyResult<Vec<Py<{domain_class}>>> {{"
         )
         writer.enter()
-        writer.line("let values = self.value.as_ref().ok_or_else(|| {")
+        writer.line(f"let {values} = self.value.as_ref().ok_or_else(|| {{")
         writer.enter()
         writer.line(_native_move_error(""))
         writer.leave()
         writer.line("})?;")
-        writer.line("values.iter().cloned().map(|value| {")
+        writer.line(f"{values}.iter().cloned().map(|{item}| {{")
         writer.enter()
         writer.line(
-            f"Py::new(py, {domain_class} {{ value: std::option::Option::Some(value) }})"
+            f"Py::new(py, {domain_class} {{ "
+            f"value: std::option::Option::Some({item}) }})"
         )
         writer.leave()
         writer.line("}).collect()")
@@ -2339,19 +1490,16 @@ def _wrapper_parameter(parameter: ParameterIR) -> str:
     return f"mut {parameter.rust_name}: PyRefMut<'_, {rust_class}>"
 
 
-def _wrapper_argument_name(parameter: ParameterIR) -> str:
-    identifier = (
-        str(parameter.binding.identifier.value)
-        if parameter.binding is not None
-        else parameter.name.encode("utf-8").hex()
-    )
-    return f"__cw_arg_{identifier}"
-
-
-def _write_wrapper_extraction(writer: _Writer, parameter: ParameterIR) -> None:
+def _write_wrapper_extraction(
+    writer: _Writer,
+    parameter: ParameterIR,
+    extracted_name: str | None,
+) -> None:
     ownership = parameter.type_ref.ownership
     if ownership is None:
+        assert extracted_name is None
         return
+    assert extracted_name is not None
     access = {
         "Owned": "take()",
         "Ref": "as_ref()",
@@ -2359,7 +1507,7 @@ def _write_wrapper_extraction(writer: _Writer, parameter: ParameterIR) -> None:
     }[ownership]
     writer.line(
         (
-            f"let {_wrapper_argument_name(parameter)} = "
+            f"let {extracted_name} = "
             f"{parameter.rust_name}.value.{access}.ok_or_else(|| "
             f"{_native_move_error(parameter.name)})?;"
         ),

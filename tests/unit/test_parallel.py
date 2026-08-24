@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from crabwalk import rust
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_path
-from crabwalk.compiler.ir import MethodCallIR, ReturnIR
+from crabwalk.compiler.ir import ClosureIR, MethodCallIR, ReturnIR
 from crabwalk.diagnostics import CrabwalkCompilationError
 
 
@@ -100,9 +101,19 @@ def reduce_total(values: rust.Ref[rust.Vec[rust.u64]]) -> rust.Option[rust.u64]:
     filtered = mapped.receiver
     assert isinstance(filtered, MethodCallIR)
     assert filtered.type_ref.rust_name == "ParallelIteratorRef"
-    assert (
-        ".par_iter().filter(|__cw_item| { let row = *__cw_item; "
-        'row.contains("|active|") }).map(|row| row.to_lowercase())'
-        ".collect::<Vec<_>>()" in generated.rust_source
+    filter_closure = filtered.arguments[0]
+    map_closure = mapped.arguments[0]
+    assert isinstance(filter_closure, ClosureIR)
+    assert isinstance(map_closure, ClosureIR)
+    assert filter_closure.rust_parameter is not None
+    assert map_closure.rust_parameter is not None
+    assert re.search(
+        r"\.par_iter\(\)\.filter\(\|(?P<item>__cw_tmp_\d+_[0-9a-f]+)\| "
+        rf"\{{ let {re.escape(filter_closure.rust_parameter)} = \*(?P=item); "
+        rf"{re.escape(filter_closure.rust_parameter)}\.contains\(\"\|active\|\"\) \}}\)"
+        rf"\.map\(\|{re.escape(map_closure.rust_parameter)}\| "
+        rf"{re.escape(map_closure.rust_parameter)}\.to_lowercase\(\)\)"
+        r"\.collect::<Vec<_>>\(\)",
+        generated.rust_source,
     )
     assert ".reduce_with(|left, right| (left + right))" in generated.rust_source

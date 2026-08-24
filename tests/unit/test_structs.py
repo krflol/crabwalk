@@ -56,4 +56,5 @@ def test_structs_lower_to_real_rust_and_move_aware_wrapper(tmp_path: Path) -> No
         in generated.rust_source
     )
     assert f"value: Option<{user.symbol}>" in generated.rust_source
-    assert "#[getter]" in generated.rust_source
+    assert '#[getter("id")]' in generated.rust_source
+    assert "fn get_id(&self)" in generated.rust_source

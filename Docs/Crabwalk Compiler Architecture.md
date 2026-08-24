@@ -11,12 +11,16 @@ UTF-8 source
   -> source.py             parsing, source spans, syntax diagnostics
   -> package_graph.py      reachable native modules and initialization edges
   -> declarations.py       structs, enums, traits, crates, functions, adapters
-  -> frontend.py           symbol collection and typed AST lowering
+  -> signatures.py         resolved callable and dispatch signatures
+  -> frontend.py           pass orchestration and typed scope construction
+  -> lowering/             statement, expression, and pattern AST lowering
   -> bindings.py           BindingId/SymbolId assignment and hygienic Rust names
   -> ownership.py          places, receiver access, moves, and reborrows
   -> effects.py            exhaustive direct effects and call-graph propagation
   -> validation.py         cross-pass ownership/effect/name/ABI invariants
-  -> codegen.py            deterministic native and PyO3 emission
+  -> rust_emission.py      deterministic typed function/body Rust emission
+  -> emission.py           source-mapped writer and backend gensym state
+  -> codegen.py            domain, runtime-support, and PyO3 ABI orchestration
   -> cargo_emission.py     Cargo manifest, build script, dependency identity
   -> rustc/Cargo           authoritative Rust checking and native artifact
 ```
@@ -39,6 +43,16 @@ BindingId  parameters, locals, patterns, closures, fields, variants, methods,
 Each binding retains its Python name and source span for diagnostics. A per-scope
 gensym allocator produces an injective Rust identifier, so Python names cannot
 shadow prelude constructors, runtime support items, or compiler temporaries.
+Value, type, macro, lifetime, and member namespaces are tracked independently.
+Parameters, locals, destructuring and loop targets, closures, patterns, generic
+parameters, lifetimes, struct fields, enum fields/variants, and trait methods all
+carry source and emitted identities. Python-visible domain members retain their
+source spelling through explicit PyO3 names while Rust uses the emitted identity.
+
+Every compiler-injected binding that shares a user-emitted scope is allocated by
+the same backend gensym. Fixed names inside isolated runtime-support functions are
+implementation items rather than user-scope temporaries and are validated in the
+separate generated support namespace.
 
 Types use a tagged algebra rather than optional string fields. Concrete variants
 include primitives, domains, external crate types, generic parameters, lifetimes,
@@ -84,11 +98,12 @@ The public capability table in the language reference is generated from
 `compiler/capabilities.py`. Rust Book chapter coverage is pedagogical coverage,
 not a claim that a language family is complete.
 
-## Incremental decomposition
+## Pass ownership
 
-The compiler is being split along these pass seams without rewriting the working
-pipeline. `frontend.py` remains the orchestration and typed-lowering host while
-source, graph, declaration, ABI, binding, ownership, effect, validation, type, and
-Cargo responsibilities live in independently typed modules. Further expression,
-statement, pattern, and ABI-emission extraction should preserve the immutable IR
-boundary and the existing source-oriented diagnostics.
+The extraction is incremental rather than a rewrite, but the pass boundaries are
+now executable modules rather than roadmap labels. Source/graph discovery,
+declarations, signatures, expression/statement/pattern policies, binding identity,
+ownership, effects, validation, Rust body emission, ABI policy, and Cargo emission
+are independently imported, typed, and tested. `frontend.py` retains stateful scope
+orchestration; `codegen.py` retains final backend composition. Neither owns the
+semantic policies extracted into those passes.

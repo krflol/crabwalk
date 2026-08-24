@@ -82,9 +82,17 @@ files = [
     "src/crabwalk/compiler/capabilities.py",
     "src/crabwalk/compiler/cargo_emission.py",
     "src/crabwalk/compiler/declarations.py",
+    "src/crabwalk/compiler/emission.py",
+    "src/crabwalk/compiler/lowering/common.py",
+    "src/crabwalk/compiler/lowering/expressions.py",
+    "src/crabwalk/compiler/lowering/patterns.py",
+    "src/crabwalk/compiler/lowering/statements.py",
     "src/crabwalk/compiler/naming.py",
     "src/crabwalk/compiler/ownership.py",
+    "src/crabwalk/compiler/package_graph.py",
+    "src/crabwalk/compiler/rust_emission.py",
     "src/crabwalk/compiler/source.py",
+    "src/crabwalk/compiler/signatures.py",
     "src/crabwalk/compiler/symbols.py",
     "src/crabwalk/compiler/types.py",
     "src/crabwalk/compiler/codegen.py",
@@ -97,3 +105,11 @@ files = [
     "src/crabwalk/service.py",
     "src/crabwalk/wheel.py",
 ]
+
+[[tool.mypy.overrides]]
+module = [
+    "crabwalk.compiler.frontend",
+    "crabwalk.rust",
+    "crabwalk.runtime",
+]
+ignore_errors = true

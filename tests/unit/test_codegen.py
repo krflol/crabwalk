@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from crabwalk.compiler.codegen import generate_project
@@ -52,15 +53,20 @@ def validate(value: rust.u64) -> rust.Result[rust.u64, rust.String]:
     generated = generate_project(ir, "_crabwalk_python_result")
     symbol = ir.functions[0].rust_symbol
 
-    assert (
-        f"let __cw_result = __cw_catch_panic(|| __cw_native_{symbol}(value))?;"
-        in generated.rust_source
+    caught = re.search(
+        rf"let (?P<name>__cw_tmp_\d+_[0-9a-f]+) = "
+        rf"__cw_catch_panic\(\|\| __cw_native_{symbol}\(value\)\)\?;",
+        generated.rust_source,
     )
+    assert caught is not None
     assert (
         f"__cw_catch_panic(|| __cw_native_{symbol}(value)?)"
         not in generated.rust_source
     )
-    assert "let __cw_result = __cw_result?;" in generated.rust_source
+    assert re.search(
+        rf"let __cw_tmp_\d+_[0-9a-f]+ = {caught.group('name')}\?;",
+        generated.rust_source,
+    )
     assert (
         '__CwNativeRustResultError::new_err(("rust.String", error.to_string()))'
         in generated.rust_source

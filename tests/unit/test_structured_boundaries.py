@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from crabwalk.compiler.codegen import generate_project
@@ -115,9 +116,17 @@ def test_recursive_owned_vectors_and_owned_returns_have_generated_codecs(
     assert "Vec<Option<u64>>" in generated.rust_source
     assert "Vec<Vec<u8>>" in generated.rust_source
     assert "Vec<PyRef<'_," in generated.rust_source
-    assert "__cw_values.push(__cw_value.clone())" in generated.rust_source
-    assert "value: std::option::Option::Some(__cw_result)" in generated.rust_source
+    assert re.search(
+        r"__cw_tmp_\d+_[0-9a-f]+\.push\("
+        r"__cw_tmp_\d+_[0-9a-f]+\.clone\(\)\)",
+        generated.rust_source,
+    )
+    assert re.search(
+        r"value: std::option::Option::Some\(__cw_tmp_\d+_[0-9a-f]+\)",
+        generated.rust_source,
+    )
     assert "PyRef<'_, __CwOwned_" in generated.rust_source
-    assert "fn address(&self, py: Python<'_>)" in generated.rust_source
+    assert '#[getter("address")]' in generated.rust_source
+    assert "fn get_address(&self, py: Python<'_>)" in generated.rust_source
     assert "fn Home(address: PyRef<'_," in generated.rust_source
     assert ".into_any()" in generated.rust_source

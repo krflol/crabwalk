@@ -5,10 +5,9 @@ from __future__ import annotations
 import ast
 import keyword
 import math
-import re
 import threading
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -24,7 +23,12 @@ from crabwalk.namespaces import (
     STRUCT_FIELD_RESERVED_NAMES,
 )
 
-from .bindings import assign_package_identities
+from .bindings import (
+    assign_enum_identity,
+    assign_package_identities,
+    assign_struct_identity,
+    assign_trait_identity,
+)
 from .abi import (
     enum_field_type_supported as _enum_field_type_supported,
     owned_vector_element_supported as _owned_vector_element_supported,
@@ -40,7 +44,19 @@ from .declarations import (
     is_rust_attribute as _is_rust_attribute,
     is_rust_call_named as _is_rust_call_named,
 )
-from .effects import direct_expression_effects
+from .effects import propagate_effects
+from .lowering.common import (
+    fail as _fail,
+    unsupported as _unsupported,
+    validate_source_binding as _validate_source_binding,
+    validate_unicode_text as _validate_unicode_text,
+)
+from .lowering.expressions import (
+    binary_operator as _binary_operator_decision,
+    integer_fits as _integer_fits,
+)
+from .lowering.patterns import PatternLoweringMixin
+from .lowering.statements import block_returns as _block_returns
 from .ir import (
     BOOL,
     CHAR,
@@ -85,7 +101,6 @@ from .ir import (
     IntLiteralIR,
     LetIR,
     LocalConstIR,
-    MatchIR,
     MethodCallIR,
     NameIR,
     NativePrintlnIR,
@@ -94,8 +109,6 @@ from .ir import (
     PanicIR,
     ParameterIR,
     PassIR,
-    PatternMatchArmIR,
-    PatternMatchIR,
     PythonPrintIR,
     ReturnIR,
     StatementIR,
@@ -114,7 +127,6 @@ from .ir import (
     WhileIR,
 )
 from .naming import (
-    COMPILER_VALUE_PREFIX,
     is_crabwalk_lifetime_parameter,
     is_crabwalk_type_parameter,
     is_rust_2024_identifier,
@@ -132,7 +144,9 @@ from .ownership import (
     place_from_ast as _place_from_ast,
     receiver_access_for_ownership as _receiver_access_for_ownership,
 )
+from .source import attribute_parts as _attribute_parts
 from .source import parse_source
+from .signatures import Signature as _Signature
 from .types import ExternalType, IteratorExecution, IteratorItemMode, IteratorType
 
 _ANALYSIS_CACHE_LIMIT = 64
@@ -187,29 +201,6 @@ _GENERIC_ARITY = {
 }
 
 
-@dataclass(frozen=True, slots=True)
-class _Signature:
-    name: str
-    parameters: tuple[ParameterIR, ...]
-    return_type: TypeRef
-    node: ast.FunctionDef | ast.AsyncFunctionDef
-    module_name: str = ""
-    symbol: str = ""
-    type_parameters: tuple[TypeParameterIR, ...] = ()
-    exported: bool = True
-    is_async: bool = False
-    method_name: str | None = None
-    method_for: TypeRef | None = None
-    trait_symbol: str | None = None
-    operator_kind: str | None = None
-    external_path: tuple[str, ...] | None = None
-    external_effects: tuple[Effect, ...] | None = None
-
-    @property
-    def rust_symbol(self) -> str:
-        return self.symbol or self.name
-
-
 def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     """Analyze one Python module without importing or executing it."""
 
@@ -247,6 +238,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
         identity,
         lambda name: mangle_item(identity, name, namespace="type"),
     )
+    traits = {name: assign_trait_identity(value) for name, value in traits.items()}
     if not declarations and not struct_nodes and not enum_nodes and not traits:
         raise CrabwalkCompilationError(
             Diagnostic(
@@ -302,22 +294,26 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
             )
         domain_types[name] = type_ref
     structs = {
-        node.name: _analyze_struct(
-            node,
-            struct_placeholders[node.name],
-            source_path,
-            domain_types,
-            crates,
+        node.name: assign_struct_identity(
+            _analyze_struct(
+                node,
+                struct_placeholders[node.name],
+                source_path,
+                domain_types,
+                crates,
+            )
         )
         for node in struct_nodes
     }
     enums = {
-        node.name: _analyze_enum(
-            node,
-            enum_placeholders[node.name],
-            source_path,
-            domain_types,
-            crates,
+        node.name: assign_enum_identity(
+            _analyze_enum(
+                node,
+                enum_placeholders[node.name],
+                source_path,
+                domain_types,
+                crates,
+            )
         )
         for node in enum_nodes
     }
@@ -352,7 +348,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
                 SourceSpan.from_ast(source_path, tree),
             )
         )
-    functions = _propagate_effects(functions)
+    functions = propagate_effects(functions)
     source_graph = single_file_source_graph(source_path)
     return assign_package_identities(
         PackageIR(
@@ -767,22 +763,26 @@ def _analyze_regular_package(
             if isinstance(value, CrateIR)
         }
         analyzed_structs = {
-            local_name: _analyze_struct(
-                module.struct_nodes[local_name],
-                placeholder,
-                module.path,
-                domain_types,
-                visible_crates,
+            local_name: assign_struct_identity(
+                _analyze_struct(
+                    module.struct_nodes[local_name],
+                    placeholder,
+                    module.path,
+                    domain_types,
+                    visible_crates,
+                )
             )
             for local_name, placeholder in module.structs.items()
         }
         analyzed_enums = {
-            local_name: _analyze_enum(
-                module.enum_nodes[local_name],
-                placeholder,
-                module.path,
-                domain_types,
-                visible_crates,
+            local_name: assign_enum_identity(
+                _analyze_enum(
+                    module.enum_nodes[local_name],
+                    placeholder,
+                    module.path,
+                    domain_types,
+                    visible_crates,
+                )
             )
             for local_name, placeholder in module.enums.items()
         }
@@ -811,6 +811,12 @@ def _analyze_regular_package(
                 symbol=_package_rust_symbol(name, declaration.name),
             )
             for declaration in module.declarations.values()
+        }
+
+    for module in modules.values():
+        module.traits = {
+            local_name: assign_trait_identity(value)
+            for local_name, value in module.traits.items()
         }
 
     final_structs_by_symbol = {
@@ -985,7 +991,7 @@ def _analyze_regular_package(
             )
         )
 
-    functions_tuple = _propagate_effects(tuple(functions))
+    functions_tuple = propagate_effects(tuple(functions))
     source_paths: list[str] = []
     for name in sorted(modules):
         module = modules[name]
@@ -1256,7 +1262,7 @@ def _package_crate_binding(
     return mangle_dependency(module_name, local_name)
 
 
-class _FunctionLowerer:
+class _FunctionLowerer(PatternLoweringMixin):
     def __init__(
         self,
         node: ast.FunctionDef | ast.AsyncFunctionDef,
@@ -1495,7 +1501,7 @@ class _FunctionLowerer:
                 value = self._lower_expression(node.value, environment, field.type_ref)
                 return FieldAssignIR(
                     receiver,
-                    target.attr,
+                    field.rust_name,
                     value,
                     SourceSpan.from_ast(self.path, node),
                 )
@@ -2056,7 +2062,7 @@ class _FunctionLowerer:
                 )
             if expected is not None:
                 _require_type(field.type_ref, expected, self.path, node)
-            return FieldAccessIR(receiver, node.attr, field.type_ref, span)
+            return FieldAccessIR(receiver, field.rust_name, field.type_ref, span)
 
         if isinstance(node, ast.UnaryOp):
             if isinstance(node.op, ast.Not):
@@ -2476,7 +2482,7 @@ class _FunctionLowerer:
         nodes_by_name = dict(supplied)
         arguments = tuple(
             (
-                field.name,
+                field.rust_name,
                 self._lower_expression(
                     nodes_by_name[field.name],
                     environment,
@@ -2533,7 +2539,7 @@ class _FunctionLowerer:
         nodes = dict(supplied)
         arguments = tuple(
             (
-                field.name,
+                field.rust_name,
                 self._lower_expression(nodes[field.name], environment, field.type_ref),
             )
             for field in variant.fields
@@ -2542,465 +2548,12 @@ class _FunctionLowerer:
             _require_type(enum.type_ref, expected, self.path, node)
         return EnumConstructorIR(
             enum.symbol,
-            variant.name,
+            variant.rust_name,
             arguments,
             variant.tuple_style,
             enum.type_ref,
             SourceSpan.from_ast(self.path, node),
         )
-
-    def _lower_match(
-        self,
-        node: ast.Match,
-        environment: dict[str, TypeRef],
-    ) -> PatternMatchIR:
-        subject = self._lower_expression(node.subject, environment)
-        arms: list[PatternMatchArmIR] = []
-        for case in node.cases:
-            pattern, bindings = self._lower_general_pattern(
-                case.pattern,
-                subject.type_ref,
-            )
-            arm_environment = dict(environment)
-            arm_environment.update(bindings)
-            guard = (
-                self._lower_expression(case.guard, arm_environment, BOOL)
-                if case.guard is not None
-                else None
-            )
-            body = self._lower_block(case.body, arm_environment)
-            arms.append(
-                PatternMatchArmIR(
-                    pattern,
-                    tuple(bindings.items()),
-                    guard,
-                    body,
-                    SourceSpan.from_ast(self.path, case.pattern),
-                )
-            )
-        borrowed = isinstance(node.subject, ast.Name) and self.parameter_ownership.get(
-            node.subject.id
-        ) in {"Ref", "Mut"}
-        return PatternMatchIR(
-            subject,
-            subject.type_ref,
-            borrowed,
-            tuple(arms),
-            SourceSpan.from_ast(self.path, node),
-        )
-
-    def _lower_general_pattern(
-        self,
-        pattern: ast.pattern,
-        expected: TypeRef,
-    ) -> tuple[str, dict[str, TypeRef]]:
-        if isinstance(pattern, ast.MatchAs):
-            if pattern.name is not None:
-                _validate_source_binding(
-                    pattern.name,
-                    self.path,
-                    pattern,
-                    "pattern binding",
-                )
-            if pattern.pattern is None:
-                if pattern.name is None:
-                    return "_", {}
-                return pattern.name, {pattern.name: expected}
-            rendered, bindings = self._lower_general_pattern(pattern.pattern, expected)
-            if pattern.name is None:
-                return rendered, bindings
-            if pattern.name in bindings:
-                _fail(
-                    "CRAB192",
-                    "Duplicate pattern binding",
-                    f"'{pattern.name}' is bound more than once.",
-                    self.path,
-                    pattern,
-                )
-            return f"{pattern.name} @ ({rendered})", {
-                **bindings,
-                pattern.name: expected,
-            }
-
-        if isinstance(pattern, ast.MatchOr):
-            lowered = [
-                self._lower_general_pattern(value, expected)
-                for value in pattern.patterns
-            ]
-            first_bindings = lowered[0][1]
-            if any(bindings != first_bindings for _, bindings in lowered[1:]):
-                _fail(
-                    "CRAB192",
-                    "Or-pattern bindings differ",
-                    "Every side of a Rust or-pattern must bind the same names and types.",
-                    self.path,
-                    pattern,
-                )
-            return " | ".join(value for value, _ in lowered), first_bindings
-
-        if isinstance(pattern, ast.MatchSingleton):
-            if pattern.value is None and expected.rust_name == "Option":
-                return "std::option::Option::None", {}
-            if isinstance(pattern.value, bool) and expected == BOOL:
-                return ("true" if pattern.value else "false"), {}
-            _unsupported(
-                pattern,
-                self.path,
-                "This singleton pattern does not match the subject type.",
-            )
-
-        if isinstance(pattern, ast.MatchValue):
-            if isinstance(pattern.value, ast.Constant):
-                return self._render_pattern_literal(
-                    pattern.value.value, expected, pattern
-                ), {}
-            if (
-                isinstance(pattern.value, ast.UnaryOp)
-                and isinstance(pattern.value.op, ast.USub)
-                and isinstance(pattern.value.operand, ast.Constant)
-            ):
-                value = pattern.value.operand.value
-                if type(value) is int and expected.is_signed_integer:
-                    return str(-value), {}
-            enum = self.enums_by_symbol.get(expected.rust_name)
-            if enum is not None:
-                variant = self._enum_pattern_variant(
-                    _attribute_parts(pattern.value),
-                    enum,
-                    pattern,
-                )
-                if variant.fields:
-                    _fail(
-                        "CRAB192",
-                        "Payload enum variant needs a class pattern",
-                        f"Match {variant.name} with its payload fields.",
-                        self.path,
-                        pattern,
-                    )
-                return f"{enum.symbol}::{variant.name}", {}
-            _unsupported(
-                pattern, self.path, "Use a literal or a visible unit enum variant."
-            )
-
-        if isinstance(pattern, ast.MatchSequence):
-            if expected.rust_name != "Tuple":
-                _fail(
-                    "CRAB192",
-                    "Sequence pattern requires a Rust tuple",
-                    f"Found {expected.display()}.",
-                    self.path,
-                    pattern,
-                )
-            stars = [
-                index
-                for index, value in enumerate(pattern.patterns)
-                if isinstance(value, ast.MatchStar)
-            ]
-            if len(stars) > 1:
-                _unsupported(
-                    pattern, self.path, "A tuple pattern can contain one rest pattern."
-                )
-            if not stars and len(pattern.patterns) != len(expected.arguments):
-                _fail(
-                    "CRAB192",
-                    "Tuple pattern length mismatch",
-                    f"Expected {len(expected.arguments)} elements.",
-                    self.path,
-                    pattern,
-                )
-            if stars and len(pattern.patterns) - 1 > len(expected.arguments):
-                _fail(
-                    "CRAB192",
-                    "Tuple rest pattern is too long",
-                    f"The subject has {len(expected.arguments)} elements.",
-                    self.path,
-                    pattern,
-                )
-            rendered_values: list[str] = []
-            bindings: dict[str, TypeRef] = {}
-            star_index = stars[0] if stars else None
-            for index, child in enumerate(pattern.patterns):
-                if isinstance(child, ast.MatchStar):
-                    if child.name is not None:
-                        _unsupported(
-                            child, self.path, "Named tuple rest bindings are deferred."
-                        )
-                    rendered_values.append("..")
-                    continue
-                type_index = (
-                    index
-                    if star_index is None or index < star_index
-                    else len(expected.arguments) - (len(pattern.patterns) - index)
-                )
-                rendered, child_bindings = self._lower_general_pattern(
-                    child,
-                    expected.arguments[type_index],
-                )
-                self._merge_pattern_bindings(bindings, child_bindings, child)
-                rendered_values.append(rendered)
-            values = ", ".join(rendered_values)
-            return f"({values}{',' if len(rendered_values) == 1 else ''})", bindings
-
-        if isinstance(pattern, ast.MatchClass):
-            path = _attribute_parts(pattern.cls)
-            if path == ("rust", "Range"):
-                if pattern.kwd_patterns or len(pattern.patterns) != 2:
-                    _unsupported(
-                        pattern, self.path, "rust.Range needs two positional literals."
-                    )
-                low, low_bindings = self._lower_general_pattern(
-                    pattern.patterns[0], expected
-                )
-                high, high_bindings = self._lower_general_pattern(
-                    pattern.patterns[1], expected
-                )
-                if low_bindings or high_bindings:
-                    _unsupported(
-                        pattern, self.path, "Range endpoints must be literals."
-                    )
-                return f"{low}..={high}", {}
-
-            if expected.rust_name == "Option" and path == ("rust", "Some"):
-                if pattern.kwd_patterns or len(pattern.patterns) != 1:
-                    _unsupported(
-                        pattern, self.path, "rust.Some patterns take one payload."
-                    )
-                rendered, bindings = self._lower_general_pattern(
-                    pattern.patterns[0],
-                    expected.arguments[0],
-                )
-                return f"std::option::Option::Some({rendered})", bindings
-
-            if expected.rust_name == "Result" and path in {
-                ("rust", "Ok"),
-                ("rust", "Err"),
-            }:
-                if pattern.kwd_patterns or len(pattern.patterns) != 1:
-                    _unsupported(
-                        pattern,
-                        self.path,
-                        "rust.Ok and rust.Err patterns take one payload.",
-                    )
-                index = 0 if path == ("rust", "Ok") else 1
-                rendered, bindings = self._lower_general_pattern(
-                    pattern.patterns[0],
-                    expected.arguments[index],
-                )
-                constructor = "Ok" if index == 0 else "Err"
-                return f"std::result::Result::{constructor}({rendered})", bindings
-
-            enum = self.enums_by_symbol.get(expected.rust_name)
-            if enum is not None:
-                variant = self._enum_pattern_variant(path, enum, pattern)
-                return self._lower_domain_pattern(
-                    pattern,
-                    f"{enum.symbol}::{variant.name}",
-                    variant.fields,
-                    variant.tuple_style,
-                )
-
-            struct = self.structs_by_symbol.get(expected.rust_name)
-            visible_struct = self.domain_structs.get(".".join(path))
-            if (
-                struct is not None
-                and visible_struct is not None
-                and visible_struct.symbol == struct.symbol
-            ):
-                return self._lower_domain_pattern(
-                    pattern,
-                    struct.symbol,
-                    struct.fields,
-                    False,
-                )
-            _unsupported(
-                pattern,
-                self.path,
-                "Use a matching struct, enum, Option, Result, or rust.Range pattern.",
-            )
-
-        _unsupported(
-            pattern, self.path, "This Python pattern has no Crabwalk Rust lowering yet."
-        )
-
-    def _lower_domain_pattern(
-        self,
-        pattern: ast.MatchClass,
-        rust_path: str,
-        fields: tuple[StructFieldIR, ...],
-        tuple_style: bool,
-    ) -> tuple[str, dict[str, TypeRef]]:
-        bindings: dict[str, TypeRef] = {}
-        if tuple_style:
-            if pattern.kwd_patterns or len(pattern.patterns) != len(fields):
-                _fail(
-                    "CRAB192",
-                    "Tuple-style pattern shape mismatch",
-                    f"{rust_path} has {len(fields)} positional fields.",
-                    self.path,
-                    pattern,
-                )
-            rendered_values: list[str] = []
-            for child, field in zip(pattern.patterns, fields):
-                rendered, child_bindings = self._lower_general_pattern(
-                    child,
-                    field.type_ref,
-                )
-                self._merge_pattern_bindings(bindings, child_bindings, child)
-                rendered_values.append(rendered)
-            return f"{rust_path}({', '.join(rendered_values)})", bindings
-
-        if pattern.patterns or len(set(pattern.kwd_attrs)) != len(pattern.kwd_attrs):
-            _unsupported(pattern, self.path, "Record patterns use unique named fields.")
-        fields_by_name = {field.name: field for field in fields}
-        if any(name not in fields_by_name for name in pattern.kwd_attrs):
-            _fail(
-                "CRAB192",
-                "Unknown record pattern field",
-                f"{rust_path} fields: {', '.join(fields_by_name)}.",
-                self.path,
-                pattern,
-            )
-        rendered_fields: list[str] = []
-        for name, child in zip(pattern.kwd_attrs, pattern.kwd_patterns):
-            rendered, child_bindings = self._lower_general_pattern(
-                child,
-                fields_by_name[name].type_ref,
-            )
-            self._merge_pattern_bindings(bindings, child_bindings, child)
-            rendered_fields.append(f"{name}: {rendered}")
-        if len(rendered_fields) < len(fields):
-            rendered_fields.append("..")
-        return f"{rust_path} {{ {', '.join(rendered_fields)} }}", bindings
-
-    def _merge_pattern_bindings(
-        self,
-        destination: dict[str, TypeRef],
-        incoming: dict[str, TypeRef],
-        node: ast.AST,
-    ) -> None:
-        duplicate = destination.keys() & incoming.keys()
-        if duplicate:
-            _fail(
-                "CRAB192",
-                "Duplicate pattern binding",
-                f"Bound more than once: {', '.join(sorted(duplicate))}.",
-                self.path,
-                node,
-            )
-        destination.update(incoming)
-
-    def _render_pattern_literal(
-        self,
-        value: object,
-        expected: TypeRef,
-        node: ast.AST,
-    ) -> str:
-        if isinstance(value, str):
-            _validate_unicode_text(value, self.path, node)
-        if type(value) is int and expected.is_integer:
-            if not _integer_fits(int(value), expected):
-                _fail(
-                    "CRAB111",
-                    f"Integer does not fit {expected.display()}",
-                    f"The pattern literal {value!r} is out of range.",
-                    self.path,
-                    node,
-                )
-            return str(value)
-        if isinstance(value, str) and expected == CHAR and len(value) == 1:
-            return _rust_pattern_char(value)
-        if isinstance(value, bool) and expected == BOOL:
-            return "true" if value else "false"
-        _fail(
-            "CRAB192",
-            "Pattern literal type mismatch",
-            f"{value!r} cannot pattern-match {expected.display()}.",
-            self.path,
-            node,
-        )
-
-    def _lower_match_pattern(
-        self,
-        pattern: ast.pattern,
-        enum: EnumIR,
-    ) -> tuple[str | None, tuple[tuple[str, str], ...], bool]:
-        if isinstance(pattern, ast.MatchAs) and pattern.name is None:
-            return None, (), False
-        if isinstance(pattern, ast.MatchValue):
-            path = _attribute_parts(pattern.value)
-            variant = self._enum_pattern_variant(path, enum, pattern)
-            if variant.fields:
-                _fail(
-                    "CRAB168",
-                    "Payload enum variant needs a class pattern",
-                    f"Match {variant.name} with field patterns.",
-                    self.path,
-                    pattern,
-                )
-            return variant.name, (), variant.tuple_style
-        if isinstance(pattern, ast.MatchClass):
-            path = _attribute_parts(pattern.cls)
-            variant = self._enum_pattern_variant(path, enum, pattern)
-            bindings: list[tuple[str, str]] = []
-            if variant.tuple_style:
-                if pattern.kwd_patterns or len(pattern.patterns) != len(variant.fields):
-                    _fail(
-                        "CRAB168",
-                        "Enum tuple pattern does not match payload",
-                        f"{variant.name} has {len(variant.fields)} positional fields.",
-                        self.path,
-                        pattern,
-                    )
-                pairs = zip((field.name for field in variant.fields), pattern.patterns)
-            else:
-                if pattern.patterns or set(pattern.kwd_attrs) != {
-                    field.name for field in variant.fields
-                }:
-                    _fail(
-                        "CRAB168",
-                        "Enum record pattern does not match payload",
-                        f"{variant.name} fields: {', '.join(field.name for field in variant.fields)}.",
-                        self.path,
-                        pattern,
-                    )
-                pairs = zip(pattern.kwd_attrs, pattern.kwd_patterns)
-            for field_name, field_pattern in pairs:
-                if (
-                    not isinstance(field_pattern, ast.MatchAs)
-                    or field_pattern.pattern is not None
-                ):
-                    _unsupported(
-                        field_pattern,
-                        self.path,
-                        "Enum payload patterns support captures and _ only.",
-                    )
-                bindings.append((field_name, field_pattern.name or ""))
-            return variant.name, tuple(bindings), variant.tuple_style
-        _unsupported(pattern, self.path, "Use enum variant patterns or _.")
-
-    def _enum_pattern_variant(
-        self,
-        path: tuple[str, ...],
-        enum: EnumIR,
-        node: ast.AST,
-    ) -> EnumVariantIR:
-        if len(path) < 2:
-            _unsupported(node, self.path, "Enum patterns must be Type.Variant.")
-        visible = self.domain_enums.get(".".join(path[:-1]))
-        variant = (
-            next((value for value in enum.variants if value.name == path[-1]), None)
-            if visible is not None and visible.symbol == enum.symbol
-            else None
-        )
-        if variant is None:
-            _fail(
-                "CRAB169",
-                "Pattern variant does not belong to subject enum",
-                ".".join(path),
-                self.path,
-                node,
-            )
-        return variant
 
     def _lower_call_argument(
         self,
@@ -3328,7 +2881,7 @@ class _FunctionLowerer:
             return TraitCallIR(
                 trait_type.python_name,
                 receiver.type_ref,
-                method_name,
+                method.rust_name,
                 receiver,
                 method.return_type,
                 span,
@@ -6456,18 +6009,6 @@ def _crate_path(
     return None
 
 
-def _attribute_parts(node: ast.expr) -> tuple[str, ...]:
-    parts: list[str] = []
-    current = node
-    while isinstance(current, ast.Attribute):
-        parts.append(current.attr)
-        current = current.value
-    if isinstance(current, ast.Name):
-        parts.append(current.id)
-        return tuple(reversed(parts))
-    return ()
-
-
 def _assignment_counts(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> Counter[str]:
@@ -6597,255 +6138,10 @@ def _peek_expression_type(
 
 
 def _binary_operator(node: ast.operator, path: Path) -> str:
-    mapping = {
-        ast.Add: "add",
-        ast.Sub: "subtract",
-        ast.Mult: "multiply",
-        ast.Div: "divide",
-        ast.Mod: "remainder",
-    }
-    operator = mapping.get(type(node))
+    operator = _binary_operator_decision(node)
     if operator is None:
         _unsupported(node, path)
     return operator
-
-
-def _integer_fits(value: int, type_ref: TypeRef) -> bool:
-    if type_ref.rust_name == "usize":
-        return 0 <= value <= (1 << 64) - 1
-    match = re.fullmatch(r"([iu])(8|16|32|64|128)", type_ref.rust_name)
-    if match is None:
-        return False
-    signed = match.group(1) == "i"
-    bits = int(match.group(2))
-    if signed:
-        return -(1 << (bits - 1)) <= value <= (1 << (bits - 1)) - 1
-    return 0 <= value <= (1 << bits) - 1
-
-
-def _block_returns(statements: tuple[StatementIR, ...]) -> bool:
-    for statement in statements:
-        if isinstance(statement, ReturnIR):
-            return True
-        if (
-            isinstance(statement, IfIR)
-            and statement.otherwise
-            and _block_returns(statement.body)
-            and _block_returns(statement.otherwise)
-        ):
-            return True
-        if (
-            isinstance(statement, (MatchIR, PatternMatchIR))
-            and statement.arms
-            and all(_block_returns(arm.body) for arm in statement.arms)
-        ):
-            return True
-    return False
-
-
-_EFFECT_ORDER = (
-    Effect.NATIVE_RUST,
-    Effect.CONVERSION_BOUNDARY,
-    Effect.OPAQUE_CRATE_CALL,
-    Effect.PYTHON_RUNTIME,
-    Effect.BLOCKING,
-    Effect.THREAD_SPAWN,
-    Effect.GLOBAL_MUTATION,
-    Effect.UNSAFE_MEMORY,
-    Effect.UNSAFE_FFI,
-    Effect.MAY_PANIC,
-)
-
-
-def _propagate_effects(functions: tuple[FunctionIR, ...]) -> tuple[FunctionIR, ...]:
-    """Infer semantic effects and propagate native-call effects transitively."""
-
-    from .validation import validate_function_symbol_identity
-
-    validate_function_symbol_identity(functions)
-
-    direct: dict[str, set[Effect]] = {
-        function.rust_symbol: _direct_function_effects(function)
-        for function in functions
-    }
-    calls: dict[str, set[str]] = {
-        function.rust_symbol: _statement_calls(function.body) for function in functions
-    }
-    changed = True
-    while changed:
-        changed = False
-        for name, targets in calls.items():
-            inherited = {
-                effect
-                for target in targets
-                for effect in direct.get(target, ())
-                if effect not in {Effect.NATIVE_RUST, Effect.CONVERSION_BOUNDARY}
-            }
-            expanded = direct[name] | inherited
-            if expanded != direct[name]:
-                direct[name] = expanded
-                changed = True
-    values: list[FunctionIR] = []
-    for function in functions:
-        effects = tuple(
-            effect for effect in _EFFECT_ORDER if effect in direct[function.rust_symbol]
-        )
-        values.append(
-            replace(
-                function,
-                python_boundary=Effect.PYTHON_RUNTIME in effects,
-                effects=effects,
-            )
-        )
-    return tuple(values)
-
-
-def _direct_function_effects(function: FunctionIR) -> set[Effect]:
-    effects = {Effect.NATIVE_RUST}
-    if function.parameters or function.return_type != UNIT:
-        effects.add(Effect.CONVERSION_BOUNDARY)
-    for statement in function.body:
-        for expression in _statement_expressions(statement):
-            effects.update(_expression_effects(expression))
-    return effects
-
-
-def _expression_effects(expression: ExpressionIR) -> set[Effect]:
-    return set(direct_expression_effects(expression))
-
-
-def _statement_calls(statements: tuple[StatementIR, ...]) -> set[str]:
-    return {
-        target
-        for statement in statements
-        for value in _statement_expressions(statement)
-        for target in _expression_dispatch_targets(value)
-    }
-
-
-def _expression_dispatch_targets(expression: ExpressionIR) -> tuple[str, ...]:
-    if isinstance(expression, CallIR):
-        return (expression.target,)
-    if isinstance(expression, MethodCallIR):
-        values = expression.dispatch_targets
-        if (
-            expression.target_symbol is not None
-            and expression.target_symbol not in values
-        ):
-            values = (expression.target_symbol, *values)
-        return values
-    if isinstance(expression, TraitCallIR) and expression.target_symbol is not None:
-        return (expression.target_symbol,)
-    if isinstance(expression, FunctionPointerTwiceIR):
-        return (expression.target,)
-    if isinstance(expression, BinaryIR) and expression.target_symbol is not None:
-        return (expression.target_symbol,)
-    return ()
-
-
-def _statement_expressions(statement: StatementIR) -> tuple[ExpressionIR, ...]:
-    values: list[ExpressionIR] = []
-
-    def visit_expression(expression: ExpressionIR) -> None:
-        values.append(expression)
-        if isinstance(expression, UnaryIR):
-            visit_expression(expression.operand)
-        elif isinstance(expression, BorrowIR):
-            visit_expression(expression.value)
-        elif isinstance(expression, (BinaryIR, CompareIR)):
-            visit_expression(expression.left)
-            visit_expression(expression.right)
-        elif isinstance(expression, (TupleLiteralIR, ArrayLiteralIR)):
-            for value in expression.values:
-                visit_expression(value)
-        elif isinstance(expression, IndexIR):
-            visit_expression(expression.receiver)
-            visit_expression(expression.index)
-        elif isinstance(expression, (CallIR, CrateCallIR, ConstructorIR)):
-            for argument in expression.arguments:
-                visit_expression(argument)
-        elif isinstance(expression, StructConstructorIR):
-            for _, argument in expression.arguments:
-                visit_expression(argument)
-        elif isinstance(expression, EnumConstructorIR):
-            for _, argument in expression.arguments:
-                visit_expression(argument)
-        elif isinstance(expression, FieldAccessIR):
-            visit_expression(expression.receiver)
-        elif isinstance(expression, MethodCallIR):
-            visit_expression(expression.receiver)
-            for argument in expression.arguments:
-                visit_expression(argument)
-        elif isinstance(expression, TraitCallIR):
-            visit_expression(expression.receiver)
-        elif isinstance(expression, FunctionPointerTwiceIR):
-            visit_expression(expression.argument)
-        elif isinstance(expression, (NativePrintlnIR, PythonPrintIR)):
-            visit_expression(expression.value)
-        elif isinstance(expression, (TryIR, AwaitIR)):
-            visit_expression(expression.value)
-        elif isinstance(expression, PanicIR):
-            visit_expression(expression.message)
-        elif isinstance(expression, ClosureIR):
-            visit_expression(expression.body)
-
-    if isinstance(statement, ReturnIR) and statement.value is not None:
-        visit_expression(statement.value)
-    elif isinstance(statement, FieldAssignIR):
-        visit_expression(statement.receiver)
-        visit_expression(statement.value)
-    elif isinstance(
-        statement,
-        (LetIR, AssignIR, DestructureIR, LocalConstIR, ExpressionStatementIR),
-    ):
-        visit_expression(statement.value)
-    elif isinstance(statement, IfIR):
-        visit_expression(statement.condition)
-        for child in (*statement.body, *statement.otherwise):
-            values.extend(_statement_expressions(child))
-    elif isinstance(statement, WhileIR):
-        visit_expression(statement.condition)
-        for child in statement.body:
-            values.extend(_statement_expressions(child))
-    elif isinstance(statement, ForRangeIR):
-        visit_expression(statement.start)
-        visit_expression(statement.stop)
-        for child in statement.body:
-            values.extend(_statement_expressions(child))
-    elif isinstance(statement, ForEachIR):
-        visit_expression(statement.iterator)
-        for child in statement.body:
-            values.extend(_statement_expressions(child))
-    elif isinstance(statement, MatchIR):
-        visit_expression(statement.subject)
-        for arm in statement.arms:
-            for child in arm.body:
-                values.extend(_statement_expressions(child))
-    elif isinstance(statement, PatternMatchIR):
-        visit_expression(statement.subject)
-        for arm in statement.arms:
-            if arm.guard is not None:
-                visit_expression(arm.guard)
-            for child in arm.body:
-                values.extend(_statement_expressions(child))
-    return tuple(values)
-
-
-def _rust_pattern_char(value: str) -> str:
-    character = value[0]
-    escapes = {
-        "'": "\\'",
-        "\\": "\\\\",
-        "\n": "\\n",
-        "\r": "\\r",
-        "\t": "\\t",
-        "\0": "\\0",
-    }
-    escaped = escapes.get(character)
-    if escaped is None:
-        code = ord(character)
-        escaped = f"\\u{{{code:x}}}" if code < 0x20 or code == 0x7F else character
-    return f"'{escaped}'"
 
 
 def _require_type(
@@ -6962,93 +6258,3 @@ def _require_integer(type_ref: TypeRef, path: Path, node: ast.AST) -> None:
             path,
             node,
         )
-
-
-def _unsupported(
-    node: ast.AST,
-    path: Path,
-    help_text: str | None = None,
-) -> None:
-    _fail(
-        "CRAB102",
-        "Unsupported construct in @rust.fn",
-        f"{type(node).__name__} cannot be lowered by the active compiler.",
-        path,
-        node,
-        help_text or "Move it outside @rust.fn or use a supported Rust equivalent.",
-    )
-
-
-def _validate_source_binding(
-    name: str,
-    path: Path,
-    node: ast.AST,
-    kind: str,
-    *,
-    reserved: Collection[str] | None = None,
-    rust_namespace: Literal["value", "member"] = "value",
-) -> None:
-    reserved = reserved or ()
-    directly_emitted = rust_namespace == "member"
-    prelude_collision = False
-    if (
-        not name.isidentifier()
-        or keyword.iskeyword(name)
-        or (directly_emitted and not is_rust_2024_identifier(name))
-        or (directly_emitted and name.startswith(COMPILER_VALUE_PREFIX))
-        or name in reserved
-        or prelude_collision
-    ):
-        reason = (
-            "a compiler-reserved __cw_ name"
-            if directly_emitted and name.startswith(COMPILER_VALUE_PREFIX)
-            else "a Rust prelude constructor in the value namespace"
-            if prelude_collision
-            else "a generated or runtime-reserved Python member"
-            if name in reserved
-            else "an unsupported identifier in this emitted namespace"
-        )
-        _fail(
-            "CRAB210",
-            "Unsupported Rust binding name",
-            f"The {kind} name '{name}' is {reason}.",
-            path,
-            node,
-            (
-                "Choose a valid Python identifier that does not overlap the "
-                "generated Python wrapper API for this declaration."
-            ),
-        )
-
-
-def _validate_unicode_text(value: str, path: Path, node: ast.AST) -> None:
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
-        _fail(
-            "CRAB212",
-            "String is not valid Unicode scalar text",
-            "Rust strings and chars cannot contain an escaped lone surrogate.",
-            path,
-            node,
-            "Replace the surrogate with a Unicode scalar value or ordinary text.",
-        )
-
-
-def _fail(
-    code: str,
-    title: str,
-    message: str,
-    path: Path,
-    node: ast.AST,
-    help_text: str | None = None,
-) -> None:
-    raise CrabwalkCompilationError(
-        Diagnostic(
-            code,
-            title,
-            message,
-            SourceSpan.from_ast(path, node),
-            help_text,
-        )
-    )

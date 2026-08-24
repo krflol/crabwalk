@@ -2,7 +2,7 @@ from pathlib import Path
 
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_path
-from crabwalk.compiler.ir import ForEachIR, MethodCallIR, ReturnIR
+from crabwalk.compiler.ir import ClosureIR, ForEachIR, MethodCallIR, ReturnIR
 from crabwalk.compiler.types import (
     IteratorExecution,
     IteratorItemMode,
@@ -110,9 +110,16 @@ def test_non_copy_iterator_pipeline_is_typed_by_execution_and_item_mode(
     assert isinstance(filtered.type_ref, IteratorType)
     assert filtered.type_ref.execution == IteratorExecution.SEQUENTIAL
     assert filtered.type_ref.item_mode == IteratorItemMode.SHARED_REF
+    mapped = collected.receiver
+    assert isinstance(mapped, MethodCallIR)
+    map_closure = mapped.arguments[0]
+    assert isinstance(map_closure, ClosureIR)
+    assert map_closure.rust_parameter is not None
     assert ".iter().filter(" in generated.rust_source
-    assert ".map(|row| row.to_lowercase()).collect::<Vec<_>>()" in (
-        generated.rust_source
+    assert (
+        f".map(|{map_closure.rust_parameter}| "
+        f"{map_closure.rust_parameter}.to_lowercase()).collect::<Vec<_>>()"
+        in generated.rust_source
     )
     assert ".cloned().collect::<Vec<_>>()" in generated.rust_source
     assert '.any(|row| row.contains("|active|"))' in generated.rust_source

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -156,8 +157,12 @@ def identity(py: rust.u64) -> rust.u64:
 
     generated = generate_project(analyze_path(source), "_crabwalk_py_parameter")
 
-    assert "__cw_py: Python<'_>, py: u64" in generated.rust_source
-    assert "__cw_py.detach" in generated.rust_source
+    token = re.search(
+        r"(?P<name>__cw_tmp_\d+_[0-9a-f]+): Python<'_>, py: u64",
+        generated.rust_source,
+    )
+    assert token is not None
+    assert f"{token.group('name')}.detach" in generated.rust_source
 
 
 @pytest.mark.parametrize(

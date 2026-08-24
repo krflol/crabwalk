@@ -314,7 +314,10 @@ def test_reserved_2024_name_fails_in_each_source_binding_family(
         "closure parameter",
         "pattern binding",
         "struct name",
+        "struct field",
         "enum name",
+        "enum variant",
+        "enum payload field",
         "trait name",
         "type parameter",
         "lifetime parameter",
@@ -475,8 +478,11 @@ def identity(value: rust.u64) -> rust.u64:
     ir = analyze_path(source)
     generated = generate_project(ir, "_crabwalk_qualified_variant")
 
-    assert ir.enums[0].variants[0].name == "Ok"
-    assert f"{ir.enums[0].symbol}::Ok" in generated.rust_source
+    variant = ir.enums[0].variants[0]
+    assert variant.name == "Ok"
+    assert variant.rust_name != variant.name
+    assert f"{ir.enums[0].symbol}::{variant.rust_name}" in generated.rust_source
+    assert '#[pyo3(name = "Ok")]' in generated.rust_source
 
 
 @pytest.mark.parametrize(
