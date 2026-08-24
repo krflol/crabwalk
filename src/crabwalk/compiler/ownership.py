@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal, TypeAlias
 
+from crabwalk.diagnostics import SourceSpan
+
 from .ir import TypeRef
+from .types import IteratorType
 
 ReceiverAccess: TypeAlias = Literal["shared", "mutable", "owned", "interior"]
 
@@ -15,6 +19,32 @@ ReceiverAccess: TypeAlias = Literal["shared", "mutable", "owned", "interior"]
 class Place:
     root: str
     projections: tuple[str, ...] = ()
+
+
+class LocalStorage(StrEnum):
+    """Whether a semantic local can inhabit an ordinary named Rust slot."""
+
+    NAMEABLE = "nameable"
+    OPAQUE = "opaque"
+
+
+@dataclass(slots=True)
+class LocalState:
+    semantic_type: TypeRef
+    storage: LocalStorage
+    moved_at: SourceSpan | None = None
+    moved_by: str | None = None
+
+
+def local_storage_for_type(type_ref: TypeRef) -> LocalStorage:
+    """Classify concrete storage identity independently of semantic capability."""
+
+    if isinstance(type_ref, IteratorType) or type_ref.rust_name in {
+        "Future",
+        "Closure",
+    }:
+        return LocalStorage.OPAQUE
+    return LocalStorage.NAMEABLE
 
 
 def place_from_ast(node: ast.expr) -> Place | None:

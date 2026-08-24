@@ -14,6 +14,11 @@ class Maturity(StrEnum):
     PRODUCTION = "Production"
 
 
+class ContractKind(StrEnum):
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+
+
 @dataclass(frozen=True, slots=True)
 class Capability:
     key: str
@@ -28,7 +33,18 @@ class Capability:
 _TestFunction = TypeVar("_TestFunction", bound=Callable[..., object])
 
 
-def capability_contract(*contract_ids: str) -> Callable[[_TestFunction], _TestFunction]:
+@dataclass(frozen=True, slots=True)
+class ContractEvidence:
+    contract_ids: tuple[str, ...]
+    native: bool | None
+    kind: ContractKind
+
+
+def capability_contract(
+    *contract_ids: str,
+    native: bool | None = None,
+    kind: ContractKind = ContractKind.POSITIVE,
+) -> Callable[[_TestFunction], _TestFunction]:
     """Bind an executable test to public capability-contract identifiers."""
 
     if not contract_ids or any(not value.strip() for value in contract_ids):
@@ -38,6 +54,11 @@ def capability_contract(*contract_ids: str) -> Callable[[_TestFunction], _TestFu
 
     def decorate(function: _TestFunction) -> _TestFunction:
         setattr(function, "__crabwalk_capability_contracts__", tuple(contract_ids))
+        setattr(
+            function,
+            "__crabwalk_capability_evidence__",
+            ContractEvidence(tuple(contract_ids), native, kind),
+        )
         return cast(_TestFunction, function)
 
     return decorate
@@ -94,6 +115,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "iterator.copy-inline",
             "iterator.string-inline",
             "iterator.string-split-local",
+            "iterator.opaque-shadow",
             "iterator.borrowed-for-loop",
             "iterator.borrowed-for-loop-native",
         ),

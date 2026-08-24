@@ -291,7 +291,9 @@ print(borrowed.to_python())
     ]
 
 
-def test_rustc_reports_native_use_after_move_at_python_source(tmp_path: Path) -> None:
+def test_frontend_reports_native_use_after_move_at_python_source(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "use_after_move.py"
     source.write_text(
         """\
@@ -323,8 +325,9 @@ def invalid(values: rust.Owned[rust.Vec[rust.u64]]) -> rust.usize:
     )
 
     assert result.returncode != 0
-    assert "CRAB301 Rust compilation failed" in result.stderr
-    assert "borrow of moved value" in result.stderr
+    assert "CRAB227 Use of moved native local" in result.stderr
+    assert "consumed by owned argument" in result.stderr
+    assert "use_after_move.py:9" in result.stderr
     assert "use_after_move.py:10" in result.stderr
 
 

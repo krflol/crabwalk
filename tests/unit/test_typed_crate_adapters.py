@@ -66,6 +66,27 @@ def test_typed_crate_values_closures_and_effects_are_semantic(tmp_path: Path) ->
     assert "|item| (item + 1u64)" in generated.rust_source
 
 
+def test_same_nominal_external_type_remains_reassignable(tmp_path: Path) -> None:
+    source = tmp_path / "external_reassignment.py"
+    source.write_text(
+        ADAPTER_SOURCE.replace(
+            "counter = make_counter(value)\n    current: rust.u64 = counter_value(counter)",
+            (
+                "counter = make_counter(value)\n"
+                "    counter = make_counter(value + 1)\n"
+                "    current: rust.u64 = counter_value(counter)"
+            ),
+        ),
+        encoding="utf-8",
+    )
+
+    ir = analyze_path(source)
+    generated = generate_project(ir, "_crabwalk_external_reassignment")
+
+    assert "counter =" in generated.rust_source
+    assert "model::make_counter((value + 1u64))" in generated.rust_source
+
+
 def test_unannotated_opaque_crate_values_cannot_escape_a_terminal_chain(
     tmp_path: Path,
 ) -> None:
