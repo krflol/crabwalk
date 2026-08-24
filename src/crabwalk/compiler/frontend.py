@@ -32,6 +32,7 @@ from .bindings import (
 from .abi import (
     enum_field_type_supported as _enum_field_type_supported,
     owned_vector_element_supported as _owned_vector_element_supported,
+    python_mapping_key_supported as _python_mapping_key_supported,
     python_parameter_boundary_supported as _python_parameter_boundary_supported,
     python_return_boundary_supported as _python_return_boundary_supported,
     struct_field_type_supported as _struct_field_type_supported,
@@ -147,7 +148,14 @@ from .ownership import (
 from .source import attribute_parts as _attribute_parts
 from .source import parse_source
 from .signatures import Signature as _Signature
-from .types import ExternalType, IteratorExecution, IteratorItemMode, IteratorType
+from .types import (
+    ExternalType,
+    IteratorExecution,
+    IteratorIndexing,
+    IteratorItemMode,
+    IteratorType,
+    OwnershipType,
+)
 
 _ANALYSIS_CACHE_LIMIT = 64
 _analysis_cache: OrderedDict[tuple[str, str, str], PackageIR] = OrderedDict()
@@ -352,7 +360,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     source_graph = single_file_source_graph(source_path)
     return assign_package_identities(
         PackageIR(
-            schema_version=21,
+            schema_version=22,
             module_name=identity,
             source_path=str(source_path),
             source_hash=source_graph.compiler_input_hash,
@@ -998,7 +1006,7 @@ def _analyze_regular_package(
         source_paths.append(str(module.path))
     return assign_package_identities(
         PackageIR(
-            schema_version=21,
+            schema_version=22,
             module_name=package_name,
             source_path=str(package_root / "__init__.py"),
             source_hash=source_graph.compiler_input_hash,
@@ -1536,6 +1544,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                 target.id,
                 value,
                 value.type_ref,
+                None,
                 self.write_counts[target.id] > 1 or target.id in self.mutated_names,
                 SourceSpan.from_ast(self.path, node),
             )
@@ -1605,6 +1614,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     node.target.id,
                     value,
                     target_type,
+                    target_type,
                     self.write_counts[node.target.id] > 1
                     or node.target.id in self.mutated_names,
                     SourceSpan.from_ast(self.path, node),
@@ -1623,6 +1633,7 @@ class _FunctionLowerer(PatternLoweringMixin):
             return LetIR(
                 node.target.id,
                 value,
+                target_type,
                 target_type,
                 self.write_counts[node.target.id] > 1
                 or node.target.id in self.mutated_names,
@@ -1738,13 +1749,19 @@ class _FunctionLowerer(PatternLoweringMixin):
                 )
 
             iterator = self._lower_expression(node.iter, environment)
-            if iterator.type_ref.rust_name != "Iterator":
+            if not isinstance(iterator.type_ref, IteratorType) or (
+                iterator.type_ref.execution != IteratorExecution.SEQUENTIAL
+            ):
                 _unsupported(
                     node.iter,
                     self.path,
-                    "Iterate over range(...) or a supported Rust iterator such as text.lines().",
+                    (
+                        "Iterate over range(...) or a supported sequential Rust "
+                        "iterator such as text.lines()."
+                    ),
                 )
-            item_type = iterator.type_ref.arguments[0]
+            iterator_type = iterator.type_ref
+            item_type = iterator_type.exposed_item_type
             loop_environment = dict(environment)
             if isinstance(node.target, ast.Name):
                 loop_target = node.target.id
@@ -1756,9 +1773,10 @@ class _FunctionLowerer(PatternLoweringMixin):
                 )
                 loop_environment[loop_target] = item_type
             elif isinstance(node.target, (ast.Tuple, ast.List)):
+                tuple_type = item_type.underlying
                 if (
-                    item_type.rust_name != "Tuple"
-                    or len(node.target.elts) != len(item_type.arguments)
+                    tuple_type.rust_name != "Tuple"
+                    or len(node.target.elts) != len(tuple_type.arguments)
                     or not all(
                         isinstance(value, ast.Name) for value in node.target.elts
                     )
@@ -1790,7 +1808,15 @@ class _FunctionLowerer(PatternLoweringMixin):
                         node.target,
                     )
                 loop_target = f"({', '.join(target_names)})"
-                loop_environment.update(zip(target_names, item_type.arguments))
+                component_types = tuple_type.arguments
+                if isinstance(item_type, OwnershipType) and (
+                    item_type.ownership_kind in {"Ref", "Mut"}
+                ):
+                    component_types = tuple(
+                        OwnershipType(item_type.ownership_kind, value)
+                        for value in component_types
+                    )
+                loop_environment.update(zip(target_names, component_types))
             else:
                 _unsupported(
                     node.target,
@@ -1806,6 +1832,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                 loop_target,
                 iterator,
                 item_type,
+                iterator_type.item_mode,
                 body,
                 SourceSpan.from_ast(self.path, node),
             )
@@ -3500,6 +3527,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     IteratorExecution.PARALLEL,
                     element_type,
                     IteratorItemMode.SHARED_REF,
+                    IteratorIndexing.INDEXED,
                 )
             else:
                 _unsupported(
@@ -4063,6 +4091,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     receiver_type.execution,
                     item_type,
                     IteratorItemMode.OWNED,
+                    receiver_type.indexing,
                 )
             elif (
                 method == "cloned"
@@ -4082,6 +4111,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     receiver_type.execution,
                     item_type,
                     IteratorItemMode.OWNED,
+                    receiver_type.indexing,
                 )
             elif method == "map" and len(node.args) == 1:
                 closure = self._lower_closure(
@@ -4095,6 +4125,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     receiver_type.execution,
                     closure.body.type_ref,
                     IteratorItemMode.OWNED,
+                    receiver_type.indexing,
                 )
             elif method == "filter" and len(node.args) == 1:
                 if receiver_type.item_mode == IteratorItemMode.OWNED:
@@ -4115,7 +4146,16 @@ class _FunctionLowerer(PatternLoweringMixin):
                     parameter_projection=projection,
                 )
                 arguments = (closure,)
-                result = receiver_type
+                result = IteratorType(
+                    receiver_type.execution,
+                    receiver_type.item_type,
+                    receiver_type.item_mode,
+                    (
+                        IteratorIndexing.UNINDEXED
+                        if receiver_type.execution == IteratorExecution.PARALLEL
+                        else None
+                    ),
+                )
             elif method == "filter_map" and len(node.args) == 1:
                 closure = self._lower_closure(
                     node.args[0],
@@ -4136,6 +4176,11 @@ class _FunctionLowerer(PatternLoweringMixin):
                     receiver_type.execution,
                     closure.body.type_ref.arguments[0],
                     IteratorItemMode.OWNED,
+                    (
+                        IteratorIndexing.UNINDEXED
+                        if receiver_type.execution == IteratorExecution.PARALLEL
+                        else None
+                    ),
                 )
             elif method == "collect_vec" and not node.args:
                 if receiver_type.item_mode != IteratorItemMode.OWNED:
@@ -4180,7 +4225,27 @@ class _FunctionLowerer(PatternLoweringMixin):
                     ),
                 )
                 result = BOOL
-            elif method == "find" and len(node.args) == 1:
+            elif (
+                method == "find"
+                and receiver_type.execution == IteratorExecution.PARALLEL
+            ):
+                _fail(
+                    "CRAB225",
+                    "Parallel find semantics are ambiguous",
+                    "Rayon distinguishes any-match, first-match, and last-match search.",
+                    self.path,
+                    node,
+                    "Use find_any(...), find_first(...), or find_last(...).",
+                )
+            elif (
+                method == "find"
+                and receiver_type.execution == IteratorExecution.SEQUENTIAL
+                and len(node.args) == 1
+            ) or (
+                method in {"find_any", "find_first", "find_last"}
+                and receiver_type.execution == IteratorExecution.PARALLEL
+                and len(node.args) == 1
+            ):
                 arguments = (
                     self._lower_closure(
                         node.args[0],
@@ -4231,11 +4296,24 @@ class _FunctionLowerer(PatternLoweringMixin):
                 arguments = (closure,)
                 result = TypeRef("Option", (receiver_type.exposed_item_type,))
             elif method == "enumerate" and not node.args:
+                if (
+                    receiver_type.execution == IteratorExecution.PARALLEL
+                    and receiver_type.indexing != IteratorIndexing.INDEXED
+                ):
+                    _fail(
+                        "CRAB225",
+                        "Parallel enumerate requires an indexed iterator",
+                        "The preceding adapter removes Rayon's indexed-parallel capability.",
+                        self.path,
+                        node,
+                        "Move enumerate() before filter/filter_map or use a sequential iterator.",
+                    )
                 arguments = ()
                 result = IteratorType(
                     receiver_type.execution,
                     TypeRef("Tuple", (USIZE, receiver_type.exposed_item_type)),
                     IteratorItemMode.OWNED,
+                    receiver_type.indexing,
                 )
             elif method == "zip" and len(node.args) == 1:
                 other = self._lower_expression(node.args[0], environment)
@@ -4249,6 +4327,18 @@ class _FunctionLowerer(PatternLoweringMixin):
                         self.path,
                         node.args[0],
                     )
+                if receiver_type.execution == IteratorExecution.PARALLEL and (
+                    receiver_type.indexing != IteratorIndexing.INDEXED
+                    or other.type_ref.indexing != IteratorIndexing.INDEXED
+                ):
+                    _fail(
+                        "CRAB225",
+                        "Parallel zip requires indexed iterators",
+                        "At least one adapter chain has lost Rayon's indexed capability.",
+                        self.path,
+                        node,
+                        "Zip indexed sources before filter/filter_map changes either chain.",
+                    )
                 arguments = (other,)
                 result = IteratorType(
                     receiver_type.execution,
@@ -4260,6 +4350,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                         ),
                     ),
                     IteratorItemMode.OWNED,
+                    receiver_type.indexing,
                 )
             else:
                 _unsupported(
@@ -5113,6 +5204,25 @@ def _analyze_signature(
             path,
             node.returns or node,
             "Return rust.String instead.",
+        )
+    if (
+        exported
+        and return_type.ownership is None
+        and return_type.rust_name == "HashMap"
+        and len(return_type.arguments) == 2
+        and not _python_mapping_key_supported(return_type.arguments[0])
+    ):
+        key_type = return_type.arguments[0]
+        _fail(
+            "CRAB202",
+            "HashMap key has no hashable Python representation",
+            (
+                f"{key_type.display()} normalizes to an unhashable Python value "
+                "and cannot become a dictionary key."
+            ),
+            path,
+            node.returns or node,
+            "Use scalar, String, Vec[u8], Option, or recursively hashable tuple keys.",
         )
     if (
         exported

@@ -5,9 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_generics import GENERIC_SOURCE
 
 
+@capability_contract("generics.concrete-export")
 def test_generic_helper_compiles_and_runs_through_a_concrete_export(
     tmp_path: Path,
 ) -> None:

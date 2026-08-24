@@ -40,7 +40,17 @@ from .ir import (
     NoneLiteralIR,
     PanicIR,
     PassIR,
+    PatternAtIR,
+    PatternCaptureIR,
+    PatternConstructorIR,
+    PatternIR,
+    PatternLiteralIR,
     PatternMatchIR,
+    PatternOrIR,
+    PatternRangeIR,
+    PatternRestIR,
+    PatternTupleIR,
+    PatternWildcardIR,
     PythonPrintIR,
     ReturnIR,
     StatementIR,
@@ -157,9 +167,14 @@ def _write_statement(
         return
     if isinstance(statement, LetIR):
         mutability = "mut " if statement.mutable else ""
+        annotation = (
+            f": {statement.rust_annotation.render()}"
+            if statement.rust_annotation is not None
+            else ""
+        )
         writer.line(
             (
-                f"let {mutability}{statement.rust_name}: {statement.type_ref.render()} "
+                f"let {mutability}{statement.rust_name}{annotation} "
                 f"= {_render_expression(statement.value, boundary_names, emission_names)};"
             ),
             statement.span,
@@ -342,7 +357,7 @@ def _write_statement(
                 )
             )
             writer.line(
-                f"{pattern_arm.pattern}{guard} => {{",
+                f"{_render_pattern(pattern_arm.pattern)}{guard} => {{",
                 pattern_arm.span,
                 "pattern_match_arm",
             )
@@ -366,6 +381,49 @@ def _write_statement(
         writer.line("();", statement.span, "pass")
         return
     raise AssertionError(f"unhandled statement IR: {type(statement).__name__}")
+
+
+def _render_pattern(pattern: PatternIR) -> str:
+    """Render semantic pattern nodes after capture identities are assigned."""
+
+    if isinstance(pattern, PatternWildcardIR):
+        return "_"
+    if isinstance(pattern, PatternCaptureIR):
+        return pattern.rust_name
+    if isinstance(pattern, PatternLiteralIR):
+        if isinstance(pattern.value, bool):
+            return "true" if pattern.value else "false"
+        if isinstance(pattern.value, int):
+            return str(pattern.value)
+        return _rust_char_literal(pattern.value)
+    if isinstance(pattern, PatternRestIR):
+        return ".."
+    if isinstance(pattern, PatternTupleIR):
+        values = ", ".join(_render_pattern(value) for value in pattern.items)
+        suffix = "," if len(pattern.items) == 1 else ""
+        return f"({values}{suffix})"
+    if isinstance(pattern, PatternConstructorIR):
+        if pattern.style == "unit":
+            return pattern.rust_path
+        if pattern.style == "tuple":
+            values = ", ".join(_render_pattern(value) for value in pattern.items)
+            return f"{pattern.rust_path}({values})"
+        fields = [
+            f"{field.rust_name}: {_render_pattern(field.pattern)}"
+            for field in pattern.fields
+        ]
+        if pattern.record_rest:
+            fields.append("..")
+        return f"{pattern.rust_path} {{ {', '.join(fields)} }}"
+    if isinstance(pattern, PatternOrIR):
+        return " | ".join(_render_pattern(value) for value in pattern.alternatives)
+    if isinstance(pattern, PatternRangeIR):
+        return f"{_render_pattern(pattern.low)}..={_render_pattern(pattern.high)}"
+    if isinstance(pattern, PatternAtIR):
+        return (
+            f"{_render_pattern(pattern.capture)} @ ({_render_pattern(pattern.pattern)})"
+        )
+    raise AssertionError(f"unhandled pattern IR: {type(pattern).__name__}")
 
 
 def _render_expression(

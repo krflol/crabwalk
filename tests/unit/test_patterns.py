@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from crabwalk.compiler.codegen import generate_project
@@ -83,6 +84,22 @@ def tuple_loop_total() -> rust.u64:
     for index, value in pairs.iter():
         total += index + value
     return total
+
+@rust.fn
+def hygienic_tuple(x: rust.u64, marker: rust.char) -> rust.u64:
+    pair: rust.Tuple[rust.u64, rust.char] = (x, marker)
+    match pair:
+        case (x, "x"):
+            return x
+        case _:
+            return 0
+
+@rust.fn
+def hygienic_field(x: rust.u64) -> rust.u64:
+    point: Point = Point(x=x, y=0)
+    match point:
+        case Point(x=x):
+            return x
 """
 
 
@@ -94,7 +111,7 @@ def test_general_rust_patterns_and_tuple_loop_targets_lower(tmp_path: Path) -> N
     generated = generate_project(ir, "_crabwalk_patterns")
 
     assert isinstance(ir.functions[0].body[0], PatternMatchIR)
-    assert isinstance(ir.functions[-1].body[2], ForEachIR)
+    assert isinstance(ir.functions[-3].body[2], ForEachIR)
     assert "1 | 2 =>" in generated.rust_source
     assert "matched @ (3..=7) =>" in generated.rust_source
     assert (
@@ -107,3 +124,5 @@ def test_general_rust_patterns_and_tuple_loop_targets_lower(tmp_path: Path) -> N
     assert f"{shape}::At({point} {{ x: 0, y: y_value }}) =>" in generated.rust_source
     assert "(head, .., tail) =>" in generated.rust_source
     assert "for (index, value) in pairs.iter().copied()" in generated.rust_source
+    assert "'x'" in generated.rust_source
+    assert re.search(rf"{point} \{{ x: cw_b_[^, }}]+, \.\. \}}", generated.rust_source)

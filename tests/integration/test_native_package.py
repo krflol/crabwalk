@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
+
 
 def _create_package(root: Path) -> Path:
     package = root / "native_pkg"
@@ -78,6 +80,7 @@ print(contains_number.__crabwalk__["cache_hit"])
     return package
 
 
+@capability_contract("compiler.package-native")
 def test_regular_python_package_compiles_as_one_native_extension(
     tmp_path: Path,
 ) -> None:

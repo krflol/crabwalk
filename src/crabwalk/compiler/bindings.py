@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import fields, is_dataclass, replace
 from typing import Any, cast, get_args
 
@@ -24,8 +23,18 @@ from .ir import (
     EnumVariantIR,
     PackageIR,
     ParameterIR,
+    PatternAtIR,
+    PatternCaptureIR,
+    PatternConstructorIR,
+    PatternIR,
+    PatternLiteralIR,
     PatternMatchArmIR,
     PatternMatchIR,
+    PatternOrIR,
+    PatternRangeIR,
+    PatternRestIR,
+    PatternTupleIR,
+    PatternWildcardIR,
     StatementIR,
     StructFieldIR,
     StructIR,
@@ -233,6 +242,11 @@ def _bind_statement(
             statement,
             value=value,
             type_ref=_rename_type(statement.type_ref, type_bindings),
+            rust_annotation=(
+                _rename_type(statement.rust_annotation, type_bindings)
+                if statement.rust_annotation is not None
+                else None
+            ),
             binding=binding,
         )
     if isinstance(statement, LocalConstIR):
@@ -382,20 +396,13 @@ def _bind_pattern_arm(
             for (source_name, _), binding in zip(arm.bindings, local_bindings)
         },
     }
-    replacements = {
-        source_name: binding.rust_name
+    binding_by_name = {
+        source_name: binding
         for (source_name, _), binding in zip(arm.bindings, local_bindings)
     }
-    pattern = arm.pattern
-    for source_name in sorted(replacements, key=len, reverse=True):
-        pattern = re.sub(
-            rf"(?<![A-Za-z0-9_]){re.escape(source_name)}(?![A-Za-z0-9_])",
-            replacements[source_name],
-            pattern,
-        )
     return replace(
         arm,
-        pattern=pattern,
+        pattern=_bind_pattern(arm.pattern, binding_by_name, type_bindings),
         bindings=tuple(
             (name, _rename_type(type_ref, type_bindings))
             for name, type_ref in arm.bindings
@@ -408,6 +415,81 @@ def _bind_pattern_arm(
         body=_bind_block(arm.body, arm_environment, type_bindings, gensym),
         local_bindings=local_bindings,
     )
+
+
+def _bind_pattern(
+    pattern: PatternIR,
+    local_bindings: dict[str, BindingIR],
+    type_bindings: dict[str, BindingIR],
+) -> PatternIR:
+    """Assign capture identities without rewriting rendered Rust source text."""
+
+    if isinstance(pattern, PatternCaptureIR):
+        binding = local_bindings.get(pattern.name)
+        if binding is None:
+            raise AssertionError(f"missing pattern binding for {pattern.name!r}")
+        return replace(
+            pattern,
+            type_ref=_rename_type(pattern.type_ref, type_bindings),
+            binding=binding,
+        )
+    if isinstance(pattern, PatternLiteralIR):
+        return replace(
+            pattern,
+            type_ref=_rename_type(pattern.type_ref, type_bindings),
+        )
+    if isinstance(pattern, PatternTupleIR):
+        return replace(
+            pattern,
+            items=tuple(
+                _bind_pattern(value, local_bindings, type_bindings)
+                for value in pattern.items
+            ),
+        )
+    if isinstance(pattern, PatternConstructorIR):
+        return replace(
+            pattern,
+            items=tuple(
+                _bind_pattern(value, local_bindings, type_bindings)
+                for value in pattern.items
+            ),
+            fields=tuple(
+                replace(
+                    field,
+                    pattern=_bind_pattern(
+                        field.pattern,
+                        local_bindings,
+                        type_bindings,
+                    ),
+                )
+                for field in pattern.fields
+            ),
+        )
+    if isinstance(pattern, PatternOrIR):
+        return replace(
+            pattern,
+            alternatives=tuple(
+                _bind_pattern(value, local_bindings, type_bindings)
+                for value in pattern.alternatives
+            ),
+        )
+    if isinstance(pattern, PatternRangeIR):
+        return replace(
+            pattern,
+            low=_bind_pattern(pattern.low, local_bindings, type_bindings),
+            high=_bind_pattern(pattern.high, local_bindings, type_bindings),
+        )
+    if isinstance(pattern, PatternAtIR):
+        capture = _bind_pattern(pattern.capture, local_bindings, type_bindings)
+        assert isinstance(capture, PatternCaptureIR)
+        return replace(
+            pattern,
+            capture=capture,
+            pattern=_bind_pattern(pattern.pattern, local_bindings, type_bindings),
+        )
+    if isinstance(pattern, (PatternWildcardIR, PatternRestIR)):
+        return pattern
+    raise AssertionError(f"unhandled pattern IR: {type(pattern).__name__}")
 
 
 def _bind_expression(

@@ -5,9 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_advanced_features import ADVANCED_SOURCE
 
 
+@capability_contract("advanced.audited-intrinsics")
 def test_advanced_features_execute_in_native_rust(tmp_path: Path) -> None:
     source = tmp_path / "advanced.py"
     source.write_text(

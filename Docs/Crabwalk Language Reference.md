@@ -22,18 +22,18 @@ promotes a language family by itself.
 <!-- crabwalk-capabilities:start -->
 | Capability | Maturity | Supported contract | Evidence | Important limit |
 |---|---|---|---|---|
-| Static compiler pipeline | Compositional | Source-spanned typed IR, validation, deterministic Rust/PyO3 emission | unit, native, package, diagnostic, and generated-Rust tests | an explicit Python subset; rustc remains authoritative |
-| Ownership boundary | Compositional | Owned/Ref/Mut, move state, borrows, reload and fingerprint identity | multi-argument, alias, reload, thread, domain, and vector tests | handles are thread-affine; no retained cross-call borrows |
-| Cargo build and cache | Compositional | locks, complete modeled fingerprints, hashing, leases, atomic publish | dependency, corruption, replan, prune, race, and wheel tests | trusted build scripts may require declared extra inputs |
-| Sequential iterators | Compositional | owned/shared items; map/filter/filter_map/fold/reduce/collect and queries | Copy, String, &str, tuple, domain, one- and three-stage native pipelines | expression lambdas only; no retained iterator boundary |
-| Rayon iterators | Compositional | typed par_iter with borrowed items, adapters, collect, sum and reduce | u64, Vec<String>, and Vec<domain> multi-adapter native tests | requires an explicit Rayon dependency; no arbitrary Rayon API reflection |
-| Structured native data | Compositional | recursive vectors, domain rows, nested domains, owned domain returns | Python mappings/handles through Vec<Row>, nested struct/enum round trips | allocating explicit input; direct recursive domain cycles are invalid Rust |
-| String, HashMap, Option/Result | Compositional | parse-transform-group-iterate-return algebra with typed errors | native delimited parsing and structured filter-group-emit acceptance | documented method table is finite, not the complete Rust standard library |
-| Typed crate adapters | Bounded | external types/functions, borrow signatures, closures, declared effects | real path-crate value and generic callback native test | no trait/builder manifest generation or automatic crate API discovery |
-| Traits, generics, operators | Bounded | generic helpers, shared no-argument traits, Add implementations | Rust Book and focused native conformance tests | not a general Rust trait or operator declaration language |
-| std-only native futures | Proof | Future/await/join/select lowering through a teaching executor | focused Rust Book subprocess tests | busy-polling; no reactor, cancellation, Tokio, or Python future ABI |
-| Thread pool and TCP | Proof | finite unit-job pool and loopback HTTP teaching operations | panic-containment and Rust Book web-server subprocess tests | no general server, task handles, backpressure, TLS, or cancellation |
-| Advanced and unsafe intrinsics | Proof | audited operations for individual Rust Book concepts | subprocess panic/unsafe and exact code-generation tests | not general inline Rust, FFI, unsafe, macro, or pointer support |
+| Static compiler pipeline | Compositional | Source-spanned typed IR, validation, deterministic Rust/PyO3 emission | unit, native, package, diagnostic, and generated-Rust tests<br>Contracts: `compiler.package-native`, `compiler.generated-identities`, `compiler.pattern-identity` | an explicit Python subset; rustc remains authoritative |
+| Ownership boundary | Compositional | Owned/Ref/Mut, move state, borrows, reload and fingerprint identity | multi-argument, alias, reload, thread, domain, and vector tests<br>Contracts: `ownership.failure-atomic`, `ownership.reload-fingerprint`, `ownership.domain-schema` | handles are thread-affine; no retained cross-call borrows |
+| Cargo build and cache | Compositional | locks, complete modeled fingerprints, hashing, leases, atomic publish | dependency, corruption, replan, prune, race, and wheel tests<br>Contracts: `cache.corruption-repair`, `cache.concurrent-publication`, `cache.prune-load-lease` | trusted build scripts may require declared extra inputs |
+| Sequential iterators | Compositional | owned/shared items; map/filter/filter_map/fold/reduce/collect and queries | Copy, String, &str, tuple, domain, one- and three-stage native pipelines<br>Contracts: `iterator.copy-inline`, `iterator.string-inline`, `iterator.string-split-local`, `iterator.borrowed-for-loop`, `iterator.borrowed-for-loop-native` | expression lambdas only; no retained iterator boundary |
+| Rayon iterators | Compositional | typed par_iter with borrowed items, adapters, collect, sum and reduce | u64, Vec<String>, and Vec<domain> multi-adapter native tests<br>Contracts: `rayon.string-split-local`, `rayon.domain-filter-map-collect`, `rayon.indexed-enumerate`, `rayon.indexed-zip`, `rayon.unindexed-order-rejected`, `rayon.explicit-find-semantics` | requires an explicit Rayon dependency; no arbitrary Rayon API reflection |
+| Structured native data | Compositional | recursive vectors, domain rows, nested domains, owned domain returns | Python mappings/handles through Vec<Row>, nested struct/enum round trips<br>Contracts: `structured.vector-domain-input`, `structured.nested-domain-roundtrip`, `structured.owned-domain-return` | allocating explicit input; direct recursive domain cycles are invalid Rust |
+| String, HashMap, Option/Result | Compositional | parse-transform-group-iterate-return algebra with typed errors | native delimited parsing and structured filter-group-emit acceptance<br>Contracts: `collections.result-pattern-algebra`, `collections.hashmap-iteration`, `collections.hashmap-split-local`, `collections.hashable-map-return` | documented method table is finite, not the complete Rust standard library |
+| Typed crate adapters | Bounded | external types/functions, borrow signatures, closures, declared effects | real path-crate value and generic callback native test<br>Contracts: `crate.typed-value`, `crate.typed-callback` | no trait/builder manifest generation or automatic crate API discovery |
+| Traits, generics, operators | Bounded | generic helpers, shared no-argument traits, Add implementations | Rust Book and focused native conformance tests<br>Contracts: `traits.dynamic-dispatch`, `generics.concrete-export` | not a general Rust trait or operator declaration language |
+| std-only native futures | Proof | Future/await/join/select lowering through a teaching executor | focused Rust Book subprocess tests<br>Contracts: `futures.split-local-block-on` | busy-polling; no reactor, cancellation, Tokio, or Python future ABI |
+| Thread pool and TCP | Proof | finite unit-job pool and loopback HTTP teaching operations | panic-containment and Rust Book web-server subprocess tests<br>Contracts: `threadpool.loopback-http` | no general server, task handles, backpressure, TLS, or cancellation |
+| Advanced and unsafe intrinsics | Proof | audited operations for individual Rust Book concepts | subprocess panic/unsafe and exact code-generation tests<br>Contracts: `advanced.audited-intrinsics` | not general inline Rust, FFI, unsafe, macro, or pointer support |
 <!-- crabwalk-capabilities:end -->
 
 ## Declaration contract
@@ -124,7 +124,7 @@ raised as `CrabwalkPanicError`; it never unwinds into Python.
 | Receiver | Methods |
 |---|---|
 | `Vec[T]` | `push`, `pop`, `len`, `is_empty`, `iter`, `iter_ref`; typed `par_iter` with declared Rayon; numeric teaching intrinsic `split_at_mut_sum` |
-| typed iterator | `map`, `filter`, `filter_map`, `copied`, `cloned`, `collect_vec`, `collect_map`, `sum`, `count`, `any`, `all`, `find`, `fold`, `reduce`, `enumerate`, `zip`; item ownership and sequential/parallel execution remain explicit |
+| typed iterator | `map`, `filter`, `filter_map`, `copied`, `cloned`, `collect_vec`, `collect_map`, `sum`, `count`, `any`, `all`, sequential `find`, parallel `find_any`/`find_first`/`find_last`, `fold`, `reduce`, `enumerate`, `zip`; item ownership, execution, and Rayon indexed capability remain explicit |
 | `String`, `Str` | `len`, `is_empty`, `lines`, `as_str`, `to_lowercase`, `contains`, `starts_with`, `ends_with`, `push_str`, `replace`, `find`, `trim`, `trim_start`, `trim_end`, `split`, `split_once`, `split_whitespace`, `strip_prefix`, `strip_suffix`, `chars`, `bytes`, typed numeric `parse`, and `join` |
 | `Option[T]` | `is_some`, `is_none`, `unwrap`, `expect`, `unwrap_or`, `map`, `and_then`, `or_else`, `as_ref`, `copied`, `cloned` |
 | `Result[T, E]` | `is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or`, `map`, `map_err`, `and_then`, `or_else`, `as_ref`, `ok`, `err`; `rust.Ok`/`rust.Err` patterns |
@@ -384,6 +384,16 @@ def active_lowercase(
 
 Collecting a borrowed parallel iterator directly is rejected: use `copied()` for
 Copy items or `map` into an owned value first.
+
+Rayon vector sources begin as indexed iterators. `map`, `copied`, and `cloned`
+preserve indexing; `filter` and `filter_map` remove it. Parallel `enumerate` and
+`zip` therefore fail as `CRAB225` when a preceding adapter made either input
+unindexed. Search semantics are explicit: use `find_any`, `find_first`, or
+`find_last` instead of sequential `find`.
+
+Iterator and future pipelines may be factored across unannotated locals. Crabwalk
+retains their semantic type for later method and `await` checking while allowing
+rustc to infer the anonymous concrete adapter/future type.
 
 Crabwalk also has native Rust futures:
 

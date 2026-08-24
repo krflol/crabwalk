@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from crabwalk.build.cache import prune_artifact_cache
+from crabwalk.compiler.capabilities import capability_contract
 
 
 SOURCE = """\
@@ -42,6 +43,7 @@ def _run(
     )
 
 
+@capability_contract("cache.corruption-repair")
 def test_corrupt_artifact_is_rebuilt_before_loading(tmp_path: Path) -> None:
     source = tmp_path / "corruption_app.py"
     source.write_text(SOURCE, encoding="utf-8")
@@ -66,6 +68,7 @@ def test_corrupt_artifact_is_rebuilt_before_loading(tmp_path: Path) -> None:
     assert cached.stdout.splitlines()[:2] == ["144", "True"]
 
 
+@capability_contract("cache.concurrent-publication")
 def test_simultaneous_processes_publish_one_valid_artifact(tmp_path: Path) -> None:
     source = tmp_path / "race_app.py"
     source.write_text(SOURCE, encoding="utf-8")
@@ -205,6 +208,7 @@ print(first != dependency_app.current.__crabwalk__["fingerprint"])
     assert result.stdout.splitlines() == ["1", "2", "True"]
 
 
+@capability_contract("cache.prune-load-lease")
 def test_pruning_cannot_remove_an_artifact_during_build_or_mapped_lifetime(
     tmp_path: Path,
 ) -> None:

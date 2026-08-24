@@ -48,6 +48,32 @@ def normalize_active(
     )
 
 @rust.fn
+def normalize_active_split(
+    rows: rust.Ref[rust.Vec[rust.String]],
+) -> rust.Vec[rust.String]:
+    active = rows.iter_ref().filter(lambda row: row.contains("|active|"))
+    normalized = active.map(lambda row: row.to_lowercase())
+    return normalized.collect_vec()
+
+@rust.fn
+def normalize_for_loop(
+    rows: rust.Ref[rust.Vec[rust.String]],
+) -> rust.Vec[rust.String]:
+    normalized: rust.Vec[rust.String] = rust.Vec([])
+    for row in rows.iter_ref():
+        normalized.push(row.to_lowercase())
+    return normalized
+
+@rust.fn
+def tuple_names(
+    rows: rust.Ref[rust.Vec[rust.Tuple[rust.String, rust.u64]]],
+) -> rust.Vec[rust.String]:
+    names: rust.Vec[rust.String] = rust.Vec([])
+    for name, count in rows.iter_ref():
+        names.push(name.to_lowercase())
+    return names
+
+@rust.fn
 def clone_active(
     rows: rust.Ref[rust.Vec[rust.String]],
 ) -> rust.Vec[rust.String]:

@@ -63,20 +63,31 @@ variants and stable IDs.
 
 ## Iterator contract
 
-An iterator type records three independent facts:
+An iterator type records four independent facts:
 
 ```text
 execution  Sequential | Parallel
 item type  T
 item mode  Owned | SharedRef | MutableRef
+indexing   Indexed | Unindexed (Rayon only)
 ```
 
 Sequential and Rayon adapters share typed lowering for `map`, `filter`,
 `filter_map`, `copied`, `cloned`, `collect_vec`, `collect_map`, `sum`, `count`,
-`any`, `all`, `find`, `fold`, `reduce`, `enumerate`, and `zip`, subject to their
-documented execution/item constraints. Borrowed built-in and domain values use
-semantic auto-dereference. An unsupported combination receives a targeted
-diagnostic rather than falling through to an inferred Rust chain.
+`any`, `all`, `fold`, `reduce`, `enumerate`, and `zip`, subject to their documented
+execution/item constraints. Sequential search uses `find`; Rayon search uses the
+explicit `find_any`, `find_first`, and `find_last` operations. Rayon `map`,
+`copied`, and `cloned` preserve indexed capability, while `filter` and
+`filter_map` make a chain unindexed; `enumerate` and `zip` require indexed Rayon
+inputs. Borrowed built-in and domain values use semantic auto-dereference, and
+`for` targets retain the exposed owned/reference item mode. An unsupported
+combination receives a targeted diagnostic rather than falling through to an
+inferred Rust chain.
+
+Semantic knowledge does not imply that Rust can name a value's concrete type.
+Unannotated iterator adapter stacks, native futures, closures, and similar opaque
+values carry a semantic type in `LetIR` while omitting a Rust local annotation so
+rustc infers the concrete implementation type.
 
 ## Invariants for new compiler features
 
@@ -95,8 +106,10 @@ change:
 6. A capability-registry update when the supported contract or maturity changes.
 
 The public capability table in the language reference is generated from
-`compiler/capabilities.py`. Rust Book chapter coverage is pedagogical coverage,
-not a claim that a language family is complete.
+`compiler/capabilities.py`. Each maturity claim names executable contract IDs
+attached to discovered tests; the registry enforces progressively larger evidence
+sets for Proof, Bounded, Compositional, and Production claims. Rust Book chapter
+coverage is pedagogical coverage, not a claim that a language family is complete.
 
 ## Pass ownership
 
@@ -106,4 +119,6 @@ declarations, signatures, expression/statement/pattern policies, binding identit
 ownership, effects, validation, Rust body emission, ABI policy, and Cargo emission
 are independently imported, typed, and tested. `frontend.py` retains stateful scope
 orchestration; `codegen.py` retains final backend composition. Neither owns the
-semantic policies extracted into those passes.
+semantic policies extracted into those passes. Match patterns are structured IR
+nodes for captures, literals, tuples, constructors, fields, ranges, or-patterns,
+and `@` bindings. Capture identity assignment never rewrites rendered Rust text.

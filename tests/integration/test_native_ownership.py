@@ -5,7 +5,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 
+
+@capability_contract("ownership.failure-atomic")
 def test_owned_vec_moves_and_call_scoped_borrows_are_native(tmp_path: Path) -> None:
     other = tmp_path / "other_ownership.py"
     other.write_text(
@@ -325,6 +328,7 @@ def invalid(values: rust.Owned[rust.Vec[rust.u64]]) -> rust.usize:
     assert "use_after_move.py:10" in result.stderr
 
 
+@capability_contract("ownership.reload-fingerprint")
 def test_source_reload_preserves_old_handle_and_rejects_cross_fingerprint_use(
     tmp_path: Path,
 ) -> None:
@@ -394,6 +398,7 @@ print(reload_owned.total(new), new.to_python())
     ]
 
 
+@capability_contract("ownership.domain-schema")
 def test_stale_domain_markers_keep_their_compilation_schema(tmp_path: Path) -> None:
     module = tmp_path / "reload_domains.py"
     module.write_text(

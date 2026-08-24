@@ -5,9 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_typed_crate_adapters import ADAPTER_SOURCE
 
 
+@capability_contract("crate.typed-value", "crate.typed-callback")
 def test_typed_path_crate_value_and_callback_run_natively(tmp_path: Path) -> None:
     native = tmp_path / "native"
     source_directory = native / "src"

@@ -503,6 +503,7 @@ class LetIR:
     name: str
     value: ExpressionIR
     type_ref: TypeRef
+    rust_annotation: TypeRef | None
     mutable: bool
     span: SourceSpan
     binding: BindingIR | None = None
@@ -601,6 +602,7 @@ class ForEachIR:
     variable: str
     iterator: ExpressionIR
     item_type: TypeRef
+    item_mode: _types.IteratorItemMode
     body: tuple["StatementIR", ...]
     span: SourceSpan
     bindings: tuple[BindingIR, ...] = ()
@@ -650,8 +652,87 @@ class MatchIR:
 
 
 @dataclass(frozen=True, slots=True)
+class PatternWildcardIR:
+    """A wildcard pattern which introduces no binding."""
+
+
+@dataclass(frozen=True, slots=True)
+class PatternCaptureIR:
+    """One source capture with a compiler-assigned emitted identity."""
+
+    name: str
+    type_ref: TypeRef
+    binding: BindingIR | None = None
+
+    @property
+    def rust_name(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.name
+
+
+@dataclass(frozen=True, slots=True)
+class PatternLiteralIR:
+    value: bool | int | str
+    type_ref: TypeRef
+
+
+@dataclass(frozen=True, slots=True)
+class PatternRestIR:
+    """An unnamed tuple rest pattern (`..`)."""
+
+
+@dataclass(frozen=True, slots=True)
+class PatternTupleIR:
+    items: tuple["PatternIR", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PatternFieldIR:
+    rust_name: str
+    pattern: "PatternIR"
+
+
+@dataclass(frozen=True, slots=True)
+class PatternConstructorIR:
+    rust_path: str
+    style: Literal["unit", "tuple", "record"]
+    items: tuple["PatternIR", ...] = ()
+    fields: tuple[PatternFieldIR, ...] = ()
+    record_rest: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PatternOrIR:
+    alternatives: tuple["PatternIR", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PatternRangeIR:
+    low: "PatternIR"
+    high: "PatternIR"
+
+
+@dataclass(frozen=True, slots=True)
+class PatternAtIR:
+    capture: PatternCaptureIR
+    pattern: "PatternIR"
+
+
+PatternIR: TypeAlias = (
+    PatternWildcardIR
+    | PatternCaptureIR
+    | PatternLiteralIR
+    | PatternRestIR
+    | PatternTupleIR
+    | PatternConstructorIR
+    | PatternOrIR
+    | PatternRangeIR
+    | PatternAtIR
+)
+
+
+@dataclass(frozen=True, slots=True)
 class PatternMatchArmIR:
-    pattern: str
+    pattern: PatternIR
     bindings: tuple[tuple[str, TypeRef], ...]
     guard: ExpressionIR | None
     body: tuple["StatementIR", ...]

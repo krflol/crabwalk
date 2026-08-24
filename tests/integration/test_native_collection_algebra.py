@@ -5,9 +5,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_collection_algebra import COLLECTION_ALGEBRA_SOURCE
 
 
+@capability_contract(
+    "collections.result-pattern-algebra",
+    "collections.hashmap-iteration",
+    "collections.hashmap-split-local",
+    "collections.hashable-map-return",
+)
 def test_collections_results_and_string_etl_run_natively(tmp_path: Path) -> None:
     source = tmp_path / "collection_algebra.py"
     source.write_text(
@@ -21,6 +28,9 @@ print(sorted(rebuilt_counts().items()))
 print(normalize_fields("  ALPHA|Beta||  "))
 print(parse_amount(" 12.5 "))
 print(join_fields())
+print(tuple_keyed())
+print(map_loop_total())
+print(sorted(split_map_keys()))
 """,
         encoding="utf-8",
     )
@@ -49,4 +59,7 @@ print(join_fields())
         "['alpha', 'beta']",
         "12.5",
         "alpha,beta",
+        "{('key', b'\\x01\\x02'): 3}",
+        "8",
+        "['active', 'inactive']",
     ]

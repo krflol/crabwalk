@@ -13,8 +13,19 @@ from ..ir import (
     EnumIR,
     EnumVariantIR,
     ExpressionIR,
+    PatternAtIR,
+    PatternCaptureIR,
+    PatternConstructorIR,
+    PatternFieldIR,
+    PatternIR,
+    PatternLiteralIR,
     PatternMatchArmIR,
     PatternMatchIR,
+    PatternOrIR,
+    PatternRangeIR,
+    PatternRestIR,
+    PatternTupleIR,
+    PatternWildcardIR,
     StatementIR,
     StructFieldIR,
     StructIR,
@@ -99,7 +110,7 @@ class PatternLoweringMixin:
         self,
         pattern: ast.pattern,
         expected: TypeRef,
-    ) -> tuple[str, dict[str, TypeRef]]:
+    ) -> tuple[PatternIR, dict[str, TypeRef]]:
         if isinstance(pattern, ast.MatchAs):
             if pattern.name is not None:
                 validate_source_binding(
@@ -110,11 +121,13 @@ class PatternLoweringMixin:
                 )
             if pattern.pattern is None:
                 if pattern.name is None:
-                    return "_", {}
-                return pattern.name, {pattern.name: expected}
-            rendered, bindings = self._lower_general_pattern(pattern.pattern, expected)
+                    return PatternWildcardIR(), {}
+                return PatternCaptureIR(pattern.name, expected), {
+                    pattern.name: expected
+                }
+            lowered, bindings = self._lower_general_pattern(pattern.pattern, expected)
             if pattern.name is None:
-                return rendered, bindings
+                return lowered, bindings
             if pattern.name in bindings:
                 fail(
                     "CRAB192",
@@ -123,18 +136,21 @@ class PatternLoweringMixin:
                     self.path,
                     pattern,
                 )
-            return f"{pattern.name} @ ({rendered})", {
+            return PatternAtIR(
+                PatternCaptureIR(pattern.name, expected),
+                lowered,
+            ), {
                 **bindings,
                 pattern.name: expected,
             }
 
         if isinstance(pattern, ast.MatchOr):
-            lowered = [
+            alternatives = [
                 self._lower_general_pattern(value, expected)
                 for value in pattern.patterns
             ]
-            first_bindings = lowered[0][1]
-            if any(bindings != first_bindings for _, bindings in lowered[1:]):
+            first_bindings = alternatives[0][1]
+            if any(bindings != first_bindings for _, bindings in alternatives[1:]):
                 fail(
                     "CRAB192",
                     "Or-pattern bindings differ",
@@ -142,13 +158,18 @@ class PatternLoweringMixin:
                     self.path,
                     pattern,
                 )
-            return " | ".join(value for value, _ in lowered), first_bindings
+            return PatternOrIR(
+                tuple(value for value, _ in alternatives)
+            ), first_bindings
 
         if isinstance(pattern, ast.MatchSingleton):
             if pattern.value is None and expected.rust_name == "Option":
-                return "std::option::Option::None", {}
+                return PatternConstructorIR(
+                    "std::option::Option::None",
+                    "unit",
+                ), {}
             if isinstance(pattern.value, bool) and expected == BOOL:
-                return ("true" if pattern.value else "false"), {}
+                return PatternLiteralIR(pattern.value, expected), {}
             unsupported(
                 pattern,
                 self.path,
@@ -169,7 +190,7 @@ class PatternLoweringMixin:
             ):
                 value = pattern.value.operand.value
                 if type(value) is int and expected.is_signed_integer:
-                    return str(-value), {}
+                    return PatternLiteralIR(-value, expected), {}
             enum = self.enums_by_symbol.get(expected.rust_name)
             if enum is not None:
                 variant = self._enum_pattern_variant(
@@ -185,7 +206,10 @@ class PatternLoweringMixin:
                         self.path,
                         pattern,
                     )
-                return f"{enum.symbol}::{variant.rust_name}", {}
+                return PatternConstructorIR(
+                    f"{enum.symbol}::{variant.rust_name}",
+                    "unit",
+                ), {}
             unsupported(
                 pattern,
                 self.path,
@@ -228,7 +252,7 @@ class PatternLoweringMixin:
                     self.path,
                     pattern,
                 )
-            rendered_values: list[str] = []
+            lowered_values: list[PatternIR] = []
             tuple_bindings: dict[str, TypeRef] = {}
             star_index = stars[0] if stars else None
             for index, child in enumerate(pattern.patterns):
@@ -239,14 +263,14 @@ class PatternLoweringMixin:
                             self.path,
                             "Named tuple rest bindings are deferred.",
                         )
-                    rendered_values.append("..")
+                    lowered_values.append(PatternRestIR())
                     continue
                 type_index = (
                     index
                     if star_index is None or index < star_index
                     else len(expected.arguments) - (len(pattern.patterns) - index)
                 )
-                rendered, child_bindings = self._lower_general_pattern(
+                lowered, child_bindings = self._lower_general_pattern(
                     child,
                     expected.arguments[type_index],
                 )
@@ -255,12 +279,8 @@ class PatternLoweringMixin:
                     child_bindings,
                     child,
                 )
-                rendered_values.append(rendered)
-            values = ", ".join(rendered_values)
-            return (
-                f"({values}{',' if len(rendered_values) == 1 else ''})",
-                tuple_bindings,
-            )
+                lowered_values.append(lowered)
+            return PatternTupleIR(tuple(lowered_values)), tuple_bindings
 
         if isinstance(pattern, ast.MatchClass):
             path = attribute_parts(pattern.cls)
@@ -283,7 +303,7 @@ class PatternLoweringMixin:
                         self.path,
                         "Range endpoints must be literals.",
                     )
-                return f"{low}..={high}", {}
+                return PatternRangeIR(low, high), {}
 
             if expected.rust_name == "Option" and path == ("rust", "Some"):
                 if pattern.kwd_patterns or len(pattern.patterns) != 1:
@@ -292,11 +312,15 @@ class PatternLoweringMixin:
                         self.path,
                         "rust.Some patterns take one payload.",
                     )
-                rendered, bindings = self._lower_general_pattern(
+                lowered, bindings = self._lower_general_pattern(
                     pattern.patterns[0],
                     expected.arguments[0],
                 )
-                return f"std::option::Option::Some({rendered})", bindings
+                return PatternConstructorIR(
+                    "std::option::Option::Some",
+                    "tuple",
+                    (lowered,),
+                ), bindings
 
             if expected.rust_name == "Result" and path in {
                 ("rust", "Ok"),
@@ -309,12 +333,16 @@ class PatternLoweringMixin:
                         "rust.Ok and rust.Err patterns take one payload.",
                     )
                 index = 0 if path == ("rust", "Ok") else 1
-                rendered, bindings = self._lower_general_pattern(
+                lowered, bindings = self._lower_general_pattern(
                     pattern.patterns[0],
                     expected.arguments[index],
                 )
                 constructor = "Ok" if index == 0 else "Err"
-                return f"std::result::Result::{constructor}({rendered})", bindings
+                return PatternConstructorIR(
+                    f"std::result::Result::{constructor}",
+                    "tuple",
+                    (lowered,),
+                ), bindings
 
             enum = self.enums_by_symbol.get(expected.rust_name)
             if enum is not None:
@@ -357,7 +385,7 @@ class PatternLoweringMixin:
         rust_path: str,
         fields: tuple[StructFieldIR, ...],
         tuple_style: bool,
-    ) -> tuple[str, dict[str, TypeRef]]:
+    ) -> tuple[PatternIR, dict[str, TypeRef]]:
         bindings: dict[str, TypeRef] = {}
         if tuple_style:
             if pattern.kwd_patterns or len(pattern.patterns) != len(fields):
@@ -368,15 +396,19 @@ class PatternLoweringMixin:
                     self.path,
                     pattern,
                 )
-            rendered_values: list[str] = []
+            lowered_values: list[PatternIR] = []
             for child, field in zip(pattern.patterns, fields):
-                rendered, child_bindings = self._lower_general_pattern(
+                lowered, child_bindings = self._lower_general_pattern(
                     child,
                     field.type_ref,
                 )
                 self._merge_pattern_bindings(bindings, child_bindings, child)
-                rendered_values.append(rendered)
-            return f"{rust_path}({', '.join(rendered_values)})", bindings
+                lowered_values.append(lowered)
+            return PatternConstructorIR(
+                rust_path,
+                "tuple",
+                tuple(lowered_values),
+            ), bindings
 
         if pattern.patterns or len(set(pattern.kwd_attrs)) != len(pattern.kwd_attrs):
             unsupported(pattern, self.path, "Record patterns use unique named fields.")
@@ -389,17 +421,22 @@ class PatternLoweringMixin:
                 self.path,
                 pattern,
             )
-        rendered_fields: list[str] = []
+        lowered_fields: list[PatternFieldIR] = []
         for name, child in zip(pattern.kwd_attrs, pattern.kwd_patterns):
-            rendered, child_bindings = self._lower_general_pattern(
+            lowered, child_bindings = self._lower_general_pattern(
                 child,
                 fields_by_name[name].type_ref,
             )
             self._merge_pattern_bindings(bindings, child_bindings, child)
-            rendered_fields.append(f"{fields_by_name[name].rust_name}: {rendered}")
-        if len(rendered_fields) < len(fields):
-            rendered_fields.append("..")
-        return f"{rust_path} {{ {', '.join(rendered_fields)} }}", bindings
+            lowered_fields.append(
+                PatternFieldIR(fields_by_name[name].rust_name, lowered)
+            )
+        return PatternConstructorIR(
+            rust_path,
+            "record",
+            fields=tuple(lowered_fields),
+            record_rest=len(lowered_fields) < len(fields),
+        ), bindings
 
     def _merge_pattern_bindings(
         self,
@@ -423,7 +460,7 @@ class PatternLoweringMixin:
         value: object,
         expected: TypeRef,
         node: ast.AST,
-    ) -> str:
+    ) -> PatternLiteralIR:
         if isinstance(value, str):
             validate_unicode_text(value, self.path, node)
         if type(value) is int and expected.is_integer:
@@ -435,11 +472,11 @@ class PatternLoweringMixin:
                     self.path,
                     node,
                 )
-            return str(value)
+            return PatternLiteralIR(value, expected)
         if isinstance(value, str) and expected == CHAR and len(value) == 1:
-            return rust_pattern_char(value)
+            return PatternLiteralIR(value, expected)
         if isinstance(value, bool) and expected == BOOL:
-            return "true" if value else "false"
+            return PatternLiteralIR(value, expected)
         fail(
             "CRAB192",
             "Pattern literal type mismatch",
