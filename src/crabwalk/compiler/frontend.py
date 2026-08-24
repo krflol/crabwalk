@@ -140,8 +140,11 @@ from .package_graph import (
     single_file_source_graph,
 )
 from .ownership import (
+    LocalState,
+    LocalStorage,
     ReceiverAccess,
     builtin_receiver_access as _builtin_receiver_access,
+    local_storage_for_type as _local_storage_for_type,
     place_from_ast as _place_from_ast,
     receiver_access_for_ownership as _receiver_access_for_ownership,
 )
@@ -1342,6 +1345,7 @@ class _FunctionLowerer(PatternLoweringMixin):
             tuple(self.method_signatures.values()),
         )
         self.loop_depth = 0
+        self.local_states: dict[str, LocalState] = {}
 
     def lower(self) -> FunctionIR:
         parameters = tuple(
@@ -1356,6 +1360,10 @@ class _FunctionLowerer(PatternLoweringMixin):
         )
         environment = {
             parameter.name: parameter.type_ref.underlying for parameter in parameters
+        }
+        self.local_states = {
+            name: LocalState(type_ref, _local_storage_for_type(type_ref))
+            for name, type_ref in environment.items()
         }
         body = self._lower_block(self.node.body, environment)
         if self.signature.return_type != UNIT and not _block_returns(body):
@@ -1385,6 +1393,90 @@ class _FunctionLowerer(PatternLoweringMixin):
             method_for=self.signature.method_for,
             trait_symbol=self.signature.trait_symbol,
             operator_kind=self.signature.operator_kind,
+        )
+
+    def _declare_local(self, name: str, type_ref: TypeRef) -> None:
+        self.local_states[name] = LocalState(
+            type_ref,
+            _local_storage_for_type(type_ref),
+        )
+
+    def _clone_local_states(self) -> dict[str, LocalState]:
+        return {
+            name: LocalState(
+                value.semantic_type,
+                value.storage,
+                value.moved_at,
+                value.moved_by,
+            )
+            for name, value in self.local_states.items()
+        }
+
+    def _restore_local_states(self, states: dict[str, LocalState]) -> None:
+        self.local_states = {
+            name: LocalState(
+                value.semantic_type,
+                value.storage,
+                value.moved_at,
+                value.moved_by,
+            )
+            for name, value in states.items()
+        }
+
+    def _merge_branch_local_states(
+        self,
+        base: dict[str, LocalState],
+        branches: tuple[dict[str, LocalState], ...],
+    ) -> None:
+        self._restore_local_states(base)
+        for name, state in self.local_states.items():
+            moved = next(
+                (
+                    branch[name].moved_at
+                    for branch in branches
+                    if name in branch and branch[name].moved_at is not None
+                ),
+                None,
+            )
+            state.moved_at = moved
+            state.moved_by = next(
+                (
+                    branch[name].moved_by
+                    for branch in branches
+                    if name in branch and branch[name].moved_at is not None
+                ),
+                None,
+            )
+
+    def _consume_local(self, node: ast.expr, operation: str) -> None:
+        place = _place_from_ast(node)
+        if place is None:
+            return
+        state = self.local_states.get(place.root)
+        if state is None:
+            return
+        if _is_copy_semantic_type(state.semantic_type):
+            return
+        state.moved_at = SourceSpan.from_ast(self.path, node)
+        state.moved_by = operation
+
+    def _reject_moved_local_use(self, node: ast.Name) -> None:
+        state = self.local_states.get(node.id)
+        if state is None or state.moved_at is None:
+            return
+        location = (
+            f"{state.moved_at.path}:{state.moved_at.line}:{state.moved_at.column}"
+        )
+        _fail(
+            "CRAB227",
+            "Use of moved native local",
+            (
+                f"'{node.id}' was consumed by {state.moved_by or 'an owned operation'} "
+                f"at {location} and cannot be used again."
+            ),
+            self.path,
+            node,
+            "Create a new binding before the consuming operation or reinitialize it.",
         )
 
     def _lower_block(
@@ -1469,6 +1561,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     )
                 for name, type_ref in zip(names, value.type_ref.arguments):
                     environment[name] = type_ref
+                    self._declare_local(name, type_ref)
                 return DestructureIR(
                     names,
                     value,
@@ -1519,9 +1612,54 @@ class _FunctionLowerer(PatternLoweringMixin):
                 )
             target = node.targets[0]
             existing = environment.get(target.id)
+            if existing is not None and _is_rust_call_named(node.value, "shadow"):
+                assert isinstance(node.value, ast.Call)
+                if node.value.keywords or len(node.value.args) != 1:
+                    _fail(
+                        "CRAB114",
+                        "Rust shadow argument mismatch",
+                        "rust.shadow expects exactly one expression.",
+                        self.path,
+                        node.value,
+                    )
+                value = self._lower_expression(
+                    node.value.args[0],
+                    environment,
+                    existing,
+                )
+                _require_type(value.type_ref, existing, self.path, node.value.args[0])
+                environment[target.id] = value.type_ref
+                self._declare_local(target.id, value.type_ref)
+                return LetIR(
+                    target.id,
+                    value,
+                    value.type_ref,
+                    None,
+                    False,
+                    SourceSpan.from_ast(self.path, node),
+                )
             value = self._lower_expression(node.value, environment, existing)
             if existing is not None:
                 _require_type(value.type_ref, existing, self.path, node.value)
+                state = self.local_states.get(target.id)
+                if state is not None and state.storage == LocalStorage.OPAQUE:
+                    _fail(
+                        "CRAB226",
+                        "Anonymous Rust local cannot be reassigned",
+                        (
+                            f"'{target.id}' has an opaque iterator, future, or closure "
+                            "storage type whose concrete Rust identity may change."
+                        ),
+                        self.path,
+                        target,
+                        (
+                            f"Use {target.id} = rust.shadow(...) to create a fresh "
+                            "Rust binding."
+                        ),
+                    )
+                if state is not None:
+                    state.moved_at = None
+                    state.moved_by = None
                 return AssignIR(target.id, value, SourceSpan.from_ast(self.path, node))
             if value.type_ref == INFERRED:
                 _fail(
@@ -1540,6 +1678,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                 )
             _validate_source_binding(target.id, self.path, target, "local")
             environment[target.id] = value.type_ref
+            self._declare_local(target.id, value.type_ref)
             return LetIR(
                 target.id,
                 value,
@@ -1588,6 +1727,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     node.value.args[0], environment, target_type
                 )
                 environment[node.target.id] = target_type
+                self._declare_local(node.target.id, target_type)
                 return LocalConstIR(
                     node.target.id,
                     value,
@@ -1609,7 +1749,14 @@ class _FunctionLowerer(PatternLoweringMixin):
                 value = self._lower_expression(
                     node.value.args[0], environment, target_type
                 )
+                _require_type(
+                    value.type_ref,
+                    target_type,
+                    self.path,
+                    node.value.args[0],
+                )
                 environment[node.target.id] = target_type
+                self._declare_local(node.target.id, target_type)
                 return LetIR(
                     node.target.id,
                     value,
@@ -1630,6 +1777,7 @@ class _FunctionLowerer(PatternLoweringMixin):
             value = self._lower_expression(node.value, environment, target_type)
             _require_type(value.type_ref, target_type, self.path, node.value)
             environment[node.target.id] = target_type
+            self._declare_local(node.target.id, target_type)
             return LetIR(
                 node.target.id,
                 value,
@@ -1650,6 +1798,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     self.path,
                     node.target,
                 )
+            self._reject_moved_local_use(node.target)
             right = self._lower_expression(node.value, environment, target_type)
             operator = _binary_operator(node.op, self.path)
             if operator in {"and", "or"}:
@@ -1671,8 +1820,17 @@ class _FunctionLowerer(PatternLoweringMixin):
         if isinstance(node, ast.If):
             condition = self._lower_expression(node.test, environment, BOOL)
             _require_type(condition.type_ref, BOOL, self.path, node.test)
+            base_states = self._clone_local_states()
+            self._restore_local_states(base_states)
             body = self._lower_block(node.body, dict(environment))
+            body_states = self._clone_local_states()
+            self._restore_local_states(base_states)
             otherwise = self._lower_block(node.orelse, dict(environment))
+            otherwise_states = self._clone_local_states()
+            self._merge_branch_local_states(
+                base_states,
+                (body_states, otherwise_states),
+            )
             return IfIR(
                 condition,
                 body,
@@ -1685,11 +1843,14 @@ class _FunctionLowerer(PatternLoweringMixin):
                 _unsupported(node, self.path, "while/else is deferred.")
             condition = self._lower_expression(node.test, environment, BOOL)
             _require_type(condition.type_ref, BOOL, self.path, node.test)
+            base_states = self._clone_local_states()
             self.loop_depth += 1
             try:
                 body = self._lower_block(node.body, dict(environment))
             finally:
                 self.loop_depth -= 1
+            body_states = self._clone_local_states()
+            self._merge_branch_local_states(base_states, (base_states, body_states))
             return WhileIR(condition, body, SourceSpan.from_ast(self.path, node))
 
         if isinstance(node, ast.For):
@@ -1735,11 +1896,22 @@ class _FunctionLowerer(PatternLoweringMixin):
                 )
                 loop_environment = dict(environment)
                 loop_environment[node.target.id] = stop.type_ref
+                base_states = self._clone_local_states()
+                self._declare_local(node.target.id, stop.type_ref)
                 self.loop_depth += 1
                 try:
                     body = self._lower_block(node.body, loop_environment)
                 finally:
                     self.loop_depth -= 1
+                body_states = self._clone_local_states()
+                if node.target.id in base_states:
+                    body_states[node.target.id] = base_states[node.target.id]
+                else:
+                    body_states.pop(node.target.id, None)
+                self._merge_branch_local_states(
+                    base_states,
+                    (base_states, body_states),
+                )
                 return ForRangeIR(
                     node.target.id,
                     start,
@@ -1762,7 +1934,10 @@ class _FunctionLowerer(PatternLoweringMixin):
                 )
             iterator_type = iterator.type_ref
             item_type = iterator_type.exposed_item_type
+            self._consume_local(node.iter, "for-loop iteration")
+            base_states = self._clone_local_states()
             loop_environment = dict(environment)
+            scoped_targets: tuple[str, ...]
             if isinstance(node.target, ast.Name):
                 loop_target = node.target.id
                 _validate_source_binding(
@@ -1772,6 +1947,8 @@ class _FunctionLowerer(PatternLoweringMixin):
                     "loop target",
                 )
                 loop_environment[loop_target] = item_type
+                scoped_targets = (loop_target,)
+                self._declare_local(loop_target, item_type)
             elif isinstance(node.target, (ast.Tuple, ast.List)):
                 tuple_type = item_type.underlying
                 if (
@@ -1808,6 +1985,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                         node.target,
                     )
                 loop_target = f"({', '.join(target_names)})"
+                scoped_targets = target_names
                 component_types = tuple_type.arguments
                 if isinstance(item_type, OwnershipType) and (
                     item_type.ownership_kind in {"Ref", "Mut"}
@@ -1817,6 +1995,11 @@ class _FunctionLowerer(PatternLoweringMixin):
                         for value in component_types
                     )
                 loop_environment.update(zip(target_names, component_types))
+                for target_name, component_type in zip(
+                    target_names,
+                    component_types,
+                ):
+                    self._declare_local(target_name, component_type)
             else:
                 _unsupported(
                     node.target,
@@ -1828,6 +2011,16 @@ class _FunctionLowerer(PatternLoweringMixin):
                 body = self._lower_block(node.body, loop_environment)
             finally:
                 self.loop_depth -= 1
+            body_states = self._clone_local_states()
+            for target_name in scoped_targets:
+                if target_name in base_states:
+                    body_states[target_name] = base_states[target_name]
+                else:
+                    body_states.pop(target_name, None)
+            self._merge_branch_local_states(
+                base_states,
+                (base_states, body_states),
+            )
             return ForEachIR(
                 loop_target,
                 iterator,
@@ -2005,6 +2198,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     self.path,
                     node,
                 )
+            self._reject_moved_local_use(node)
             if expected is not None:
                 _require_type(type_ref, expected, self.path, node)
             return NameIR(node.id, type_ref, span)
@@ -2026,6 +2220,7 @@ class _FunctionLowerer(PatternLoweringMixin):
             result_type = value.type_ref.arguments[0]
             if expected is not None:
                 _require_type(result_type, expected, self.path, node)
+            self._consume_local(node.value, "await")
             return AwaitIR(value, result_type, span)
 
         if isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
@@ -2149,6 +2344,9 @@ class _FunctionLowerer(PatternLoweringMixin):
                 if expected is not None:
                     _require_type(result_type, expected, self.path, node)
                 self._require_place_access(node.left, "owned", "add operator")
+                self._consume_local(node.left, "add operator")
+                if operator_signature.parameters[1].type_ref.ownership == "Owned":
+                    self._consume_local(node.right, "add operator")
                 return BinaryIR(
                     "add",
                     left,
@@ -2626,6 +2824,7 @@ class _FunctionLowerer(PatternLoweringMixin):
             )
         if parameter_type.rust_name == "Owned":
             self._require_place_access(node, "owned", "owned argument")
+            self._consume_local(node, "owned argument")
         return value
 
     def _require_place_access(
@@ -3405,6 +3604,8 @@ class _FunctionLowerer(PatternLoweringMixin):
             )
             assert isinstance(node.func, ast.Attribute)
             self._require_place_access(node.func.value, required, f"method '{method}'")
+            if required == "owned":
+                self._consume_local(node.func.value, f"method '{method}'")
             return MethodCallIR(
                 receiver,
                 method,
@@ -4391,6 +4592,8 @@ class _FunctionLowerer(PatternLoweringMixin):
             )
         assert isinstance(node.func, ast.Attribute)
         self._require_place_access(node.func.value, required, f"method '{method}'")
+        if required == "owned":
+            self._consume_local(node.func.value, f"method '{method}'")
         return MethodCallIR(
             receiver,
             method,
@@ -4446,11 +4649,19 @@ class _FunctionLowerer(PatternLoweringMixin):
         )
         closure_environment = dict(environment)
         closure_environment[parameter] = parameter_type
-        body = self._lower_expression(
-            node.body,
-            closure_environment,
-            expected_result,
-        )
+        prior_state = self.local_states.get(parameter)
+        self._declare_local(parameter, parameter_type)
+        try:
+            body = self._lower_expression(
+                node.body,
+                closure_environment,
+                expected_result,
+            )
+        finally:
+            if prior_state is None:
+                self.local_states.pop(parameter, None)
+            else:
+                self.local_states[parameter] = prior_state
         if expected_result is not None:
             _require_type(body.type_ref, expected_result, self.path, node.body)
         return ClosureIR(
@@ -4550,11 +4761,24 @@ class _FunctionLowerer(PatternLoweringMixin):
         closure_environment = dict(environment)
         closure_environment[first] = first_type
         closure_environment[second] = second_type
-        body = self._lower_expression(
-            node.body,
-            closure_environment,
-            expected_result,
-        )
+        prior_states = {
+            first: self.local_states.get(first),
+            second: self.local_states.get(second),
+        }
+        self._declare_local(first, first_type)
+        self._declare_local(second, second_type)
+        try:
+            body = self._lower_expression(
+                node.body,
+                closure_environment,
+                expected_result,
+            )
+        finally:
+            for name, prior_state in prior_states.items():
+                if prior_state is None:
+                    self.local_states.pop(name, None)
+                else:
+                    self.local_states[name] = prior_state
         _require_type(body.type_ref, expected_result, self.path, node.body)
         return ClosureIR(
             first,
@@ -5215,14 +5439,14 @@ def _analyze_signature(
         key_type = return_type.arguments[0]
         _fail(
             "CRAB202",
-            "HashMap key has no hashable Python representation",
+            "HashMap key has no lossless Python representation",
             (
-                f"{key_type.display()} normalizes to an unhashable Python value "
-                "and cannot become a dictionary key."
+                f"{key_type.display()} does not have a hashable, injective Python "
+                "representation and cannot safely become a dictionary key."
             ),
             path,
             node.returns or node,
-            "Use scalar, String, Vec[u8], Option, or recursively hashable tuple keys.",
+            "Use scalar, String, Vec[u8], or recursively hashable and injective tuple keys.",
         )
     if (
         exported
@@ -6336,6 +6560,17 @@ def _is_copy_semantic_type(type_ref: TypeRef) -> bool:
     return (
         type_ref.is_numeric
         or type_ref.rust_name in {"bool", "char", "Str"}
+        or type_ref.ownership == "Ref"
+        or (
+            type_ref.rust_name == "Option"
+            and len(type_ref.arguments) == 1
+            and _is_copy_semantic_type(type_ref.arguments[0])
+        )
+        or (
+            type_ref.rust_name == "Result"
+            and len(type_ref.arguments) == 2
+            and all(_is_copy_semantic_type(value) for value in type_ref.arguments)
+        )
         or (
             type_ref.rust_name in {"Tuple", "Array"}
             and all(_is_copy_semantic_type(value) for value in type_ref.arguments)

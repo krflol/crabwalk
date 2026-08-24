@@ -19,13 +19,18 @@ boundaries; Production additionally requires validated lifecycle, performance, a
 platform evidence. Rust Book chapter coverage is tracked separately and never
 promotes a language family by itself.
 
+Each listed contract is attached to real pytest items. Release CI records whether
+those items were collected, passed, failed, skipped, or xfailed and publishes a
+machine-readable evidence manifest for every native OS/Python lane. A skipped or
+xfail-only contract does not satisfy a maturity claim.
+
 <!-- crabwalk-capabilities:start -->
 | Capability | Maturity | Supported contract | Evidence | Important limit |
 |---|---|---|---|---|
 | Static compiler pipeline | Compositional | Source-spanned typed IR, validation, deterministic Rust/PyO3 emission | unit, native, package, diagnostic, and generated-Rust tests<br>Contracts: `compiler.package-native`, `compiler.generated-identities`, `compiler.pattern-identity` | an explicit Python subset; rustc remains authoritative |
 | Ownership boundary | Compositional | Owned/Ref/Mut, move state, borrows, reload and fingerprint identity | multi-argument, alias, reload, thread, domain, and vector tests<br>Contracts: `ownership.failure-atomic`, `ownership.reload-fingerprint`, `ownership.domain-schema` | handles are thread-affine; no retained cross-call borrows |
 | Cargo build and cache | Compositional | locks, complete modeled fingerprints, hashing, leases, atomic publish | dependency, corruption, replan, prune, race, and wheel tests<br>Contracts: `cache.corruption-repair`, `cache.concurrent-publication`, `cache.prune-load-lease` | trusted build scripts may require declared extra inputs |
-| Sequential iterators | Compositional | owned/shared items; map/filter/filter_map/fold/reduce/collect and queries | Copy, String, &str, tuple, domain, one- and three-stage native pipelines<br>Contracts: `iterator.copy-inline`, `iterator.string-inline`, `iterator.string-split-local`, `iterator.borrowed-for-loop`, `iterator.borrowed-for-loop-native` | expression lambdas only; no retained iterator boundary |
+| Sequential iterators | Compositional | owned/shared items; map/filter/filter_map/fold/reduce/collect and queries | Copy, String, &str, tuple, domain, one- and three-stage native pipelines<br>Contracts: `iterator.copy-inline`, `iterator.string-inline`, `iterator.string-split-local`, `iterator.opaque-shadow`, `iterator.borrowed-for-loop`, `iterator.borrowed-for-loop-native` | expression lambdas only; no retained iterator boundary |
 | Rayon iterators | Compositional | typed par_iter with borrowed items, adapters, collect, sum and reduce | u64, Vec<String>, and Vec<domain> multi-adapter native tests<br>Contracts: `rayon.string-split-local`, `rayon.domain-filter-map-collect`, `rayon.indexed-enumerate`, `rayon.indexed-zip`, `rayon.unindexed-order-rejected`, `rayon.explicit-find-semantics` | requires an explicit Rayon dependency; no arbitrary Rayon API reflection |
 | Structured native data | Compositional | recursive vectors, domain rows, nested domains, owned domain returns | Python mappings/handles through Vec<Row>, nested struct/enum round trips<br>Contracts: `structured.vector-domain-input`, `structured.nested-domain-roundtrip`, `structured.owned-domain-return` | allocating explicit input; direct recursive domain cycles are invalid Rust |
 | String, HashMap, Option/Result | Compositional | parse-transform-group-iterate-return algebra with typed errors | native delimited parsing and structured filter-group-emit acceptance<br>Contracts: `collections.result-pattern-algebra`, `collections.hashmap-iteration`, `collections.hashmap-split-local`, `collections.hashable-map-return` | documented method table is finite, not the complete Rust standard library |
@@ -62,8 +67,8 @@ promotes a language family by itself.
 | `rust.bool` | `bool` | exact Python `bool` only |
 | `rust.String` | `String` | allocating UTF-8 copy |
 | `rust.Str` | `&str` | call-scoped Python string borrow; cannot be returned |
-| `rust.Option[T]` | `Option<T>` | `None` or the supported conversion for `T` |
-| `rust.Result[T, E]` | `Result<T, E>` | exported `Ok` converts `T`; `Err` raises `CrabwalkRustError` |
+| `rust.Option[T]` | `Option<T>` | `None` or the supported conversion for `T`; `T` must not itself normalize to `None` |
+| `rust.Result[T, E]` | `Result<T, E>` | top-level exported return control type only; `Ok` converts `T`; `Err` raises `CrabwalkRustError` |
 | `rust.Tuple[T, ...]` | fixed Rust tuple | recursively checked Python tuple when every element is boundary-safe |
 | `None` return | `()` | Python `None` |
 
@@ -74,6 +79,13 @@ new Python list at the explicit output boundary, except `Vec[u8]`, which is the
 deliberate byte-oriented boundary and converts to Python `bytes`. The same rule
 applies to `rust.to_python()` and Python-visible domain fields or enum payloads.
 Generated domain parameters likewise require `Owned`, `Ref`, or `Mut`.
+
+Boundary composition must be lossless. `Option[Option[T]]` and `Option[Unit]` are
+rejected because both `None` and `Some(None)`/`Some(())` would become Python
+`None`. `Result` is rejected inside `Option`, `Vec`, tuples, maps, or another
+`Result`; generated wrappers translate it only in the outer return position.
+`HashMap` return keys must have a Python representation that is both hashable and
+injective, preventing distinct Rust keys from collapsing into one Python key.
 
 ## Statements
 
@@ -90,6 +102,11 @@ Supported:
 
 Definite assignment and compatible rebinding are checked before code generation.
 Names written repeatedly become `let mut`; one-write locals remain immutable.
+Iterator, future, and closure adapter stacks have anonymous concrete Rust types.
+They may be stored in inferred locals, but ordinary assignment to the same slot is
+rejected as `CRAB226`. Use unannotated `name = rust.shadow(expression)` to emit a
+fresh inferred Rust binding. Consuming a tracked native local and using it again is
+rejected as `CRAB227`; `Copy` values remain reusable.
 
 Rejected include nested Python declarations, comprehensions, generators,
 `try`/`raise`/`with`, dynamic imports, globals/nonlocals, and `yield`. Lambdas are
@@ -191,7 +208,8 @@ exhaustive Rust match. Supported pattern families include:
 - wildcard and name bindings;
 - integer, bool, char, and Option `None` literals;
 - `case left | right` or-patterns with identical binding sets;
-- `rust.Range(low, high)` for inclusive Rust `low..=high` patterns;
+- `rust.Range(low, high)` for inclusive Rust `low..=high` patterns, with matching
+  integer or char literal endpoints only;
 - Python `pattern as name`, emitted as Rust `name @ pattern`;
 - fixed tuple patterns and one `*_` rest, emitted as `..`;
 - Option `rust.Some(pattern)`;
@@ -393,7 +411,10 @@ unindexed. Search semantics are explicit: use `find_any`, `find_first`, or
 
 Iterator and future pipelines may be factored across unannotated locals. Crabwalk
 retains their semantic type for later method and `await` checking while allowing
-rustc to infer the anonymous concrete adapter/future type.
+rustc to infer the anonymous concrete adapter/future type. Because different
+adapter stacks can share a semantic capability type while having distinct concrete
+Rust types, transformation rebindings use `rust.shadow(...)` rather than ordinary
+assignment.
 
 Crabwalk also has native Rust futures:
 

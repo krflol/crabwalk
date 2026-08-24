@@ -69,7 +69,17 @@ jobs:
       - name: Probe native toolchain
         run: crabwalk doctor
       - name: Run full suite
-        run: python -m pytest -q
+        run: >-
+          python -m pytest -q
+          --enforce-capability-contracts
+          --capability-evidence="${{ runner.temp }}/capability-evidence.json"
+      - name: Upload capability evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: capability-evidence-${{ runner.os }}-py${{ matrix.python }}
+          path: ${{ runner.temp }}/capability-evidence.json
+          if-no-files-found: error
 
   intermediate-python:
     runs-on: ubuntu-latest

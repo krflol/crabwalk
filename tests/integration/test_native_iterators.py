@@ -99,3 +99,41 @@ print(reduce_total(numbers))
         "10",
         "10",
     ]
+
+
+@capability_contract("iterator.opaque-shadow")
+def test_opaque_iterator_shadow_runs_natively(tmp_path: Path) -> None:
+    source = tmp_path / "opaque_shadow.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def incremented_total(values: rust.Ref[rust.Vec[rust.u64]]) -> rust.u64:
+    items = values.iter()
+    items = rust.shadow(items.map(lambda value: value + 1))
+    return items.sum()
+
+values = rust.Vec[rust.u64]([1, 2, 3])
+print(incremented_total(values))
+print(values.to_python())
+""",
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(root / "src")
+    environment["CRABWALK_PROGRESS"] = "never"
+
+    result = subprocess.run(
+        [sys.executable, "-u", str(source)],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["9", "[1, 2, 3]"]

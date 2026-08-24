@@ -121,6 +121,21 @@ All notable Crabwalk changes are recorded here.
   message prefixes, and borrow conflicts retain structured parameter/source data.
 - Numeric `HashMap.add` now emits the additive identity with its concrete value
   type; floating-point maps no longer receive an invalid integer `or_insert(0)`.
+- Python ABI validation now composes a boundary-shape descriptor rather than
+  independent child booleans. Nested `Result`, nested `Option`, `Option[Unit]`,
+  and non-injective `HashMap` keys fail before Rust emission instead of compiling
+  badly or collapsing distinct Rust values in Python.
+- Anonymous iterator, future, and closure locals carry an explicit opaque-storage
+  identity. Ordinary reassignment fails as `CRAB226`; unannotated
+  `rust.shadow(...)` creates a fresh inferred binding.
+- Native local consumption is tracked across iterator loops, owned calls,
+  consuming methods, futures, and control-flow joins. Use after move now reports
+  source-spanned `CRAB227` while recursively `Copy` values remain reusable.
+- `rust.Range` accepts only matching integer or char literal endpoints and rejects
+  wildcard, bool, enum, and compound endpoints as `CRAB192` before code generation.
+- Capability maturity is enforced from actual pytest collection and outcomes.
+  Native CI publishes per-platform JSON evidence, and skipped/xfail-only tests no
+  longer satisfy a public contract.
 
 ## [1.0.1] - 2026-08-23
 

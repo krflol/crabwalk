@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
 
+from crabwalk.compiler.abi import BoundaryPosition, boundary_shape
 from crabwalk.compiler.ir import TypeRef
 
 
@@ -35,6 +36,7 @@ class OutputPolicy(StrEnum):
     LIST = "List"
     BYTES = "Bytes"
     DICT = "Dict"
+    RESULT = "Result"
     RUST_HANDLE = "RustHandle"
     UNSUPPORTED = "Unsupported"
 
@@ -148,41 +150,57 @@ def boundary_codec(type_ref: TypeRef) -> BoundaryCodec:
             OwnershipPolicy.COPY,
         )
     if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        shape = boundary_shape(type_ref, position=BoundaryPosition.NESTED)
         return BoundaryCodec(
             type_ref,
-            InputPolicy.OPTION,
-            OutputPolicy.OPTION,
+            InputPolicy.OPTION if shape.input_supported else InputPolicy.UNSUPPORTED,
+            OutputPolicy.OPTION if shape.output_supported else OutputPolicy.UNSUPPORTED,
             AllocationKind.NONE,
             OwnershipPolicy.CLONE,
             (boundary_codec(type_ref.arguments[0]),),
         )
     if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        shape = boundary_shape(type_ref, position=BoundaryPosition.NESTED)
         return BoundaryCodec(
             type_ref,
-            InputPolicy.TUPLE,
-            OutputPolicy.TUPLE,
+            InputPolicy.TUPLE if shape.input_supported else InputPolicy.UNSUPPORTED,
+            OutputPolicy.TUPLE if shape.output_supported else OutputPolicy.UNSUPPORTED,
             AllocationKind.PYTHON_CONTAINER,
             OwnershipPolicy.CLONE,
             tuple(boundary_codec(value) for value in type_ref.arguments),
         )
     if type_ref.rust_name in {"Vec", "Array"} and type_ref.arguments:
+        shape = boundary_shape(type_ref, position=BoundaryPosition.NESTED)
         byte_vector = (
             type_ref.rust_name == "Vec" and type_ref.arguments[0].rust_name == "u8"
         )
         return BoundaryCodec(
             type_ref,
-            InputPolicy.SEQUENCE,
-            OutputPolicy.BYTES if byte_vector else OutputPolicy.LIST,
+            InputPolicy.SEQUENCE if shape.input_supported else InputPolicy.UNSUPPORTED,
+            (OutputPolicy.BYTES if byte_vector else OutputPolicy.LIST)
+            if shape.output_supported
+            else OutputPolicy.UNSUPPORTED,
             AllocationKind.PYTHON_CONTAINER,
             OwnershipPolicy.CLONE,
             (boundary_codec(type_ref.arguments[0]),),
         )
     if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        shape = boundary_shape(type_ref, position=BoundaryPosition.NESTED)
         return BoundaryCodec(
             type_ref,
-            InputPolicy.MAPPING,
-            OutputPolicy.DICT,
+            InputPolicy.MAPPING if shape.input_supported else InputPolicy.UNSUPPORTED,
+            OutputPolicy.DICT if shape.output_supported else OutputPolicy.UNSUPPORTED,
             AllocationKind.PYTHON_CONTAINER,
+            OwnershipPolicy.CLONE,
+            tuple(boundary_codec(value) for value in type_ref.arguments),
+        )
+    if type_ref.rust_name == "Result" and len(type_ref.arguments) == 2:
+        shape = boundary_shape(type_ref, position=BoundaryPosition.TOP_LEVEL)
+        return BoundaryCodec(
+            type_ref,
+            InputPolicy.UNSUPPORTED,
+            OutputPolicy.RESULT if shape.output_supported else OutputPolicy.UNSUPPORTED,
+            AllocationKind.NONE,
             OwnershipPolicy.CLONE,
             tuple(boundary_codec(value) for value in type_ref.arguments),
         )
@@ -199,6 +217,10 @@ def validate_boundary_input(value: object, type_ref: TypeRef) -> object:
     """Validate and normalize one Python value before PyO3 sees it."""
 
     codec = boundary_codec(type_ref)
+    if codec.input_policy == InputPolicy.UNSUPPORTED:
+        raise TypeError(
+            f"{type_ref.display()} has no lossless supported Python input representation"
+        )
     if codec.input_policy == InputPolicy.OPTION:
         if value is None:
             return None
@@ -297,6 +319,14 @@ def normalize_boundary_output(value: object, type_ref: TypeRef) -> object:
     """Normalize PyO3 output to Crabwalk's documented Python representation."""
 
     codec = boundary_codec(type_ref)
+    if codec.output_policy == OutputPolicy.UNSUPPORTED:
+        raise TypeError(
+            f"{type_ref.display()} has no lossless supported Python output representation"
+        )
+    if codec.output_policy == OutputPolicy.RESULT:
+        # The generated ABI wrapper has already translated Err into
+        # CrabwalkRustError, so only the successful child reaches Python.
+        return normalize_boundary_output(value, codec.children[0].type_ref)
     if codec.output_policy == OutputPolicy.NONE:
         return None
     if codec.output_policy == OutputPolicy.OPTION:

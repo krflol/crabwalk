@@ -31,6 +31,7 @@ from ..ir import (
     StructIR,
     TypeRef,
 )
+from ..ownership import LocalState
 from ..source import attribute_parts
 from .common import fail, unsupported, validate_source_binding, validate_unicode_text
 from .expressions import integer_fits
@@ -66,6 +67,22 @@ class PatternLoweringMixin:
     ) -> tuple[StatementIR, ...]:
         raise NotImplementedError
 
+    def _clone_local_states(self) -> dict[str, LocalState]:
+        raise NotImplementedError
+
+    def _restore_local_states(self, states: dict[str, LocalState]) -> None:
+        raise NotImplementedError
+
+    def _merge_branch_local_states(
+        self,
+        base: dict[str, LocalState],
+        branches: tuple[dict[str, LocalState], ...],
+    ) -> None:
+        raise NotImplementedError
+
+    def _declare_local(self, name: str, type_ref: TypeRef) -> None:
+        raise NotImplementedError
+
     def _lower_match(
         self,
         node: ast.Match,
@@ -73,19 +90,31 @@ class PatternLoweringMixin:
     ) -> PatternMatchIR:
         subject = self._lower_expression(node.subject, environment)
         arms: list[PatternMatchArmIR] = []
+        base_states = self._clone_local_states()
+        arm_states: list[dict[str, LocalState]] = []
         for case in node.cases:
+            self._restore_local_states(base_states)
             pattern, bindings = self._lower_general_pattern(
                 case.pattern,
                 subject.type_ref,
             )
             arm_environment = dict(environment)
             arm_environment.update(bindings)
+            for name, type_ref in bindings.items():
+                self._declare_local(name, type_ref)
             guard = (
                 self._lower_expression(case.guard, arm_environment, BOOL)
                 if case.guard is not None
                 else None
             )
             body = self._lower_block(case.body, arm_environment)
+            final_states = self._clone_local_states()
+            for name in bindings:
+                if name in base_states:
+                    final_states[name] = base_states[name]
+                else:
+                    final_states.pop(name, None)
+            arm_states.append(final_states)
             arms.append(
                 PatternMatchArmIR(
                     pattern,
@@ -95,6 +124,7 @@ class PatternLoweringMixin:
                     SourceSpan.from_ast(self.path, case.pattern),
                 )
             )
+        self._merge_branch_local_states(base_states, tuple(arm_states))
         borrowed = isinstance(node.subject, ast.Name) and self.parameter_ownership.get(
             node.subject.id
         ) in {"Ref", "Mut"}
@@ -302,6 +332,21 @@ class PatternLoweringMixin:
                         pattern,
                         self.path,
                         "Range endpoints must be literals.",
+                    )
+                if not (
+                    isinstance(low, PatternLiteralIR)
+                    and isinstance(high, PatternLiteralIR)
+                    and (expected.is_integer or expected == CHAR)
+                ):
+                    fail(
+                        "CRAB192",
+                        "Invalid Rust range pattern",
+                        (
+                            "rust.Range endpoints must be integer or char literals "
+                            "matching the subject type."
+                        ),
+                        self.path,
+                        pattern,
                     )
                 return PatternRangeIR(low, high), {}
 
