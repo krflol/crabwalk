@@ -24,6 +24,12 @@ All notable Crabwalk changes are recorded here.
 - CI and release actions use reviewed full commit SHAs, the Rust 1.97.0 toolchain,
   pinned Python build tooling, verified release inventories, and GitHub provenance
   attestations.
+- Native package compilation now hashes only declaration roots, requested entry
+  modules, required initializers, and reachable internal imports. A separate
+  wheel-source integrity hash still covers every shipped `.py` and `.pyi` file.
+- Rayon `Vec.par_iter()` now carries a typed borrowed-item state. `Vec<String>`
+  pipelines can filter borrowed rows, map them into owned strings, and collect a
+  native `Vec<String>` without consuming the input handle.
 
 ### Fixed
 
@@ -57,6 +63,9 @@ All notable Crabwalk changes are recorded here.
   across hot reloads.
 - Cargo dependency-lock replanning is iterative and bounded; a graph that changes
   during three consecutive plans now fails as `CRAB308` instead of recursing.
+- Generated move, panic, and Rust-result failures now use private native exception
+  identities with structured payloads. Public translation no longer trusts error
+  message prefixes, and borrow conflicts retain structured parameter/source data.
 
 ## [1.0.1] - 2026-08-23
 

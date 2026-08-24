@@ -24,6 +24,16 @@ def parallel_sum(stop: rust.u64) -> rust.u64:
     return values.par_iter().copied().sum()
 
 @rust.fn
+def normalize_active(
+    rows: rust.Ref[rust.Vec[rust.String]],
+) -> rust.Vec[rust.String]:
+    return rows.par_iter().filter(
+        lambda row: row.contains("|active|")
+    ).map(
+        lambda row: row.to_lowercase()
+    ).collect_vec()
+
+@rust.fn
 def rayon_workers() -> rust.usize:
     return rayon.current_num_threads()
 
@@ -54,6 +64,13 @@ async def main():
         await rust.async_call(python_boundary, 7)
     except TypeError as error:
         print("Python runtime boundaries" in str(error))
+        rows = rust.Vec[rust.String]([
+            "1|ALICE|active|",
+        "2|BOB|INACTIVE|",
+        "3|CAROL|active|",
+    ])
+    print(normalize_active(rows))
+    print(rows.to_python())
 
 asyncio.run(main())
 """,
@@ -82,4 +99,6 @@ asyncio.run(main())
         "True",
         "False",
         "True",
+        "['1|alice|active|', '3|carol|active|']",
+        "['1|ALICE|active|', '2|BOB|INACTIVE|', '3|CAROL|active|']",
     ]

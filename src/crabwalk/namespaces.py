@@ -48,6 +48,7 @@ OWNED_VALUE_RESERVED_NAMES = PYTHON_INSTANCE_RESERVED_NAMES | frozenset(
         "__module__",
         "__slots__",
         "_borrow_contexts",
+        "_check_borrow_access",
         "_check_thread",
         "_definition_site",
         "_enum_variants",

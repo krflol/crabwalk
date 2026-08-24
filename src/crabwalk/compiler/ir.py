@@ -754,6 +754,7 @@ class PackageIR:
     module_name: str
     source_path: str
     source_hash: str
+    wheel_source_integrity_hash: str
     functions: tuple[FunctionIR, ...]
     crates: tuple[CrateIR, ...] = ()
     source_paths: tuple[str, ...] = ()
@@ -761,5 +762,13 @@ class PackageIR:
     enums: tuple[EnumIR, ...] = ()
     traits: tuple[TraitIR, ...] = ()
 
+    @property
+    def compiler_input_hash(self) -> str:
+        """Identity of only the source closure that affects generated Rust."""
+
+        return self.source_hash
+
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        value = asdict(self)
+        value["compiler_input_hash"] = self.compiler_input_hash
+        return value

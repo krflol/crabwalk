@@ -133,7 +133,14 @@ atomic_first = rust.Vec[rust.u64]([91])
 try:
     consume_two(atomic_first, moved_tail)
 except CrabwalkMoveError as error:
-    print("atomic-owned", "second was moved" in str(error))
+    print(
+        "atomic-owned",
+        "second was moved" in str(error),
+        error.parameter == "second",
+        bool(error.definition_site),
+        bool(error.parameter_site),
+        bool(error.call_site),
+    )
 print(atomic_first.moved, atomic_first.to_python())
 
 atomic_ref_first = rust.Vec[rust.u64]([92])
@@ -202,6 +209,9 @@ except CrabwalkBorrowError as error:
         "parameter 'shared' defined at" in str(error)
         and "parameter 'mutable' defined at" in str(error)
         and "use separate values" in str(error),
+        error.parameters == ("shared", "mutable"),
+        len(error.parameter_sites) == 2,
+        bool(error.call_site),
     )
 print(borrowed.to_python())
 
@@ -259,7 +269,7 @@ print(borrowed.to_python())
         "[8, 9]",
         "2 True",
         "bytes b'\\x00\\xff'",
-        "atomic-owned True",
+        "atomic-owned True True True True True",
         "False [91]",
         "atomic-ref True",
         "False [92]",
@@ -271,7 +281,7 @@ print(borrowed.to_python())
         "[True] [10, 11]",
         "[12, 13]",
         "True [30, 31]",
-        "CrabwalkBorrowError True True",
+        "CrabwalkBorrowError True True True True True",
         "[20, 21]",
         "['CrabwalkBorrowError'] [True]",
         "[20, 21, 22]",

@@ -25,6 +25,9 @@ def test_codegen_is_deterministic_and_native_recursion_is_direct(
     assert 'println!("cargo:rerun-if-changed=build.rs");' in first.build_rs
     assert 'println!("cargo:rustc-link-arg=/Brepro");' in first.build_rs
     assert "add_extension_module_link_args();" in first.build_rs
+    assert "create_exception!" in first.rust_source
+    assert 'm.add("_CrabwalkNativePanicError"' in first.rust_source
+    assert "CrabwalkPanicError:" not in first.rust_source
     assert first.source_map["entries"]
 
 
@@ -58,6 +61,10 @@ def validate(value: rust.u64) -> rust.Result[rust.u64, rust.String]:
         not in generated.rust_source
     )
     assert "let __cw_result = __cw_result?;" in generated.rust_source
+    assert (
+        '__CwNativeRustResultError::new_err(("rust.String", error.to_string()))'
+        in generated.rust_source
+    )
 
 
 def test_owned_wrapper_preflights_every_argument_before_any_take(

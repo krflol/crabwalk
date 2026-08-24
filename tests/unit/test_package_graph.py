@@ -183,7 +183,7 @@ def test_package_cycle_includes_parent_initializer_for_child_import(
     package = tmp_path / "initializer_cycle"
     child = package / "a"
     child.mkdir(parents=True)
-    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text("from . import x\n", encoding="utf-8")
     (package / "x.py").write_text(
         "from .a import b\nsome_symbol = 1\n",
         encoding="utf-8",
@@ -201,3 +201,65 @@ def test_package_cycle_includes_parent_initializer_for_child_import(
     assert diagnostic.code == "CRAB204"
     assert "initializer_cycle.x" in diagnostic.message
     assert "initializer_cycle.a" in diagnostic.message
+
+
+def test_unreachable_python_only_cycle_and_syntax_error_do_not_block_native_graph(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "reachable_pkg"
+    package.mkdir()
+    entry = package / "__init__.py"
+    entry.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def native_value() -> rust.u64:
+    return 7
+""",
+        encoding="utf-8",
+    )
+    (package / "cycle_a.py").write_text(
+        "from .cycle_b import value\n",
+        encoding="utf-8",
+    )
+    (package / "cycle_b.py").write_text(
+        "from .cycle_a import value\n",
+        encoding="utf-8",
+    )
+    (package / "dormant_bad.py").write_text(
+        "def invalid(:\n",
+        encoding="utf-8",
+    )
+
+    ir = analyze_project_path(entry, "reachable_pkg")
+
+    assert [function.name for function in ir.functions] == ["native_value"]
+    assert ir.source_paths == (str(entry),)
+
+
+def test_unreachable_edit_changes_wheel_integrity_but_not_compiler_input(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "identity_pkg"
+    package.mkdir()
+    entry = package / "__init__.py"
+    entry.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def native_value() -> rust.u64:
+    return 7
+""",
+        encoding="utf-8",
+    )
+    unrelated = package / "presentation.py"
+    unrelated.write_text("LABEL = 'first'\n", encoding="utf-8")
+
+    first = analyze_project_path(entry, "identity_pkg")
+    unrelated.write_text("LABEL = 'second'\n", encoding="utf-8")
+    second = analyze_project_path(entry, "identity_pkg")
+
+    assert first.compiler_input_hash == second.compiler_input_hash
+    assert first.wheel_source_integrity_hash != second.wheel_source_integrity_hash

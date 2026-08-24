@@ -97,8 +97,8 @@ raised as `CrabwalkPanicError`; it never unwinds into Python.
 
 | Receiver | Methods |
 |---|---|
-| `Vec[T]` | `push`, `pop`, `len`, `is_empty`, `iter`, `iter_ref`; `par_iter` with declared Rayon; numeric teaching intrinsic `split_at_mut_sum` |
-| `Iterator[T]` | `map`, `filter`, `sum`, `count`, `collect_vec`, `copied` where the item contract permits |
+| `Vec[T]` | `push`, `pop`, `len`, `is_empty`, `iter`, `iter_ref`; typed `par_iter` with declared Rayon; numeric teaching intrinsic `split_at_mut_sum` |
+| `Iterator[T]` | `map`, `filter`, `sum`, `count`, `collect_vec`, `copied` where the item contract permits; Rayon adapters preserve borrowed versus owned item state |
 | `String`, `Str` | `len`, `is_empty`, `lines`, `contains`, `starts_with`, `ends_with`, `replace`, `find`; owned String also `as_str`, `push_str`, `to_lowercase` |
 | `Option[T]` | `is_some`, `is_none`, `unwrap`, `expect`, `unwrap_or` |
 | `Result[T, E]` | `is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or` |
@@ -272,12 +272,15 @@ lowering.
 
 ## Package import policy
 
-Regular packages compile as one crate with explicit supported imports and
-re-exports. The current compiler rejects internal import cycles (`CRAB204`) and
-`import *` (`CRAB205`) rather than copying partially initialized bindings or
+Regular packages compile their reachable native modules as one crate with
+explicit supported imports and re-exports. The roots are modules containing
+Crabwalk declarations, the requested entry module, and required package
+initializers. The compiler rejects cycles (`CRAB204`) and `import *` (`CRAB205`)
+inside that graph rather than copying partially initialized bindings or
 approximating Python's `__all__` and private-name rules. Cycle analysis includes
 the referenced module, selected child module, and every parent-package initializer
-that Python must execute.
+that Python must execute. Unreachable Python-only modules remain ordinary package
+content and are excluded from the native compiler identity.
 
 ## Generated identifier contract
 
@@ -317,6 +320,24 @@ def total(stop: rust.u64) -> rust.u64:
         values.push(value)
     return values.par_iter().copied().sum()
 ```
+
+Borrowed Rayon string items can be filtered, mapped into owned strings, and
+collected without consuming the input handle:
+
+```python
+@rust.fn
+def active_lowercase(
+    rows: rust.Ref[rust.Vec[rust.String]],
+) -> rust.Vec[rust.String]:
+    return rows.par_iter().filter(
+        lambda row: row.contains("|active|")
+    ).map(
+        lambda row: row.to_lowercase()
+    ).collect_vec()
+```
+
+Collecting a borrowed parallel iterator directly is rejected: use `copied()` for
+Copy items or `map` into an owned value first.
 
 Crabwalk also has native Rust futures:
 

@@ -110,7 +110,7 @@ def test_core_language_lowers_to_typed_ir_and_rust(tmp_path: Path) -> None:
     )
     assert (
         "std::result::Result::Err(error) => std::result::Result::Err("
-        "cw_runtime_pyo3::exceptions::PyRuntimeError"
+        "__CwNativeRustResultError"
     ) in (generated.rust_source)
     python_hello = ir.functions[-2]
     caller = ir.functions[-1]
