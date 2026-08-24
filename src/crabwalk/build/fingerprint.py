@@ -14,11 +14,11 @@ from functools import lru_cache
 from pathlib import Path
 
 from crabwalk import __version__
-from crabwalk.compiler.codegen import (
-    CODEGEN_SCHEMA_VERSION,
+from crabwalk.compiler.cargo_emission import (
     PYO3_VERSION,
     cargo_dependency_specification,
 )
+from crabwalk.compiler.codegen import CODEGEN_SCHEMA_VERSION
 from crabwalk.compiler.ir import PackageIR
 
 _BUILD_ENVIRONMENT_KEYS = (

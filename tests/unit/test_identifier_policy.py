@@ -168,10 +168,10 @@ def invalid() -> rust.u64:
 from crabwalk import rust
 @rust.fn
 def invalid() -> rust.u64:
-    total: rust.u64 = 0
+    total: rust.i64 = 0
     for gen in range(1):
         total += gen
-    return total
+    return 1
 """,
         ),
         (
@@ -306,6 +306,24 @@ def test_reserved_2024_name_fails_in_each_source_binding_family(
     source = tmp_path / f"invalid_{position.replace(' ', '_')}.py"
     source.write_text(source_text, encoding="utf-8")
 
+    hygienic_positions = {
+        "function",
+        "parameter",
+        "local",
+        "loop target",
+        "closure parameter",
+        "pattern binding",
+        "struct name",
+        "enum name",
+        "trait name",
+        "type parameter",
+        "lifetime parameter",
+        "crate binding",
+    }
+    if position in hygienic_positions:
+        analyze_path(source)
+        return
+
     with pytest.raises(CrabwalkCompilationError) as captured:
         analyze_path(source)
 
@@ -355,7 +373,7 @@ def test_reserved_crate_package_name_uses_internal_cargo_key() -> None:
 
 
 @pytest.mark.parametrize("name", sorted(RUST_PRELUDE_VALUE_CONSTRUCTORS))
-def test_prelude_constructors_are_rejected_as_value_bindings(
+def test_prelude_constructors_receive_hygienic_value_bindings(
     tmp_path: Path,
     name: str,
 ) -> None:
@@ -371,12 +389,10 @@ def invalid({name}: rust.u64) -> rust.u64:
         encoding="utf-8",
     )
 
-    with pytest.raises(CrabwalkCompilationError) as captured:
-        analyze_path(source)
-
-    diagnostic = captured.value.diagnostics[0]
-    assert diagnostic.code == "CRAB210"
-    assert "Rust prelude constructor" in diagnostic.message
+    ir = analyze_path(source)
+    parameter = ir.functions[0].parameters[0]
+    assert parameter.name == name
+    assert parameter.rust_name != name
 
 
 @pytest.mark.parametrize(
@@ -393,10 +409,10 @@ def invalid(value: rust.u64) -> rust.u64:
 from crabwalk import rust
 @rust.fn
 def invalid() -> rust.u64:
-    total: rust.u64 = 0
+    total: rust.i64 = 0
     for Some in range(1):
         total += Some
-    return total
+    return 1
 """,
         """\
 from crabwalk import rust
@@ -427,17 +443,14 @@ class Invalid:
 """,
     ],
 )
-def test_prelude_constructors_are_rejected_in_all_direct_binding_families(
+def test_prelude_constructors_are_hygienic_in_value_and_member_bindings(
     tmp_path: Path,
     source_text: str,
 ) -> None:
     source = tmp_path / "invalid_constructor_binding.py"
     source.write_text(source_text, encoding="utf-8")
 
-    with pytest.raises(CrabwalkCompilationError) as captured:
-        analyze_path(source)
-
-    assert captured.value.diagnostics[0].code == "CRAB210"
+    analyze_path(source)
 
 
 def test_prelude_constructor_spelling_remains_valid_for_qualified_enum_variant(
@@ -479,7 +492,7 @@ def identity(value: rust.u64) -> rust.u64:
         ("lifetime", "__cw_lifetime"),
     ],
 )
-def test_generic_names_cannot_shadow_builtin_or_compiler_types(
+def test_generic_source_names_are_independent_from_emitted_type_names(
     tmp_path: Path,
     factory: str,
     name: str,
@@ -496,10 +509,7 @@ def test_generic_names_cannot_shadow_builtin_or_compiler_types(
         encoding="utf-8",
     )
 
-    with pytest.raises(CrabwalkCompilationError) as captured:
-        analyze_path(source)
-
-    assert captured.value.diagnostics[0].code == "CRAB180"
+    analyze_path(source)
 
 
 def test_namespace_policy_constants_cover_generated_prefixes_and_types() -> None:
@@ -508,7 +518,9 @@ def test_namespace_policy_constants_cover_generated_prefixes_and_types() -> None
     assert COMPILER_LIFETIME_PREFIX == "__cw_"
     assert {"String", "Vec", "Result", "ThreadPool"} <= (CRABWALK_BUILTIN_TYPE_NAMES)
     assert is_crabwalk_type_parameter("T")
+    assert is_crabwalk_type_parameter("String")
     assert is_crabwalk_lifetime_parameter("a")
+    assert is_crabwalk_lifetime_parameter("__cw_lifetime")
 
 
 def test_rustc_oracle_accepts_supported_weak_names_in_emitted_positions(

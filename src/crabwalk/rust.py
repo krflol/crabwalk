@@ -199,6 +199,23 @@ class Crate:
 
 
 @dataclass(frozen=True, slots=True)
+class RustEffect:
+    """A reviewable effect promise attached to one typed crate adapter."""
+
+    name: str
+
+
+Pure = RustEffect("Pure")
+PythonRuntime = RustEffect("PythonRuntime")
+Blocking = RustEffect("Blocking")
+ThreadSpawn = RustEffect("ThreadSpawn")
+GlobalMutation = RustEffect("GlobalMutation")
+UnsafeMemory = RustEffect("UnsafeMemory")
+UnsafeFfi = RustEffect("UnsafeFfi")
+MayPanic = RustEffect("MayPanic")
+
+
+@dataclass(frozen=True, slots=True)
 class RustDynGeneric:
     def __getitem__(self, trait_value: RustTrait) -> RustType:
         if not isinstance(trait_value, RustTrait) or not trait_value.methods:
@@ -248,6 +265,7 @@ Result = RustGeneric("Result", 2)
 Owned = RustGeneric("Owned", 1)
 Ref = RustGeneric("Ref", 1)
 Mut = RustGeneric("Mut", 1)
+Closure = RustGeneric("Closure", 2)
 
 _F = TypeVar("_F", bound=Callable[..., object])
 
@@ -509,6 +527,54 @@ def crate(
     if not all(isinstance(value, str) for value in features):
         raise TypeError("rust.crate features must be strings")
     return Crate(package, package, version, tuple(features), path, git, rev)
+
+
+def extern_type(crate_value: Crate, *, path: str) -> RustType:
+    """Declare a crate-owned type for native-only adapter signatures."""
+
+    if not isinstance(crate_value, Crate):
+        raise TypeError("rust.extern_type expects a value returned by rust.crate")
+    parts = tuple(path.split("::")) if isinstance(path, str) else ()
+    if not parts or any(not part.isidentifier() for part in parts):
+        raise TypeError("rust.extern_type path must be a static Rust path")
+    return RustType(
+        "External",
+        python_name="::".join((crate_value.binding, *parts)),
+    )
+
+
+def extern(
+    crate_value: Crate,
+    *,
+    path: str,
+    effects: list[RustEffect] | tuple[RustEffect, ...] | None = None,
+) -> Callable[[_F], NativeOnlyFunction]:
+    """Declare a typed, native-only function adapter for one crate API."""
+
+    if not isinstance(crate_value, Crate):
+        raise TypeError("rust.extern expects a value returned by rust.crate")
+    parts = tuple(path.split("::")) if isinstance(path, str) else ()
+    if not parts or any(not part.isidentifier() for part in parts):
+        raise TypeError("rust.extern path must be a static Rust path")
+    if effects is not None and (
+        not effects or not all(isinstance(value, RustEffect) for value in effects)
+    ):
+        raise TypeError("rust.extern effects must be a non-empty RustEffect sequence")
+    if effects is not None and Pure in effects and len(effects) != 1:
+        raise TypeError("rust.Pure cannot be combined with another effect")
+
+    def decorate(function: _F) -> NativeOnlyFunction:
+        return _native_only_function(
+            function,
+            "extern",
+            {
+                "crate": crate_value,
+                "path": parts,
+                "effects": None if effects is None else tuple(effects),
+            },
+        )
+
+    return decorate
 
 
 def from_python(

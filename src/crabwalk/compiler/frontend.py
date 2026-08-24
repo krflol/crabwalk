@@ -11,7 +11,7 @@ from collections import Counter, OrderedDict
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal
 
 from crabwalk.diagnostics import (
     CrabwalkCompilationError,
@@ -24,6 +24,22 @@ from crabwalk.namespaces import (
     STRUCT_FIELD_RESERVED_NAMES,
 )
 
+from .bindings import assign_package_identities
+from .abi import (
+    enum_field_type_supported as _enum_field_type_supported,
+    owned_vector_element_supported as _owned_vector_element_supported,
+    python_parameter_boundary_supported as _python_parameter_boundary_supported,
+    python_return_boundary_supported as _python_return_boundary_supported,
+    struct_field_type_supported as _struct_field_type_supported,
+)
+from .declarations import (
+    DeclarationIndex,
+    has_rust_async_fn_decorator as _has_rust_async_fn_decorator,
+    has_rust_fn_decorator as _has_rust_fn_decorator,
+    is_extern_declaration as _is_extern_declaration,
+    is_rust_attribute as _is_rust_attribute,
+    is_rust_call_named as _is_rust_call_named,
+)
 from .effects import direct_expression_effects
 from .ir import (
     BOOL,
@@ -99,7 +115,6 @@ from .ir import (
 )
 from .naming import (
     COMPILER_VALUE_PREFIX,
-    RUST_PRELUDE_VALUE_CONSTRUCTORS,
     is_crabwalk_lifetime_parameter,
     is_crabwalk_type_parameter,
     is_rust_2024_identifier,
@@ -111,6 +126,14 @@ from .package_graph import (
     package_python_paths,
     single_file_source_graph,
 )
+from .ownership import (
+    ReceiverAccess,
+    builtin_receiver_access as _builtin_receiver_access,
+    place_from_ast as _place_from_ast,
+    receiver_access_for_ownership as _receiver_access_for_ownership,
+)
+from .source import parse_source
+from .types import ExternalType, IteratorExecution, IteratorItemMode, IteratorType
 
 _ANALYSIS_CACHE_LIMIT = 64
 _analysis_cache: OrderedDict[tuple[str, str, str], PackageIR] = OrderedDict()
@@ -160,24 +183,7 @@ _GENERIC_ARITY = {
     "Owned": 1,
     "Ref": 1,
     "Mut": 1,
-}
-_OWNED_VECTOR_ELEMENTS = {
-    "i8",
-    "i16",
-    "i32",
-    "i64",
-    "i128",
-    "u8",
-    "u16",
-    "u32",
-    "u64",
-    "u128",
-    "usize",
-    "f32",
-    "f64",
-    "bool",
-    "char",
-    "String",
+    "Closure": 2,
 }
 
 
@@ -196,62 +202,20 @@ class _Signature:
     method_for: TypeRef | None = None
     trait_symbol: str | None = None
     operator_kind: str | None = None
+    external_path: tuple[str, ...] | None = None
+    external_effects: tuple[Effect, ...] | None = None
 
     @property
     def rust_symbol(self) -> str:
         return self.symbol or self.name
 
 
-ReceiverAccess: TypeAlias = Literal["shared", "mutable", "owned", "interior"]
-
-
-@dataclass(frozen=True, slots=True)
-class _Place:
-    """A semantic storage location rooted in a local or parameter binding."""
-
-    root: str
-    projections: tuple[str, ...] = ()
-
-
 def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     """Analyze one Python module without importing or executing it."""
 
-    source_path = Path(path).resolve()
-    try:
-        source_bytes = source_path.read_bytes()
-        source = source_bytes.decode("utf-8-sig")
-    except OSError as error:
-        raise CrabwalkCompilationError(
-            Diagnostic(
-                "CRAB001",
-                "Cannot read source",
-                str(error),
-                help="Check the path and file permissions.",
-            )
-        ) from error
-    except UnicodeDecodeError as error:
-        raise CrabwalkCompilationError(
-            Diagnostic(
-                "CRAB002",
-                "Source is not UTF-8",
-                str(error),
-                help="Save Crabwalk source as UTF-8.",
-            )
-        ) from error
-
-    try:
-        tree = ast.parse(source, filename=str(source_path))
-    except SyntaxError as error:
-        span = SourceSpan(
-            str(source_path),
-            error.lineno or 1,
-            error.offset or 1,
-            error.end_lineno or error.lineno or 1,
-            error.end_offset or (error.offset or 1) + 1,
-        )
-        raise CrabwalkCompilationError(
-            Diagnostic("CRAB100", "Invalid Python syntax", error.msg, span)
-        ) from error
+    parsed = parse_source(path)
+    source_path = parsed.path
+    tree = parsed.tree
 
     _validate_rust_import(tree, source_path)
     for node in tree.body:
@@ -272,22 +236,10 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
                 "@rust.async_fn requires Python's 'async def' syntax.",
             )
 
-    declarations = [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and _has_rust_fn_decorator(node)
-    ]
-    struct_nodes = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and _has_rust_struct_decorator(node)
-    ]
-    enum_nodes = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and _has_rust_enum_decorator(node)
-    ]
+    declarations_index = DeclarationIndex.discover(tree)
+    declarations = declarations_index.functions
+    struct_nodes = declarations_index.structs
+    enum_nodes = declarations_index.enums
     identity = module_name or source_path.stem
     traits = _discover_traits(
         tree,
@@ -313,6 +265,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
         )
         for local_name, crate in discovered_crates.items()
     }
+    external_types = _discover_external_types(tree, source_path, crates)
     type_variables = _discover_type_variables(tree, source_path)
     struct_placeholders = {
         node.name: _struct_placeholder(
@@ -337,6 +290,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
         {name: value.type_ref for name, value in enum_placeholders.items()}
     )
     domain_types.update({name: value.type_ref for name, value in traits.items()})
+    domain_types.update(external_types)
     for name, type_ref in type_variables.items():
         if name in domain_types:
             _fail(
@@ -369,7 +323,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     }
     signatures = {
         declaration.name: replace(
-            _analyze_signature(declaration, source_path, domain_types),
+            _analyze_signature(declaration, source_path, domain_types, crates),
             module_name=identity,
             symbol=mangle_item(identity, declaration.name, namespace="fn"),
         )
@@ -387,21 +341,33 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
             domain_traits=traits,
         ).lower()
         for declaration in declarations
+        if signatures[declaration.name].external_path is None
     )
+    if not functions and not structs and not enums and not traits:
+        raise CrabwalkCompilationError(
+            Diagnostic(
+                "CRAB101",
+                "No Rust functions found",
+                "Typed extern declarations require at least one compiled function or domain type.",
+                SourceSpan.from_ast(source_path, tree),
+            )
+        )
     functions = _propagate_effects(functions)
     source_graph = single_file_source_graph(source_path)
-    return PackageIR(
-        schema_version=19,
-        module_name=identity,
-        source_path=str(source_path),
-        source_hash=source_graph.compiler_input_hash,
-        wheel_source_integrity_hash=source_graph.wheel_source_integrity_hash,
-        functions=functions,
-        crates=tuple(crates.values()),
-        source_paths=(str(source_path),),
-        structs=tuple(structs.values()),
-        enums=tuple(enums.values()),
-        traits=tuple(traits.values()),
+    return assign_package_identities(
+        PackageIR(
+            schema_version=21,
+            module_name=identity,
+            source_path=str(source_path),
+            source_hash=source_graph.compiler_input_hash,
+            wheel_source_integrity_hash=source_graph.wheel_source_integrity_hash,
+            functions=functions,
+            crates=tuple(crates.values()),
+            source_paths=(str(source_path),),
+            structs=tuple(structs.values()),
+            enums=tuple(enums.values()),
+            traits=tuple(traits.values()),
+        )
     )
 
 
@@ -419,6 +385,7 @@ class _PackageModule:
     enums: dict[str, EnumIR]
     traits: dict[str, TraitIR]
     crates: dict[str, CrateIR]
+    external_types: dict[str, ExternalType]
     type_variables: dict[str, TypeRef]
     is_package: bool
 
@@ -544,22 +511,10 @@ def _analyze_regular_package(
     for source_path in source_graph.compiler_paths:
         source_bytes, tree = _read_package_source(source_path)
         name = _package_module_name(package_root, package_name, source_path)
-        declarations = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and _has_rust_fn_decorator(node)
-        }
-        struct_nodes = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, ast.ClassDef) and _has_rust_struct_decorator(node)
-        }
-        enum_nodes = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, ast.ClassDef) and _has_rust_enum_decorator(node)
-        }
+        declarations_index = DeclarationIndex.discover(tree)
+        declarations = {node.name: node for node in declarations_index.functions}
+        struct_nodes = {node.name: node for node in declarations_index.structs}
+        enum_nodes = {node.name: node for node in declarations_index.enums}
         traits = _discover_traits(
             tree,
             source_path,
@@ -624,6 +579,7 @@ def _analyze_regular_package(
             )
             for local_name, crate in discovered_crates.items()
         }
+        external_types = _discover_external_types(tree, source_path, crates)
         modules[name] = _PackageModule(
             name=name,
             path=source_path,
@@ -637,20 +593,23 @@ def _analyze_regular_package(
             enums=enums,
             traits=traits,
             crates=crates,
+            external_types=external_types,
             type_variables=type_variables,
             is_package=source_path.name == "__init__.py",
         )
 
     _validate_package_import_graph(modules)
 
-    domain_cache: dict[str, dict[str, _DomainIR | _ModuleRef]] = {}
+    domain_cache: dict[str, dict[str, _DomainIR | ExternalType | _ModuleRef]] = {}
 
-    def domain_bindings(name: str) -> dict[str, _DomainIR | _ModuleRef]:
+    def domain_bindings(
+        name: str,
+    ) -> dict[str, _DomainIR | ExternalType | _ModuleRef]:
         cached = domain_cache.get(name)
         if cached is not None:
             return cached
         module = modules[name]
-        values: dict[str, _DomainIR | _ModuleRef] = {}
+        values: dict[str, _DomainIR | ExternalType | _ModuleRef] = {}
         domain_cache[name] = values
         for node in module.tree.body:
             if isinstance(node, ast.ClassDef):
@@ -670,8 +629,11 @@ def _analyze_regular_package(
                 for target in targets:
                     if isinstance(target, ast.Name):
                         trait = module.traits.get(target.id)
+                        external_type = module.external_types.get(target.id)
                         if trait is not None:
                             values[target.id] = trait
+                        elif external_type is not None:
+                            values[target.id] = external_type
                         else:
                             values.pop(target.id, None)
                 continue
@@ -776,6 +738,8 @@ def _analyze_regular_package(
             elif isinstance(value, TraitIR):
                 domain_types[local_name] = value.type_ref
                 domain_traits[local_name] = value
+            elif isinstance(value, ExternalType):
+                domain_types[local_name] = value
             elif isinstance(value, _ModuleRef):
                 _collect_domain_members(
                     (local_name,),
@@ -837,7 +801,12 @@ def _analyze_regular_package(
         module_domain_traits[name] = domain_traits
         module.signatures = {
             declaration.name: replace(
-                _analyze_signature(declaration, module.path, domain_types),
+                _analyze_signature(
+                    declaration,
+                    module.path,
+                    domain_types,
+                    visible_crates,
+                ),
                 module_name=name,
                 symbol=_package_rust_symbol(name, declaration.name),
             )
@@ -968,6 +937,8 @@ def _analyze_regular_package(
                     set(),
                 )
         for declaration in module.declarations.values():
+            if module.signatures[declaration.name].external_path is not None:
+                continue
             functions.append(
                 _FunctionLowerer(
                     declaration,
@@ -1019,18 +990,20 @@ def _analyze_regular_package(
     for name in sorted(modules):
         module = modules[name]
         source_paths.append(str(module.path))
-    return PackageIR(
-        schema_version=19,
-        module_name=package_name,
-        source_path=str(package_root / "__init__.py"),
-        source_hash=source_graph.compiler_input_hash,
-        wheel_source_integrity_hash=source_graph.wheel_source_integrity_hash,
-        functions=functions_tuple,
-        crates=tuple(all_crates[name] for name in sorted(all_crates)),
-        source_paths=tuple(source_paths),
-        structs=all_structs,
-        enums=all_enums,
-        traits=all_traits,
+    return assign_package_identities(
+        PackageIR(
+            schema_version=21,
+            module_name=package_name,
+            source_path=str(package_root / "__init__.py"),
+            source_hash=source_graph.compiler_input_hash,
+            wheel_source_integrity_hash=source_graph.wheel_source_integrity_hash,
+            functions=functions_tuple,
+            crates=tuple(all_crates[name] for name in sorted(all_crates)),
+            source_paths=tuple(source_paths),
+            structs=all_structs,
+            enums=all_enums,
+            traits=all_traits,
+        )
     )
 
 
@@ -1066,7 +1039,7 @@ def _collect_module_members(
 def _collect_domain_members(
     prefix: tuple[str, ...],
     module_name: str,
-    domain_bindings: Callable[[str], dict[str, _DomainIR | _ModuleRef]],
+    domain_bindings: Callable[[str], dict[str, _DomainIR | ExternalType | _ModuleRef]],
     types: dict[str, TypeRef],
     structs: dict[str, StructIR],
     enums: dict[str, EnumIR],
@@ -1088,6 +1061,8 @@ def _collect_domain_members(
         elif isinstance(value, TraitIR):
             types[qualified] = value.type_ref
             traits[qualified] = value
+        elif isinstance(value, ExternalType):
+            types[qualified] = value
         elif isinstance(value, _ModuleRef):
             _collect_domain_members(
                 path,
@@ -1152,30 +1127,8 @@ def _package_module_name(
 
 
 def _read_package_source(path: Path) -> tuple[bytes, ast.Module]:
-    try:
-        source_bytes = path.read_bytes()
-        source = source_bytes.decode("utf-8-sig")
-    except OSError as error:
-        raise CrabwalkCompilationError(
-            Diagnostic("CRAB001", "Cannot read source", str(error))
-        ) from error
-    except UnicodeDecodeError as error:
-        raise CrabwalkCompilationError(
-            Diagnostic("CRAB002", "Source is not UTF-8", str(error))
-        ) from error
-    try:
-        return source_bytes, ast.parse(source, filename=str(path))
-    except SyntaxError as error:
-        span = SourceSpan(
-            str(path),
-            error.lineno or 1,
-            error.offset or 1,
-            error.end_lineno or error.lineno or 1,
-            error.end_offset or (error.offset or 1) + 1,
-        )
-        raise CrabwalkCompilationError(
-            Diagnostic("CRAB100", "Invalid Python syntax", error.msg, span)
-        ) from error
+    parsed = parse_source(path)
+    return parsed.source_bytes, parsed.tree
 
 
 def _resolved_import_module(
@@ -1556,6 +1509,21 @@ class _FunctionLowerer:
             if existing is not None:
                 _require_type(value.type_ref, existing, self.path, node.value)
                 return AssignIR(target.id, value, SourceSpan.from_ast(self.path, node))
+            if value.type_ref == INFERRED:
+                _fail(
+                    "CRAB222",
+                    "Opaque crate value has no semantic type",
+                    (
+                        "An inferred crate result cannot be stored and used across "
+                        "expressions."
+                    ),
+                    self.path,
+                    node.value,
+                    (
+                        "Add a concrete annotation for a primitive result or declare "
+                        "the crate type and function with rust.extern_type/rust.extern."
+                    ),
+                )
             _validate_source_binding(target.id, self.path, target, "local")
             environment[target.id] = value.type_ref
             return LetIR(
@@ -2072,7 +2040,7 @@ class _FunctionLowerer:
 
         if isinstance(node, ast.Attribute):
             receiver = self._lower_expression(node.value, environment)
-            struct = self.structs_by_symbol.get(receiver.type_ref.rust_name)
+            struct = self.structs_by_symbol.get(receiver.type_ref.underlying.rust_name)
             field = (
                 next(
                     (value for value in struct.fields if value.name == node.attr), None
@@ -2346,7 +2314,7 @@ class _FunctionLowerer:
         signature: _Signature,
         environment: dict[str, TypeRef],
         expected: TypeRef | None,
-    ) -> CallIR:
+    ) -> CallIR | CrateCallIR:
         if node.keywords or len(node.args) != len(signature.parameters):
             _fail(
                 "CRAB114",
@@ -2403,9 +2371,36 @@ class _FunctionLowerer:
                     )
                 )
             else:
-                lowered_arguments.append(
-                    self._lower_call_argument(argument, environment, parameter.type_ref)
-                )
+                parameter_type = parameter.type_ref
+                if (
+                    signature.external_path is not None
+                    and parameter_type.rust_name == "Closure"
+                ):
+                    closure_input, closure_output = parameter_type.arguments
+                    closure = (
+                        self._lower_zero_closure(
+                            argument,
+                            environment,
+                            expected_result=closure_output,
+                        )
+                        if closure_input == UNIT
+                        else self._lower_closure(
+                            argument,
+                            environment,
+                            closure_input,
+                            borrowed_parameter=False,
+                            expected_result=closure_output,
+                        )
+                    )
+                    lowered_arguments.append(closure)
+                else:
+                    lowered_arguments.append(
+                        self._lower_call_argument(
+                            argument,
+                            environment,
+                            parameter_type,
+                        )
+                    )
         arguments = tuple(lowered_arguments)
         return_type = _substitute_generics(signature.return_type, substitutions)
         if _contains_generic_type(return_type):
@@ -2424,6 +2419,15 @@ class _FunctionLowerer:
         )
         if expected is not None:
             _require_type(call_type, expected, self.path, node)
+        if signature.external_path is not None:
+            return CrateCallIR(
+                signature.external_path,
+                arguments,
+                call_type,
+                SourceSpan.from_ast(self.path, node),
+                signature.external_effects,
+                signature.name,
+            )
         return CallIR(
             signature.rust_symbol,
             arguments,
@@ -2636,7 +2640,7 @@ class _FunctionLowerer:
 
         if isinstance(pattern, ast.MatchSingleton):
             if pattern.value is None and expected.rust_name == "Option":
-                return "None", {}
+                return "std::option::Option::None", {}
             if isinstance(pattern.value, bool) and expected == BOOL:
                 return ("true" if pattern.value else "false"), {}
             _unsupported(
@@ -2767,6 +2771,24 @@ class _FunctionLowerer:
                 )
                 return f"std::option::Option::Some({rendered})", bindings
 
+            if expected.rust_name == "Result" and path in {
+                ("rust", "Ok"),
+                ("rust", "Err"),
+            }:
+                if pattern.kwd_patterns or len(pattern.patterns) != 1:
+                    _unsupported(
+                        pattern,
+                        self.path,
+                        "rust.Ok and rust.Err patterns take one payload.",
+                    )
+                index = 0 if path == ("rust", "Ok") else 1
+                rendered, bindings = self._lower_general_pattern(
+                    pattern.patterns[0],
+                    expected.arguments[index],
+                )
+                constructor = "Ok" if index == 0 else "Err"
+                return f"std::result::Result::{constructor}({rendered})", bindings
+
             enum = self.enums_by_symbol.get(expected.rust_name)
             if enum is not None:
                 variant = self._enum_pattern_variant(path, enum, pattern)
@@ -2793,7 +2815,7 @@ class _FunctionLowerer:
             _unsupported(
                 pattern,
                 self.path,
-                "Use a matching struct, enum, Option, or rust.Range pattern.",
+                "Use a matching struct, enum, Option, Result, or rust.Range pattern.",
             )
 
         _unsupported(
@@ -3856,6 +3878,7 @@ class _FunctionLowerer:
                 "shared",
             )
 
+        receiver_type = semantic_receiver
         if receiver_type.rust_name == "Vec":
             element_type = receiver_type.arguments[0]
             if method == "push" and len(node.args) == 1:
@@ -3882,12 +3905,17 @@ class _FunctionLowerer:
                         node,
                     )
                 arguments = ()
-                result = TypeRef("Iterator", (element_type,))
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    element_type,
+                    IteratorItemMode.OWNED,
+                )
             elif method == "iter_ref" and not node.args:
                 arguments = ()
-                result = TypeRef(
-                    "Iterator",
-                    (TypeRef("Ref", (element_type,)),),
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    element_type,
+                    IteratorItemMode.SHARED_REF,
                 )
             elif method == "split_at_mut_sum" and len(node.args) == 1:
                 if (
@@ -3915,7 +3943,11 @@ class _FunctionLowerer:
                         'Declare rayon = rust.crate("rayon", version="1") at module scope.',
                     )
                 arguments = ()
-                result = TypeRef("ParallelIteratorRef", (element_type,))
+                result = IteratorType(
+                    IteratorExecution.PARALLEL,
+                    element_type,
+                    IteratorItemMode.SHARED_REF,
+                )
             else:
                 _unsupported(
                     node, self.path, f"Vec.{method} is not in the M2 capability table."
@@ -4120,6 +4152,19 @@ class _FunctionLowerer:
                     self._lower_expression(node.args[1], environment, value_type),
                 )
                 result = value_type
+            elif method in {"get", "get_mut"} and len(node.args) == 1:
+                arguments = (
+                    self._lower_expression(node.args[0], environment, key_type),
+                )
+                result = TypeRef(
+                    "Option",
+                    (
+                        TypeRef(
+                            "Mut" if method == "get_mut" else "Ref",
+                            (value_type,),
+                        ),
+                    ),
+                )
             elif method == "add" and len(node.args) == 2 and value_type.is_numeric:
                 arguments = (
                     self._lower_expression(node.args[0], environment, key_type),
@@ -4132,6 +4177,40 @@ class _FunctionLowerer:
             elif method == "is_empty" and not node.args:
                 arguments = ()
                 result = BOOL
+            elif method in {"iter", "iter_ref"} and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    TypeRef(
+                        "Tuple",
+                        (
+                            TypeRef("Ref", (key_type,)),
+                            TypeRef("Ref", (value_type,)),
+                        ),
+                    ),
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "keys" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    key_type,
+                    IteratorItemMode.SHARED_REF,
+                )
+            elif method == "values" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    value_type,
+                    IteratorItemMode.SHARED_REF,
+                )
+            elif method == "into_iter" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    TypeRef("Tuple", (key_type, value_type)),
+                    IteratorItemMode.OWNED,
+                )
             else:
                 _unsupported(
                     node,
@@ -4147,7 +4226,11 @@ class _FunctionLowerer:
                 result = BOOL
             elif method == "lines" and not node.args:
                 arguments = ()
-                result = TypeRef("Iterator", (STR,))
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    STR,
+                    IteratorItemMode.OWNED,
+                )
             elif receiver_type == STRING and method == "as_str" and not node.args:
                 arguments = ()
                 result = STR
@@ -4174,6 +4257,76 @@ class _FunctionLowerer:
             elif method == "find" and len(node.args) == 1:
                 arguments = (self._lower_expression(node.args[0], environment, STR),)
                 result = TypeRef("Option", (USIZE,))
+            elif method in {"trim", "trim_start", "trim_end"} and not node.args:
+                arguments = ()
+                result = STR
+            elif method == "split" and len(node.args) == 1:
+                arguments = (self._lower_expression(node.args[0], environment, STR),)
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    STR,
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "split_whitespace" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    STR,
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "split_once" and len(node.args) == 1:
+                arguments = (self._lower_expression(node.args[0], environment, STR),)
+                result = TypeRef("Option", (TypeRef("Tuple", (STR, STR)),))
+            elif method in {"strip_prefix", "strip_suffix"} and len(node.args) == 1:
+                arguments = (self._lower_expression(node.args[0], environment, STR),)
+                result = TypeRef("Option", (STR,))
+            elif method == "chars" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    CHAR,
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "bytes" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    TypeRef("u8"),
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "parse" and not node.args:
+                if (
+                    expected is None
+                    or expected.rust_name != "Result"
+                    or expected.arguments[1] != STRING
+                    or not (
+                        expected.arguments[0].is_numeric
+                        or expected.arguments[0].rust_name == "bool"
+                    )
+                ):
+                    _fail(
+                        "CRAB224",
+                        "String.parse needs a typed Result context",
+                        "Assign to rust.Result[number, rust.String] so the target type is explicit.",
+                        self.path,
+                        node,
+                    )
+                arguments = ()
+                result = expected
+            elif method == "join" and len(node.args) == 1:
+                values = self._lower_expression(node.args[0], environment)
+                if values.type_ref.rust_name != "Vec" or values.type_ref.arguments[
+                    0
+                ].rust_name not in {"String", "Str"}:
+                    _fail(
+                        "CRAB224",
+                        "String.join requires a vector of strings",
+                        "Pass rust.Vec[rust.String] or a borrowed string vector.",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (values,)
+                result = STRING
             else:
                 _unsupported(
                     node,
@@ -4194,6 +4347,59 @@ class _FunctionLowerer:
             elif method == "unwrap_or" and len(node.args) == 1:
                 arguments = (self._lower_expression(node.args[0], environment, inner),)
                 result = inner
+            elif method == "map" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, inner, borrowed_parameter=False
+                )
+                arguments = (closure,)
+                result = TypeRef("Option", (closure.body.type_ref,))
+            elif method == "and_then" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, inner, borrowed_parameter=False
+                )
+                if closure.body.type_ref.rust_name != "Option":
+                    _fail(
+                        "CRAB223",
+                        "Option.and_then closure must return Option",
+                        "Return rust.Some(value), None, or another Option expression.",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (closure,)
+                result = closure.body.type_ref
+            elif method == "or_else" and len(node.args) == 1:
+                closure = self._lower_zero_closure(
+                    node.args[0], environment, expected_result=receiver_type
+                )
+                _require_type(
+                    closure.body.type_ref, receiver_type, self.path, node.args[0]
+                )
+                arguments = (closure,)
+                result = receiver_type
+            elif method == "as_ref" and not node.args:
+                arguments = ()
+                result = TypeRef("Option", (TypeRef("Ref", (inner,)),))
+            elif (
+                method in {"copied", "cloned"}
+                and not node.args
+                and (inner.ownership == "Ref")
+            ):
+                value_type = inner.underlying
+                supported = (
+                    _is_copy_semantic_type(value_type)
+                    if method == "copied"
+                    else _is_clone_semantic_type(value_type)
+                )
+                if not supported:
+                    _fail(
+                        "CRAB223",
+                        f"Option item cannot be {method}",
+                        f"{value_type.display()} does not satisfy this adapter.",
+                        self.path,
+                        node,
+                    )
+                arguments = ()
+                result = TypeRef("Option", (value_type,))
             else:
                 _unsupported(
                     node,
@@ -4201,7 +4407,7 @@ class _FunctionLowerer:
                     f"Option.{method} is not in the M2 capability table.",
                 )
         elif receiver_type.rust_name == "Result":
-            success = receiver_type.arguments[0]
+            success, error_type = receiver_type.arguments
             if method in {"is_ok", "is_err"} and not node.args:
                 arguments = ()
                 result = BOOL
@@ -4216,86 +4422,292 @@ class _FunctionLowerer:
                     self._lower_expression(node.args[0], environment, success),
                 )
                 result = success
+            elif method == "map" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, success, borrowed_parameter=False
+                )
+                arguments = (closure,)
+                result = TypeRef("Result", (closure.body.type_ref, error_type))
+            elif method == "map_err" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, error_type, borrowed_parameter=False
+                )
+                arguments = (closure,)
+                result = TypeRef("Result", (success, closure.body.type_ref))
+            elif method == "and_then" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, success, borrowed_parameter=False
+                )
+                if (
+                    closure.body.type_ref.rust_name != "Result"
+                    or closure.body.type_ref.arguments[1] != error_type
+                ):
+                    _fail(
+                        "CRAB223",
+                        "Result.and_then closure has an incompatible error type",
+                        f"Return rust.Result[_, {error_type.display()}].",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (closure,)
+                result = closure.body.type_ref
+            elif method == "or_else" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, error_type, borrowed_parameter=False
+                )
+                if (
+                    closure.body.type_ref.rust_name != "Result"
+                    or closure.body.type_ref.arguments[0] != success
+                ):
+                    _fail(
+                        "CRAB223",
+                        "Result.or_else closure has an incompatible success type",
+                        f"Return rust.Result[{success.display()}, _].",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (closure,)
+                result = closure.body.type_ref
+            elif method == "as_ref" and not node.args:
+                arguments = ()
+                result = TypeRef(
+                    "Result",
+                    (
+                        TypeRef("Ref", (success,)),
+                        TypeRef("Ref", (error_type,)),
+                    ),
+                )
+            elif method == "ok" and not node.args:
+                arguments = ()
+                result = TypeRef("Option", (success,))
+            elif method == "err" and not node.args:
+                arguments = ()
+                result = TypeRef("Option", (error_type,))
             else:
                 _unsupported(
                     node,
                     self.path,
                     f"Result.{method} is not in the M2 capability table.",
                 )
-        elif receiver_type.rust_name in {
-            "Iterator",
-            "ParallelIterator",
-            "ParallelIteratorRef",
-        }:
-            item_type = receiver_type.arguments[0]
-            is_parallel = receiver_type.rust_name.startswith("ParallelIterator")
+        elif isinstance(receiver_type, IteratorType):
+            item_type = receiver_type.item_type
             if (
                 method == "copied"
                 and not node.args
-                and receiver_type.rust_name == "ParallelIteratorRef"
+                and receiver_type.item_mode != IteratorItemMode.OWNED
             ):
                 if not _is_copy_semantic_type(item_type):
                     _fail(
-                        "CRAB184",
-                        "Parallel iterator copy requires a Copy item",
-                        "Map borrowed String items into owned values before collection.",
+                        "CRAB220",
+                        "Iterator item cannot be copied",
+                        f"{item_type.display()} does not implement Copy.",
+                        self.path,
+                        node,
+                        "Use cloned() for Clone items or map into a new owned value.",
+                    )
+                arguments = ()
+                result = IteratorType(
+                    receiver_type.execution,
+                    item_type,
+                    IteratorItemMode.OWNED,
+                )
+            elif (
+                method == "cloned"
+                and not node.args
+                and receiver_type.item_mode != IteratorItemMode.OWNED
+            ):
+                if not _is_clone_semantic_type(item_type):
+                    _fail(
+                        "CRAB220",
+                        "Iterator item cannot be cloned",
+                        f"{item_type.display()} is not known to implement Clone.",
                         self.path,
                         node,
                     )
                 arguments = ()
-                result = TypeRef("ParallelIterator", (item_type,))
+                result = IteratorType(
+                    receiver_type.execution,
+                    item_type,
+                    IteratorItemMode.OWNED,
+                )
             elif method == "map" and len(node.args) == 1:
                 closure = self._lower_closure(
                     node.args[0],
                     environment,
-                    item_type,
+                    receiver_type.exposed_item_type,
                     borrowed_parameter=False,
                 )
                 arguments = (closure,)
-                result = TypeRef(
-                    "ParallelIterator" if is_parallel else "Iterator",
-                    (closure.body.type_ref,),
+                result = IteratorType(
+                    receiver_type.execution,
+                    closure.body.type_ref,
+                    IteratorItemMode.OWNED,
                 )
             elif method == "filter" and len(node.args) == 1:
-                borrowed_parallel_item = (
-                    receiver_type.rust_name == "ParallelIteratorRef"
-                )
-                if not _is_copy_semantic_type(item_type) and not (
-                    borrowed_parallel_item and item_type == STRING
-                ):
-                    _fail(
-                        "CRAB184",
-                        "Filter closure requires a Copy item",
-                        "Filter supports Copy items and borrowed Rayon String items.",
-                        self.path,
-                        node,
+                if receiver_type.item_mode == IteratorItemMode.OWNED:
+                    copy_item = _is_copy_semantic_type(item_type)
+                    closure_item = (
+                        item_type if copy_item else TypeRef("Ref", (item_type,))
                     )
+                    projection = "deref" if copy_item else "borrow"
+                else:
+                    closure_item = receiver_type.exposed_item_type
+                    projection = "deref"
                 closure = self._lower_closure(
                     node.args[0],
                     environment,
-                    item_type,
+                    closure_item,
                     borrowed_parameter=True,
                     expected_result=BOOL,
+                    parameter_projection=projection,
                 )
                 arguments = (closure,)
                 result = receiver_type
-            elif method == "collect_vec" and not node.args:
-                if receiver_type.rust_name == "ParallelIteratorRef":
+            elif method == "filter_map" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0],
+                    environment,
+                    receiver_type.exposed_item_type,
+                    borrowed_parameter=False,
+                )
+                if closure.body.type_ref.rust_name != "Option":
                     _fail(
-                        "CRAB184",
-                        "Borrowed parallel items cannot be collected as owned values",
-                        "Use copied() for Copy items or map the item into an owned value.",
+                        "CRAB221",
+                        "filter_map closure must return Option",
+                        "Return rust.Some(value) or an Option-producing expression.",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (closure,)
+                result = IteratorType(
+                    receiver_type.execution,
+                    closure.body.type_ref.arguments[0],
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "collect_vec" and not node.args:
+                if receiver_type.item_mode != IteratorItemMode.OWNED:
+                    _fail(
+                        "CRAB220",
+                        "Borrowed iterator items cannot become an owned Vec",
+                        "The iterator still yields borrowed values.",
                         self.path,
                         node,
+                        "Use copied(), cloned(), or map into an owned value first.",
                     )
                 arguments = ()
                 result = TypeRef("Vec", (item_type,))
-            elif method == "sum" and not node.args and item_type.is_numeric:
+            elif (
+                method == "collect_map"
+                and not node.args
+                and receiver_type.item_mode == IteratorItemMode.OWNED
+                and item_type.rust_name == "Tuple"
+                and len(item_type.arguments) == 2
+            ):
+                arguments = ()
+                result = TypeRef("HashMap", item_type.arguments)
+            elif (
+                method == "sum"
+                and not node.args
+                and receiver_type.item_mode == IteratorItemMode.OWNED
+                and item_type.is_numeric
+            ):
                 arguments = ()
                 result = item_type
             elif method == "count" and not node.args:
                 arguments = ()
                 result = USIZE
+            elif method in {"any", "all"} and len(node.args) == 1:
+                arguments = (
+                    self._lower_closure(
+                        node.args[0],
+                        environment,
+                        receiver_type.exposed_item_type,
+                        borrowed_parameter=False,
+                        expected_result=BOOL,
+                    ),
+                )
+                result = BOOL
+            elif method == "find" and len(node.args) == 1:
+                arguments = (
+                    self._lower_closure(
+                        node.args[0],
+                        environment,
+                        receiver_type.exposed_item_type,
+                        borrowed_parameter=True,
+                        expected_result=BOOL,
+                        parameter_projection=(
+                            "deref"
+                            if receiver_type.item_mode != IteratorItemMode.OWNED
+                            or _is_copy_semantic_type(item_type)
+                            else "borrow"
+                        ),
+                    ),
+                )
+                result = TypeRef("Option", (receiver_type.exposed_item_type,))
+            elif method == "fold" and len(node.args) == 2:
+                if receiver_type.execution != IteratorExecution.SEQUENTIAL:
+                    _fail(
+                        "CRAB221",
+                        "Parallel fold needs an explicit reduction strategy",
+                        "Use map(...).reduce(...) for one deterministic final value.",
+                        self.path,
+                        node,
+                    )
+                initial = self._lower_expression(
+                    node.args[0],
+                    environment,
+                    expected,
+                )
+                closure = self._lower_binary_closure(
+                    node.args[1],
+                    environment,
+                    initial.type_ref,
+                    receiver_type.exposed_item_type,
+                    expected_result=initial.type_ref,
+                )
+                arguments = (initial, closure)
+                result = initial.type_ref
+            elif method == "reduce" and len(node.args) == 1:
+                closure = self._lower_binary_closure(
+                    node.args[0],
+                    environment,
+                    receiver_type.exposed_item_type,
+                    receiver_type.exposed_item_type,
+                    expected_result=receiver_type.exposed_item_type,
+                )
+                arguments = (closure,)
+                result = TypeRef("Option", (receiver_type.exposed_item_type,))
+            elif method == "enumerate" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    receiver_type.execution,
+                    TypeRef("Tuple", (USIZE, receiver_type.exposed_item_type)),
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "zip" and len(node.args) == 1:
+                other = self._lower_expression(node.args[0], environment)
+                if not isinstance(other.type_ref, IteratorType) or (
+                    other.type_ref.execution != receiver_type.execution
+                ):
+                    _fail(
+                        "CRAB221",
+                        "Iterator zip execution modes differ",
+                        "zip requires another sequential or parallel iterator of the same family.",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (other,)
+                result = IteratorType(
+                    receiver_type.execution,
+                    TypeRef(
+                        "Tuple",
+                        (
+                            receiver_type.exposed_item_type,
+                            other.type_ref.exposed_item_type,
+                        ),
+                    ),
+                    IteratorItemMode.OWNED,
+                )
             else:
                 _unsupported(
                     node,
@@ -4325,6 +4737,14 @@ class _FunctionLowerer:
         if expected is not None:
             _require_type(result, expected, self.path, node)
         required = _builtin_receiver_access(receiver_type, method)
+        if receiver.type_ref.ownership == "Ref" and required in {"mutable", "owned"}:
+            _fail(
+                "CRAB208",
+                "Shared receiver cannot satisfy mutable or owned method access",
+                f"Method '{method}' requires {required} access to a shared value.",
+                self.path,
+                node,
+            )
         assert isinstance(node.func, ast.Attribute)
         self._require_place_access(node.func.value, required, f"method '{method}'")
         return MethodCallIR(
@@ -4346,6 +4766,7 @@ class _FunctionLowerer:
         *,
         borrowed_parameter: bool,
         expected_result: TypeRef | None = None,
+        parameter_projection: Literal["direct", "deref", "borrow"] = "direct",
     ) -> ClosureIR:
         if not isinstance(node, ast.Lambda):
             _fail(
@@ -4395,12 +4816,15 @@ class _FunctionLowerer:
             borrowed_parameter,
             TypeRef("Closure", (parameter_type, body.type_ref)),
             SourceSpan.from_ast(self.path, node),
+            parameter_projection=parameter_projection,
         )
 
     def _lower_zero_closure(
         self,
         node: ast.expr,
         environment: dict[str, TypeRef],
+        *,
+        expected_result: TypeRef | None = None,
     ) -> ClosureIR:
         if not isinstance(node, ast.Lambda):
             _fail(
@@ -4427,7 +4851,7 @@ class _FunctionLowerer:
                 self.path,
                 node,
             )
-        body = self._lower_expression(node.body, dict(environment))
+        body = self._lower_expression(node.body, dict(environment), expected_result)
         return ClosureIR(
             None,
             UNIT,
@@ -4435,6 +4859,71 @@ class _FunctionLowerer:
             False,
             TypeRef("Closure", (UNIT, body.type_ref)),
             SourceSpan.from_ast(self.path, node),
+        )
+
+    def _lower_binary_closure(
+        self,
+        node: ast.expr,
+        environment: dict[str, TypeRef],
+        first_type: TypeRef,
+        second_type: TypeRef,
+        *,
+        expected_result: TypeRef,
+    ) -> ClosureIR:
+        if not isinstance(node, ast.Lambda):
+            _fail(
+                "CRAB185",
+                "Iterator reduction requires a lambda",
+                "Use a one-expression lambda with two positional parameters.",
+                self.path,
+                node,
+            )
+        arguments = node.args
+        if (
+            len(arguments.args) != 2
+            or arguments.posonlyargs
+            or arguments.kwonlyargs
+            or arguments.vararg is not None
+            or arguments.kwarg is not None
+            or arguments.defaults
+            or arguments.kw_defaults
+        ):
+            _fail(
+                "CRAB185",
+                "Unsupported reduction closure signature",
+                "fold and reduce lambdas take exactly two required parameters.",
+                self.path,
+                node,
+            )
+        first, second = (value.arg for value in arguments.args)
+        for argument in arguments.args:
+            _validate_source_binding(
+                argument.arg,
+                self.path,
+                argument,
+                "closure parameter",
+            )
+        closure_environment = dict(environment)
+        closure_environment[first] = first_type
+        closure_environment[second] = second_type
+        body = self._lower_expression(
+            node.body,
+            closure_environment,
+            expected_result,
+        )
+        _require_type(body.type_ref, expected_result, self.path, node.body)
+        return ClosureIR(
+            first,
+            first_type,
+            body,
+            False,
+            TypeRef(
+                "Closure",
+                (TypeRef("Tuple", (first_type, second_type)), body.type_ref),
+            ),
+            SourceSpan.from_ast(self.path, node),
+            second_parameter=second,
+            second_parameter_type=second_type,
         )
 
 
@@ -4464,59 +4953,13 @@ def _validate_rust_import(tree: ast.Module, path: Path) -> None:
         )
 
 
-def _has_rust_fn_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    return any(
-        (
-            isinstance(item, ast.Attribute)
-            and isinstance(item.value, ast.Name)
-            and item.value.id == "rust"
-            and item.attr in {"fn", "async_fn"}
-        )
-        or (
-            isinstance(item, ast.Call)
-            and isinstance(item.func, ast.Attribute)
-            and _is_rust_attribute(item.func)
-            and item.func.attr in {"generic", "method", "impl", "operator"}
-        )
-        for item in node.decorator_list
-    )
-
-
-def _has_rust_async_fn_decorator(
-    node: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> bool:
-    return any(
-        isinstance(item, ast.Attribute)
-        and _is_rust_attribute(item)
-        and item.attr == "async_fn"
-        for item in node.decorator_list
-    )
-
-
-def _has_rust_struct_decorator(node: ast.ClassDef) -> bool:
-    return any(
-        (
-            isinstance(item, ast.Attribute)
-            and _is_rust_attribute(item)
-            and item.attr == "struct"
-        )
-        or (
-            isinstance(item, ast.Call)
-            and isinstance(item.func, ast.Attribute)
-            and _is_rust_attribute(item.func)
-            and item.func.attr == "struct"
-        )
-        for item in node.decorator_list
-    )
-
-
 def _struct_placeholder(
     node: ast.ClassDef,
     path: Path,
     module_name: str,
     symbol: str,
 ) -> StructIR:
-    if not is_rust_2024_identifier(node.name):
+    if not node.name.isidentifier() or keyword.iskeyword(node.name):
         _fail(
             "CRAB150",
             "Unsupported Rust struct name",
@@ -4590,6 +5033,7 @@ def _analyze_struct(
             child.target,
             "struct field",
             reserved=STRUCT_FIELD_RESERVED_NAMES,
+            rust_namespace="member",
         )
         names.add(child.target.id)
         field_type = _annotation_type(
@@ -4606,11 +5050,15 @@ def _analyze_struct(
                 path,
                 child.annotation,
             )
-        if not _struct_field_type_supported(field_type):
+        if not _struct_field_type_supported(
+            field_type,
+            {value.rust_name for value in domain_types.values()},
+        ):
             _fail(
                 "CRAB159",
                 "Unsupported Python-visible struct field type",
-                "The domain preview supports primitive, String, Vec, and Option fields.",
+                "Struct fields support primitives, String, Vec/Option of supported "
+                "boundary values, and directly nested domain types.",
                 path,
                 child.annotation,
             )
@@ -4650,27 +5098,6 @@ def _analyze_struct(
             )
     derives = _domain_derives(node, path, crates, "struct")
     return replace(placeholder, fields=tuple(fields), derives=derives)
-
-
-def _struct_field_type_supported(type_ref: TypeRef) -> bool:
-    if type_ref.rust_name in _OWNED_VECTOR_ELEMENTS:
-        return True
-    if type_ref.rust_name in {"Vec", "Option"} and len(type_ref.arguments) == 1:
-        return _struct_field_type_supported(type_ref.arguments[0])
-    return False
-
-
-def _enum_field_type_supported(
-    type_ref: TypeRef,
-    visible_domain_symbols: set[str],
-) -> bool:
-    if _struct_field_type_supported(type_ref):
-        return True
-    if type_ref.rust_name in visible_domain_symbols:
-        return True
-    if type_ref.rust_name in {"Vec", "Option"} and len(type_ref.arguments) == 1:
-        return _enum_field_type_supported(type_ref.arguments[0], visible_domain_symbols)
-    return False
 
 
 def _domain_derives(
@@ -4721,30 +5148,13 @@ def _domain_derives(
     return tuple(derives)
 
 
-def _has_rust_enum_decorator(node: ast.ClassDef) -> bool:
-    return any(
-        (
-            isinstance(item, ast.Attribute)
-            and _is_rust_attribute(item)
-            and item.attr == "enum"
-        )
-        or (
-            isinstance(item, ast.Call)
-            and isinstance(item.func, ast.Attribute)
-            and _is_rust_attribute(item.func)
-            and item.func.attr == "enum"
-        )
-        for item in node.decorator_list
-    )
-
-
 def _enum_placeholder(
     node: ast.ClassDef,
     path: Path,
     module_name: str,
     symbol: str,
 ) -> EnumIR:
-    if not is_rust_2024_identifier(node.name):
+    if not node.name.isidentifier() or keyword.iskeyword(node.name):
         _fail(
             "CRAB160",
             "Unsupported Rust enum name",
@@ -4841,6 +5251,7 @@ def _analyze_enum(
                     field_node,
                     "enum field",
                     reserved=ENUM_FIELD_RESERVED_NAMES,
+                    rust_namespace="member",
                 )
         fields = tuple(
             StructFieldIR(
@@ -4905,8 +5316,9 @@ def _analyze_signature(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     path: Path,
     domain_types: dict[str, TypeRef] | None = None,
+    crates: dict[str, CrateIR] | None = None,
 ) -> _Signature:
-    if not is_rust_2024_identifier(node.name) or keyword.iskeyword(node.name):
+    if not node.name.isidentifier() or keyword.iskeyword(node.name):
         _fail(
             "CRAB105",
             "Unsupported function name",
@@ -4939,14 +5351,33 @@ def _analyze_signature(
             path,
             node,
         )
-    method_name, method_for, trait_symbol, operator_kind = _method_decorator_metadata(
+    external_path, external_effects = _extern_decorator_metadata(
         node,
         path,
-        domain_types or {},
+        crates or {},
     )
-    type_parameters = _generic_type_parameters(node, path, domain_types or {})
+    if external_path is None:
+        method_name, method_for, trait_symbol, operator_kind = (
+            _method_decorator_metadata(
+                node,
+                path,
+                domain_types or {},
+            )
+        )
+        type_parameters = _generic_type_parameters(node, path, domain_types or {})
+    else:
+        method_name = None
+        method_for = None
+        trait_symbol = None
+        operator_kind = None
+        type_parameters = ()
     is_async = isinstance(node, ast.AsyncFunctionDef)
-    exported = not type_parameters and not is_async and method_name is None
+    exported = (
+        external_path is None
+        and not type_parameters
+        and not is_async
+        and method_name is None
+    )
     parameters_list: list[ParameterIR] = []
     for argument in arguments.args:
         _validate_source_binding(argument.arg, path, argument, "parameter")
@@ -4974,8 +5405,16 @@ def _analyze_signature(
             valid_owned_vector = (
                 underlying.rust_name == "Vec"
                 and len(underlying.arguments) == 1
-                and underlying.arguments[0].rust_name in _OWNED_VECTOR_ELEMENTS
-                and not underlying.arguments[0].arguments
+                and _owned_vector_element_supported(
+                    underlying.arguments[0],
+                    {
+                        value.rust_name
+                        for value in (domain_types or {}).values()
+                        if value.python_name is not None
+                        and value.rust_name not in {"Trait", "Dyn"}
+                    },
+                    allow_domain=True,
+                )
             )
             valid_domain = (
                 underlying.python_name is not None and not underlying.arguments
@@ -5079,13 +5518,32 @@ def _analyze_signature(
                 arguments.args[1],
             )
     if exported and return_type.ownership is not None:
-        _fail(
-            "CRAB141",
-            "Borrow/ownership wrapper return is deferred",
-            "Owned, Ref, and Mut are supported on parameters only.",
-            path,
-            node.returns or node,
+        underlying = return_type.underlying
+        valid_owned_return = return_type.ownership == "Owned" and (
+            (underlying.python_name is not None and not underlying.arguments)
+            or (
+                underlying.rust_name == "Vec"
+                and len(underlying.arguments) == 1
+                and _owned_vector_element_supported(
+                    underlying.arguments[0],
+                    {
+                        value.rust_name
+                        for value in (domain_types or {}).values()
+                        if value.python_name is not None
+                        and value.rust_name not in {"Trait", "Dyn"}
+                    },
+                    allow_domain=True,
+                )
+            )
         )
+        if not valid_owned_return:
+            _fail(
+                "CRAB141",
+                "Unsupported owned return boundary",
+                "Exported returns support rust.Owned around a domain value or supported Vec.",
+                path,
+                node.returns or node,
+            )
     if exported and return_type.python_name is not None:
         _fail(
             "CRAB154",
@@ -5103,7 +5561,11 @@ def _analyze_signature(
             node.returns or node,
             "Return rust.String instead.",
         )
-    if exported and not _python_return_boundary_supported(return_type):
+    if (
+        exported
+        and return_type.ownership is None
+        and not _python_return_boundary_supported(return_type)
+    ):
         _fail(
             "CRAB202",
             "Implicit complex return conversion is unsupported",
@@ -5124,99 +5586,8 @@ def _analyze_signature(
         method_for=method_for,
         trait_symbol=trait_symbol,
         operator_kind=operator_kind,
-    )
-
-
-def _python_parameter_boundary_supported(type_ref: TypeRef) -> bool:
-    if type_ref.rust_name in {
-        "i8",
-        "i16",
-        "i32",
-        "i64",
-        "i128",
-        "u8",
-        "u16",
-        "u32",
-        "u64",
-        "u128",
-        "usize",
-        "f32",
-        "f64",
-        "bool",
-        "char",
-        "String",
-        "Str",
-    }:
-        return not type_ref.arguments
-    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
-        return _python_parameter_boundary_supported(type_ref.arguments[0])
-    if type_ref.rust_name == "Tuple" and type_ref.arguments:
-        return all(
-            _python_parameter_boundary_supported(value) for value in type_ref.arguments
-        )
-    return False
-
-
-def _python_return_boundary_supported(type_ref: TypeRef) -> bool:
-    if type_ref.rust_name in {
-        "Unit",
-        "i8",
-        "i16",
-        "i32",
-        "i64",
-        "i128",
-        "u8",
-        "u16",
-        "u32",
-        "u64",
-        "u128",
-        "usize",
-        "f32",
-        "f64",
-        "bool",
-        "char",
-        "String",
-    }:
-        return not type_ref.arguments
-    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
-        return _python_return_boundary_supported(type_ref.arguments[0])
-    if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
-        return _python_return_boundary_supported(type_ref.arguments[0])
-    if type_ref.rust_name == "Tuple" and type_ref.arguments:
-        return all(
-            _python_return_boundary_supported(value) for value in type_ref.arguments
-        )
-    if type_ref.rust_name == "Result" and len(type_ref.arguments) == 2:
-        success, error = type_ref.arguments
-        return _python_return_boundary_supported(
-            success
-        ) and _rust_error_display_supported(error)
-    return False
-
-
-def _rust_error_display_supported(type_ref: TypeRef) -> bool:
-    return (
-        type_ref.rust_name
-        in {
-            "i8",
-            "i16",
-            "i32",
-            "i64",
-            "i128",
-            "u8",
-            "u16",
-            "u32",
-            "u64",
-            "u128",
-            "usize",
-            "f32",
-            "f64",
-            "bool",
-            "char",
-            "String",
-            "Str",
-        }
-        and not type_ref.arguments
+        external_path=external_path,
+        external_effects=external_effects,
     )
 
 
@@ -5388,23 +5759,6 @@ def _annotation_type(
     )
 
 
-def _is_rust_attribute(node: ast.AST | None) -> bool:
-    return (
-        isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "rust"
-    )
-
-
-def _is_rust_call_named(node: ast.AST | None, name: str) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and _is_rust_attribute(node.func)
-        and node.func.attr == name
-    )
-
-
 _GENERIC_TRAIT_BOUNDS = {"Clone", "Copy", "Debug", "Display", "Ord", "PartialOrd"}
 
 
@@ -5443,7 +5797,7 @@ def _discover_traits(
                 path,
                 call,
             )
-        if not is_rust_2024_identifier(binding):
+        if not binding.isidentifier() or keyword.iskeyword(binding):
             _fail(
                 "CRAB191",
                 "Unsupported Rust trait name",
@@ -5770,6 +6124,189 @@ def _method_decorator_metadata(
     )
 
 
+def _discover_external_types(
+    tree: ast.Module,
+    path: Path,
+    crates: dict[str, CrateIR],
+) -> dict[str, ExternalType]:
+    """Discover statically typed crate-owned values used by adapter signatures."""
+
+    values: dict[str, ExternalType] = {}
+    for node in tree.body:
+        if not (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and _is_rust_call_named(node.value, "extern_type")
+        ):
+            continue
+        binding = node.targets[0].id
+        _validate_source_binding(
+            binding,
+            path,
+            node.targets[0],
+            "external type",
+            rust_namespace="type",
+        )
+        call = node.value
+        crate_path = _crate_path(call.args[0], crates) if len(call.args) == 1 else None
+        path_nodes = [value for value in call.keywords if value.arg == "path"]
+        if (
+            crate_path is None
+            or len(crate_path) != 1
+            or len(path_nodes) != 1
+            or len(call.keywords) != 1
+            or not isinstance(path_nodes[0].value, ast.Constant)
+            or not isinstance(path_nodes[0].value.value, str)
+        ):
+            _fail(
+                "CRAB224",
+                "Invalid external Rust type declaration",
+                "Use TypeName = rust.extern_type(crate_name, path='module::Type').",
+                path,
+                call,
+            )
+        rust_path = tuple(path_nodes[0].value.value.split("::"))
+        if not rust_path or any(
+            not is_rust_2024_identifier(part) for part in rust_path
+        ):
+            _fail(
+                "CRAB224",
+                "Invalid external Rust type path",
+                "Every component must be a static Rust identifier.",
+                path,
+                path_nodes[0].value,
+            )
+        values[binding] = ExternalType(crate_path[0], rust_path, binding)
+    return values
+
+
+_EXTERN_EFFECTS: dict[str, Effect] = {
+    "PythonRuntime": Effect.PYTHON_RUNTIME,
+    "Blocking": Effect.BLOCKING,
+    "ThreadSpawn": Effect.THREAD_SPAWN,
+    "GlobalMutation": Effect.GLOBAL_MUTATION,
+    "UnsafeMemory": Effect.UNSAFE_MEMORY,
+    "UnsafeFfi": Effect.UNSAFE_FFI,
+    "MayPanic": Effect.MAY_PANIC,
+}
+
+
+def _extern_decorator_metadata(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    path: Path,
+    crates: dict[str, CrateIR],
+) -> tuple[tuple[str, ...] | None, tuple[Effect, ...] | None]:
+    if not _is_extern_declaration(node):
+        return None, None
+    if isinstance(node, ast.AsyncFunctionDef):
+        _fail(
+            "CRAB225",
+            "External adapter cannot be async",
+            "Declare a synchronous crate function and wrap it in a compiled async helper.",
+            path,
+            node,
+        )
+    decorator = node.decorator_list[0]
+    assert isinstance(decorator, ast.Call)
+    crate_path = (
+        _crate_path(decorator.args[0], crates) if len(decorator.args) == 1 else None
+    )
+    options = {value.arg: value for value in decorator.keywords if value.arg}
+    path_option = options.get("path")
+    effects_option = options.get("effects")
+    if (
+        crate_path is None
+        or len(crate_path) != 1
+        or set(options) - {"path", "effects"}
+        or path_option is None
+        or not isinstance(path_option.value, ast.Constant)
+        or not isinstance(path_option.value.value, str)
+    ):
+        _fail(
+            "CRAB225",
+            "Invalid external crate adapter",
+            "Use @rust.extern(crate_name, path='module::function', effects=[...]).",
+            path,
+            decorator,
+        )
+    rust_path = tuple(path_option.value.value.split("::"))
+    if not rust_path or any(not is_rust_2024_identifier(part) for part in rust_path):
+        _fail(
+            "CRAB225",
+            "Invalid external adapter path",
+            "Every path component must be a static Rust identifier.",
+            path,
+            path_option.value,
+        )
+
+    if effects_option is None:
+        effects = (Effect.OPAQUE_CRATE_CALL, Effect.MAY_PANIC)
+    else:
+        effects_node = effects_option.value
+        if not isinstance(effects_node, (ast.List, ast.Tuple)) or not effects_node.elts:
+            _fail(
+                "CRAB225",
+                "External adapter effects must be explicit",
+                "Use [rust.Pure] or a non-empty list of declared effects.",
+                path,
+                effects_node,
+            )
+        names: list[str] = []
+        for value in effects_node.elts:
+            if not _is_rust_attribute(value) or not isinstance(value, ast.Attribute):
+                _fail(
+                    "CRAB225",
+                    "Invalid external adapter effect",
+                    "Use effect markers from the canonical rust namespace.",
+                    path,
+                    value,
+                )
+            names.append(value.attr)
+        if "Pure" in names:
+            if names != ["Pure"]:
+                _fail(
+                    "CRAB225",
+                    "Pure adapter has conflicting effects",
+                    "rust.Pure must be the only effect marker.",
+                    path,
+                    effects_node,
+                )
+            effects = ()
+        else:
+            unknown = sorted(set(names) - set(_EXTERN_EFFECTS))
+            if unknown:
+                _fail(
+                    "CRAB225",
+                    "Unknown external adapter effect",
+                    f"Unsupported effect marker(s): {', '.join(unknown)}.",
+                    path,
+                    effects_node,
+                )
+            effects = tuple(dict.fromkeys(_EXTERN_EFFECTS[name] for name in names))
+
+    if not (
+        len(node.body) == 1
+        and (
+            isinstance(node.body[0], ast.Pass)
+            or (
+                isinstance(node.body[0], ast.Expr)
+                and isinstance(node.body[0].value, ast.Constant)
+                and node.body[0].value.value is Ellipsis
+            )
+        )
+    ):
+        _fail(
+            "CRAB225",
+            "External adapter has a Python body",
+            "Use pass or ...; the declaration describes an existing Rust function.",
+            path,
+            node,
+        )
+    return (*crate_path, *rust_path), effects
+
+
 def _discover_crates(tree: ast.Module, path: Path) -> dict[str, CrateIR]:
     crates: dict[str, CrateIR] = {}
     for node in tree.body:
@@ -5784,7 +6321,7 @@ def _discover_crates(tree: ast.Module, path: Path) -> dict[str, CrateIR]:
         ):
             continue
         binding = node.targets[0].id
-        if not is_rust_2024_identifier(binding):
+        if not binding.isidentifier() or keyword.iskeyword(binding):
             _fail(
                 "CRAB130",
                 "Invalid crate binding",
@@ -5931,78 +6468,6 @@ def _attribute_parts(node: ast.expr) -> tuple[str, ...]:
     return ()
 
 
-def _place_from_ast(node: ast.expr) -> _Place | None:
-    """Resolve a supported expression to its storage root and projections."""
-
-    if isinstance(node, ast.Name):
-        return _Place(node.id)
-    if isinstance(node, ast.Attribute):
-        base = _place_from_ast(node.value)
-        return (
-            None
-            if base is None
-            else _Place(base.root, (*base.projections, f"field:{node.attr}"))
-        )
-    if isinstance(node, ast.Subscript):
-        base = _place_from_ast(node.value)
-        return None if base is None else _Place(base.root, (*base.projections, "index"))
-    return None
-
-
-def _receiver_access_for_ownership(ownership: str | None) -> ReceiverAccess:
-    if ownership == "Mut":
-        return "mutable"
-    if ownership == "Owned":
-        return "owned"
-    return "shared"
-
-
-def _builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
-    """Return the Rust receiver capability for one built-in method."""
-
-    receiver = type_ref.underlying.rust_name
-    if receiver == "Vec" and method in {"push", "pop", "split_at_mut_sum"}:
-        return "mutable"
-    if receiver == "HashMap" and method in {
-        "insert",
-        "remove",
-        "entry_or_insert",
-        "add",
-    }:
-        return "mutable"
-    if receiver == "String" and method == "push_str":
-        return "mutable"
-    if receiver == "TcpStream" and method in {"write_get", "read_to_string"}:
-        return "mutable"
-    if receiver == "RefCell" and method == "replace":
-        return "interior"
-    if receiver == "Arc" and method in {"add_locked", "get_locked"}:
-        return "interior"
-    if receiver == "ThreadPool" and method == "finish":
-        return "owned"
-    if receiver == "ThreadHandle" and method == "join":
-        return "owned"
-    if receiver in {
-        "Iterator",
-        "ParallelIterator",
-        "ParallelIteratorRef",
-        "Option",
-        "Result",
-    } and method in {
-        "map",
-        "filter",
-        "copied",
-        "collect_vec",
-        "sum",
-        "count",
-        "unwrap",
-        "expect",
-        "unwrap_or",
-    }:
-        return "owned"
-    return "shared"
-
-
 def _assignment_counts(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
 ) -> Counter[str]:
@@ -6035,6 +6500,7 @@ def _mutated_receiver_names(
                 "push_str",
                 "insert",
                 "remove",
+                "get_mut",
                 "entry_or_insert",
                 "add",
                 "split_at_mut_sum",
@@ -6412,11 +6878,10 @@ def _substitute_generics(
         return substitutions.get(type_ref.rust_name, type_ref)
     if not type_ref.arguments:
         return type_ref
-    return replace(
-        type_ref,
-        arguments=tuple(
+    return type_ref.with_arguments(
+        tuple(
             _substitute_generics(value, substitutions) for value in type_ref.arguments
-        ),
+        )
     )
 
 
@@ -6472,6 +6937,22 @@ def _is_copy_semantic_type(type_ref: TypeRef) -> bool:
     )
 
 
+def _is_clone_semantic_type(type_ref: TypeRef) -> bool:
+    return (
+        _is_copy_semantic_type(type_ref)
+        or type_ref.rust_name == "String"
+        or (
+            type_ref.rust_name in {"Vec", "Option"}
+            and len(type_ref.arguments) == 1
+            and _is_clone_semantic_type(type_ref.arguments[0])
+        )
+        or (
+            type_ref.rust_name in {"Tuple", "Array"}
+            and all(_is_clone_semantic_type(value) for value in type_ref.arguments)
+        )
+    )
+
+
 def _require_integer(type_ref: TypeRef, path: Path, node: ast.AST) -> None:
     if not type_ref.is_integer:
         _fail(
@@ -6508,23 +6989,24 @@ def _validate_source_binding(
     rust_namespace: Literal["value", "member"] = "value",
 ) -> None:
     reserved = reserved or ()
-    prelude_collision = (
-        rust_namespace == "value" and name in RUST_PRELUDE_VALUE_CONSTRUCTORS
-    )
+    directly_emitted = rust_namespace == "member"
+    prelude_collision = False
     if (
-        not is_rust_2024_identifier(name)
-        or name.startswith(COMPILER_VALUE_PREFIX)
+        not name.isidentifier()
+        or keyword.iskeyword(name)
+        or (directly_emitted and not is_rust_2024_identifier(name))
+        or (directly_emitted and name.startswith(COMPILER_VALUE_PREFIX))
         or name in reserved
         or prelude_collision
     ):
         reason = (
             "a compiler-reserved __cw_ name"
-            if name.startswith(COMPILER_VALUE_PREFIX)
+            if directly_emitted and name.startswith(COMPILER_VALUE_PREFIX)
             else "a Rust prelude constructor in the value namespace"
             if prelude_collision
             else "a generated or runtime-reserved Python member"
             if name in reserved
-            else "a Rust keyword or unsupported Rust identifier"
+            else "an unsupported identifier in this emitted namespace"
         )
         _fail(
             "CRAB210",
@@ -6533,8 +7015,8 @@ def _validate_source_binding(
             path,
             node,
             (
-                "Choose a source name that is valid in Rust 2024, does not start "
-                "with __cw_, and does not overlap Crabwalk's Python wrapper API."
+                "Choose a valid Python identifier that does not overlap the "
+                "generated Python wrapper API for this declaration."
             ),
         )
 

@@ -10,6 +10,32 @@ tags:
 
 # Crabwalk Language Reference
 
+## Capability maturity
+
+“Supported” is not a single breadth claim. Proof means one audited teaching shape;
+Bounded means several documented forms under explicit constraints; Compositional
+means values survive ordinary combinations across types, adapters, ownership, and
+boundaries; Production additionally requires validated lifecycle, performance, and
+platform evidence. Rust Book chapter coverage is tracked separately and never
+promotes a language family by itself.
+
+<!-- crabwalk-capabilities:start -->
+| Capability | Maturity | Supported contract | Evidence | Important limit |
+|---|---|---|---|---|
+| Static compiler pipeline | Compositional | Source-spanned typed IR, validation, deterministic Rust/PyO3 emission | unit, native, package, diagnostic, and generated-Rust tests | an explicit Python subset; rustc remains authoritative |
+| Ownership boundary | Compositional | Owned/Ref/Mut, move state, borrows, reload and fingerprint identity | multi-argument, alias, reload, thread, domain, and vector tests | handles are thread-affine; no retained cross-call borrows |
+| Cargo build and cache | Compositional | locks, complete modeled fingerprints, hashing, leases, atomic publish | dependency, corruption, replan, prune, race, and wheel tests | trusted build scripts may require declared extra inputs |
+| Sequential iterators | Compositional | owned/shared items; map/filter/filter_map/fold/reduce/collect and queries | Copy, String, &str, tuple, domain, one- and three-stage native pipelines | expression lambdas only; no retained iterator boundary |
+| Rayon iterators | Compositional | typed par_iter with borrowed items, adapters, collect, sum and reduce | u64, Vec<String>, and Vec<domain> multi-adapter native tests | requires an explicit Rayon dependency; no arbitrary Rayon API reflection |
+| Structured native data | Compositional | recursive vectors, domain rows, nested domains, owned domain returns | Python mappings/handles through Vec<Row>, nested struct/enum round trips | allocating explicit input; direct recursive domain cycles are invalid Rust |
+| String, HashMap, Option/Result | Compositional | parse-transform-group-iterate-return algebra with typed errors | native delimited parsing and structured filter-group-emit acceptance | documented method table is finite, not the complete Rust standard library |
+| Typed crate adapters | Bounded | external types/functions, borrow signatures, closures, declared effects | real path-crate value and generic callback native test | no trait/builder manifest generation or automatic crate API discovery |
+| Traits, generics, operators | Bounded | generic helpers, shared no-argument traits, Add implementations | Rust Book and focused native conformance tests | not a general Rust trait or operator declaration language |
+| std-only native futures | Proof | Future/await/join/select lowering through a teaching executor | focused Rust Book subprocess tests | busy-polling; no reactor, cancellation, Tokio, or Python future ABI |
+| Thread pool and TCP | Proof | finite unit-job pool and loopback HTTP teaching operations | panic-containment and Rust Book web-server subprocess tests | no general server, task handles, backpressure, TLS, or cancellation |
+| Advanced and unsafe intrinsics | Proof | audited operations for individual Rust Book concepts | subprocess panic/unsafe and exact code-generation tests | not general inline Rust, FFI, unsafe, macro, or pointer support |
+<!-- crabwalk-capabilities:end -->
+
 ## Declaration contract
 
 - Use exactly `from crabwalk import rust`; namespace aliases are rejected.
@@ -98,11 +124,11 @@ raised as `CrabwalkPanicError`; it never unwinds into Python.
 | Receiver | Methods |
 |---|---|
 | `Vec[T]` | `push`, `pop`, `len`, `is_empty`, `iter`, `iter_ref`; typed `par_iter` with declared Rayon; numeric teaching intrinsic `split_at_mut_sum` |
-| `Iterator[T]` | `map`, `filter`, `sum`, `count`, `collect_vec`, `copied` where the item contract permits; Rayon adapters preserve borrowed versus owned item state |
-| `String`, `Str` | `len`, `is_empty`, `lines`, `contains`, `starts_with`, `ends_with`, `replace`, `find`; owned String also `as_str`, `push_str`, `to_lowercase` |
-| `Option[T]` | `is_some`, `is_none`, `unwrap`, `expect`, `unwrap_or` |
-| `Result[T, E]` | `is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or` |
-| `HashMap[K, V]` | `insert`, `contains_key`, `remove`, `get_or`, `entry_or_insert`, numeric `add`, `len`, `is_empty` |
+| typed iterator | `map`, `filter`, `filter_map`, `copied`, `cloned`, `collect_vec`, `collect_map`, `sum`, `count`, `any`, `all`, `find`, `fold`, `reduce`, `enumerate`, `zip`; item ownership and sequential/parallel execution remain explicit |
+| `String`, `Str` | `len`, `is_empty`, `lines`, `as_str`, `to_lowercase`, `contains`, `starts_with`, `ends_with`, `push_str`, `replace`, `find`, `trim`, `trim_start`, `trim_end`, `split`, `split_once`, `split_whitespace`, `strip_prefix`, `strip_suffix`, `chars`, `bytes`, typed numeric `parse`, and `join` |
+| `Option[T]` | `is_some`, `is_none`, `unwrap`, `expect`, `unwrap_or`, `map`, `and_then`, `or_else`, `as_ref`, `copied`, `cloned` |
+| `Result[T, E]` | `is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or`, `map`, `map_err`, `and_then`, `or_else`, `as_ref`, `ok`, `err`; `rust.Ok`/`rust.Err` patterns |
+| `HashMap[K, V]` | `insert`, `contains_key`, `remove`, `get`, `get_mut`, `get_or`, `entry_or_insert`, numeric `add`, `len`, `is_empty`, `iter`, `iter_ref`, `keys`, `values`, `into_iter` |
 | `Box`, `Rc`, `RefCell` | focused construction, copy dereference/count/interior-mutation operations used by the Book suite |
 | `Arc<Mutex<T>>` | `clone`, `strong_count`, numeric `add_locked`, `get_locked` |
 | `Sender`, `Receiver`, `ThreadHandle` | `send`, `recv`, `recv_async`, `join` |
@@ -115,10 +141,11 @@ closing the channel and joining workers. Use `.expect(...)` or propagate the res
 when worker failure matters; `Drop` still closes/joins but never propagates a worker
 panic.
 
-Calls on an inferred declared-crate value may continue a crate method chain and
-are ultimately checked by rustc. This is not general crate reflection: source
-must provide enough expected type context, and a bad API call becomes a mapped
-Cargo diagnostic.
+An untyped declared-crate call may continue only as a terminal expression with a
+concrete expected result. An inferred crate value cannot be stored: `CRAB222`
+directs multi-expression APIs to `rust.extern_type` and `@rust.extern`. Typed
+adapters declare the Rust path, full Crabwalk-visible signature, closure inputs and
+outputs, and reviewed effects. Rustc remains authoritative for the actual crate API.
 
 ## Domain types, methods, and traits
 
@@ -150,10 +177,11 @@ must contain only the shared receiver. An additional implementation parameter is
 source-spanned `CRAB211`; trait method arguments are not part of the current trait
 declaration shape.
 
-Nested domain enum payloads are currently native-only at Python construction and
-getter boundaries. Construct and inspect them inside compiled functions; direct
-Python constructors/getters are omitted until consuming conversion semantics are
-specified.
+Direct nested struct fields and enum payloads can be constructed from a matching
+compiled handle or mapping, read as fingerprint-bound handles, and deep-copied with
+`to_python()`. Owned domain and `Vec[Domain]` returns preserve the same native
+identity. Container-wrapped nested domain fields remain outside the current codec;
+use a direct nested domain or a top-level structured vector.
 
 ## Pattern matching
 
@@ -229,6 +257,24 @@ package resolution and the called API; a resolution failure is reported as
 `CRAB302` at the declaration, while rustc API failures are mapped to the originating
 call.
 
+For a crate API whose values outlive one terminal expression, declare types and
+functions explicitly:
+
+```python
+native = rust.crate("native-core", path="./native")
+Counter = rust.extern_type(native, path="model::Counter")
+
+@rust.extern(native, path="model::read", effects=[rust.Pure])
+def read(counter: rust.Ref[Counter]) -> rust.u64:
+    ...
+```
+
+Omitting `effects` deliberately records `OpaqueCrateCall` and `MayPanic`. A
+non-empty explicit list can use `Pure`, `PythonRuntime`, `Blocking`, `ThreadSpawn`,
+`GlobalMutation`, `UnsafeMemory`, `UnsafeFfi`, or `MayPanic`; `Pure` must stand
+alone. These declarations are trusted adapter contracts, not inferred audits of a
+third-party crate implementation.
+
 ## Python and native effects
 
 Every `FunctionIR` stores one or more typed effects:
@@ -252,9 +298,9 @@ prevent GIL detachment even when the signature itself contains only primitives.
 `OpaqueCrateCall` is visibility, not a claim that the external implementation is
 pure, nonblocking, or Python-free. Crabwalk conservatively also records `MayPanic`
 and keeps the GIL attached for an opaque call. Effect policy is complete for
-Crabwalk-visible operations; developers must audit declared crates and adapters for
-hidden blocking, threading, FFI, mutation, or PyO3 behavior. A future typed adapter
-surface can make those effects explicit and recover safe detachment.
+Crabwalk-visible operations. Typed adapters can replace opacity with a reviewed
+effect promise and recover detachment, but Crabwalk cannot prove that a third-party
+implementation honors its declaration.
 
 Every concrete `ExpressionIR` variant has one mandatory direct-effect rule; adding
 a new expression without updating that table fails the compiler invariant suite.

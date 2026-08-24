@@ -2,7 +2,7 @@
 
 Baseline: [rust-lang/book](https://github.com/rust-lang/book) commit `917544888a55e4da7109bdba8c88c893c0da70f4`.
 
-“Complete” means the chapter's principal runnable concepts have native Crabwalk examples and package assertions. It does not mean every intentionally non-compiling listing is copied into executable source; those are represented by focused diagnostics or explanatory comments where useful.
+“Complete” means the chapter's principal runnable concepts have native Crabwalk examples and package assertions. It does not mean every intentionally non-compiling listing is copied into executable source; those are represented by focused diagnostics or explanatory comments where useful. Chapter completeness is pedagogical coverage only. It does not assert that the corresponding iterator, collection, trait, async, networking, or unsafe family is a complete language subsystem; the generated maturity table in the Language Reference is authoritative for those claims.
 
 | Chapter | Module | Native coverage | Evolution delivered | Status |
 |---:|---|---|---|---|

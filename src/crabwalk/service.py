@@ -30,11 +30,8 @@ from crabwalk.build.cache import (
 from crabwalk.build.cargo import CargoBuildFailure, CargoBuilder
 from crabwalk.build.fingerprint import build_fingerprint
 from crabwalk.build.loader import load_extension
-from crabwalk.compiler.codegen import (
-    GeneratedProject,
-    cargo_dependency_specification,
-    generate_project,
-)
+from crabwalk.compiler.cargo_emission import cargo_dependency_specification
+from crabwalk.compiler.codegen import GeneratedProject, generate_project
 from crabwalk.compiler.frontend import analyze_project_path
 from crabwalk.config import discover_project_config
 from crabwalk.compiler.ir import PackageIR

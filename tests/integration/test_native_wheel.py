@@ -153,6 +153,9 @@ def test_installed_wheel_uses_embedded_extension_without_rust(
     executable = environment_directory / (
         "Scripts/python.exe" if os.name == "nt" else "bin/python"
     )
+    install_environment = os.environ.copy()
+    install_environment.pop("PYTHONPATH", None)
+    install_environment.pop("PIP_NO_DEPS", None)
     installed = subprocess.run(
         [
             str(executable),
@@ -167,6 +170,7 @@ def test_installed_wheel_uses_embedded_extension_without_rust(
             "wheel-demo==1.0.0",
         ],
         cwd=consumer,
+        env=install_environment,
         capture_output=True,
         text=True,
         timeout=180,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -147,9 +148,11 @@ class _RustOwnedValue:
                 variant = self._native.variant()
                 result = {"variant": variant}
                 for field_name, type_ref in self._enum_variant_types[variant].items():
-                    result[field_name] = normalize_boundary_output(
+                    result[field_name] = _normalize_compiled_boundary_output(
                         getattr(self._native, field_name),
                         type_ref,
+                        self._fingerprint,
+                        deep=True,
                     )
                 return result
             except RuntimeError as error:
@@ -158,9 +161,31 @@ class _RustOwnedValue:
             value = self._native.to_python()
         except RuntimeError as error:
             _raise_translated_runtime_error(error, self)
+        if (
+            self._registration.type_ref.rust_name == "Vec"
+            and self._registration.type_ref.arguments[0].python_name is not None
+        ):
+            element_type = self._registration.type_ref.arguments[0]
+            with _owned_registry_lock:
+                element_registration = _owned_types_by_compilation.get(
+                    (self._fingerprint, element_type.render())
+                )
+            if element_registration is None:
+                raise RuntimeError(
+                    f"missing compiled domain registration for {element_type.display()}"
+                )
+            return [
+                _RustOwnedValue(item, element_registration).to_python()
+                for item in value
+            ]
         if self._field_names:
             return {
-                name: normalize_boundary_output(item, self._field_types[name])
+                name: _normalize_compiled_boundary_output(
+                    item,
+                    self._field_types[name],
+                    self._fingerprint,
+                    deep=True,
+                )
                 for name, item in zip(self._field_names, value)
             }
         return normalize_boundary_output(value, self._registration.type_ref)
@@ -192,7 +217,11 @@ class _RustOwnedValue:
                     return None
             else:
                 type_ref = self._field_types[name]
-            return normalize_boundary_output(value, type_ref)
+            return _normalize_compiled_boundary_output(
+                value,
+                type_ref,
+                self._fingerprint,
+            )
         except RuntimeError as error:
             _raise_translated_runtime_error(error, self)
 
@@ -202,7 +231,12 @@ class _RustOwnedValue:
         if name in self._field_names:
             if self._enum_variant_types:
                 raise AttributeError("Crabwalk enum payloads are immutable")
-            value = validate_boundary_input(value, self._field_types[name])
+            value = _validate_compiled_boundary_input(
+                value,
+                self._field_types[name],
+                self._fingerprint,
+                context=f"field '{name}'",
+            )
             try:
                 setattr(self._native, name, value)
             except RuntimeError as error:
@@ -354,13 +388,14 @@ def construct_rust_value(
                     f"{rust_type!r} expects one Python sequence; got "
                     f"{len(values)} arguments"
                 )
-            converted = validate_boundary_input(values[0], registration.type_ref)
+            converted = _validated_owned_vector_input(values[0], registration)
             native = registration.native_type(converted)
         else:
             converted_values, converted_keywords = _validated_domain_arguments(
                 values,
                 keywords,
                 registration.fields,
+                registration.fingerprint,
             )
             native = registration.native_type(
                 *converted_values,
@@ -371,17 +406,55 @@ def construct_rust_value(
     return _RustOwnedValue(native, registration)
 
 
-def _validated_vector_values(value: object, element_type: object) -> list[object]:
-    from crabwalk.rust import RustType
-
-    if not isinstance(element_type, RustType):
-        raise TypeError("expected a supported concrete Vec element type")
-    converted = validate_boundary_input(
-        value,
-        TypeRef("Vec", (_runtime_type_ref(element_type),)),
-    )
-    assert isinstance(converted, list)
-    return converted
+def _validated_owned_vector_input(
+    value: object,
+    registration: _OwnedTypeRegistration,
+) -> list[object]:
+    element_type = registration.type_ref.arguments[0]
+    if element_type.python_name is None:
+        converted = validate_boundary_input(value, registration.type_ref)
+        assert isinstance(converted, list)
+        return converted
+    if not isinstance(value, Sequence):
+        raise TypeError(f"expected a Python sequence, found {type(value).__name__}")
+    with _owned_registry_lock:
+        element_registration = _owned_types_by_compilation.get(
+            (registration.fingerprint, element_type.render())
+        )
+    if element_registration is None:
+        raise RuntimeError(
+            f"missing compiled domain registration for {element_type.display()}"
+        )
+    converted_values: list[object] = []
+    for index, item in enumerate(value):
+        if isinstance(item, _RustOwnedValue):
+            item._check_thread()
+            if item.moved:
+                raise CrabwalkMoveError(
+                    f"vector element {index} is an already-moved Rust value"
+                )
+            if item._fingerprint != registration.fingerprint or (
+                item._type_key != element_type.render()
+            ):
+                raise TypeError(
+                    f"vector element {index} belongs to a different compiled type"
+                )
+            converted_values.append(item._native)
+            continue
+        if isinstance(item, Mapping):
+            positional, keywords = _validated_domain_arguments(
+                (),
+                dict(item),
+                element_registration.fields,
+                registration.fingerprint,
+            )
+            native = element_registration.native_type(*positional, **keywords)
+            converted_values.append(native)
+            continue
+        raise TypeError(
+            f"vector element {index}: expected {element_type.display()} handle or mapping"
+        )
+    return converted_values
 
 
 def _validated_primitive(value: object, rust_name: str) -> object:
@@ -392,6 +465,7 @@ def _validated_domain_arguments(
     values: tuple[object, ...],
     keywords: dict[str, object],
     fields: tuple[tuple[str, TypeRef], ...],
+    fingerprint: str,
 ) -> tuple[tuple[object, ...], dict[str, object]]:
     if len(values) > len(fields):
         raise TypeError(f"expected at most {len(fields)} positional arguments")
@@ -410,14 +484,96 @@ def _validated_domain_arguments(
     if missing:
         raise TypeError(f"missing required field(s): {', '.join(missing)}")
     converted_values = tuple(
-        validate_boundary_input(value, fields[index][1])
+        _validate_compiled_boundary_input(
+            value,
+            fields[index][1],
+            fingerprint,
+            context=f"field '{fields[index][0]}'",
+        )
         for index, value in enumerate(values)
     )
     converted_keywords = {
-        name: validate_boundary_input(value, field_types[name])
+        name: _validate_compiled_boundary_input(
+            value,
+            field_types[name],
+            fingerprint,
+            context=f"field '{name}'",
+        )
         for name, value in keywords.items()
     }
     return converted_values, converted_keywords
+
+
+def _compiled_domain_registration(
+    fingerprint: str,
+    type_ref: TypeRef,
+) -> _OwnedTypeRegistration | None:
+    if type_ref.python_name is None:
+        return None
+    with _owned_registry_lock:
+        return _owned_types_by_compilation.get((fingerprint, type_ref.render()))
+
+
+def _validate_compiled_boundary_input(
+    value: object,
+    type_ref: TypeRef,
+    fingerprint: str,
+    *,
+    context: str,
+) -> object:
+    """Validate one boundary value, including compilation-bound domain values."""
+
+    registration = _compiled_domain_registration(fingerprint, type_ref)
+    if registration is None:
+        if type_ref.python_name is not None:
+            raise RuntimeError(
+                f"missing compiled domain registration for {type_ref.display()}"
+            )
+        return validate_boundary_input(value, type_ref)
+
+    if isinstance(value, _RustOwnedValue):
+        value._check_thread()
+        if value.moved:
+            raise CrabwalkMoveError(f"{context} is an already-moved Rust value")
+        if value._fingerprint != fingerprint or value._type_key != type_ref.render():
+            raise TypeError(
+                f"{context} belongs to a different compiled {type_ref.display()} type"
+            )
+        return value._native
+
+    if isinstance(value, Mapping):
+        positional, keywords = _validated_domain_arguments(
+            (),
+            dict(value),
+            registration.fields,
+            fingerprint,
+        )
+        return registration.native_type(*positional, **keywords)
+
+    raise TypeError(
+        f"{context}: expected {type_ref.display()} handle or mapping, "
+        f"found {type(value).__name__}"
+    )
+
+
+def _normalize_compiled_boundary_output(
+    value: object,
+    type_ref: TypeRef,
+    fingerprint: str,
+    *,
+    deep: bool = False,
+) -> object:
+    """Normalize native output while preserving compiled domain identity."""
+
+    registration = _compiled_domain_registration(fingerprint, type_ref)
+    if registration is None:
+        if type_ref.python_name is not None:
+            raise RuntimeError(
+                f"missing compiled domain registration for {type_ref.display()}"
+            )
+        return normalize_boundary_output(value, type_ref)
+    wrapped = _RustOwnedValue(value, registration)
+    return wrapped.to_python() if deep else wrapped
 
 
 def construct_rust_variant(
@@ -440,6 +596,7 @@ def construct_rust_variant(
             values,
             keywords,
             variant_fields,
+            registration.fingerprint,
         )
         constructor = getattr(registration.native_type, variant)
         native = constructor(*converted_values, **converted_keywords)
@@ -668,6 +825,17 @@ class RustFunction:
                         call_location,
                         _span_location(parameter.span),
                     )
+        if self._return_type.ownership == "Owned":
+            underlying = self._return_type.underlying
+            with _owned_registry_lock:
+                registration = _owned_types_by_compilation.get(
+                    (self._compilation.fingerprint, underlying.render())
+                )
+            if registration is None:
+                raise RuntimeError(
+                    f"missing owned return registration for {underlying.display()}"
+                )
+            return _RustOwnedValue(result, registration)
         return normalize_boundary_output(result, self._return_type)
 
     def __repr__(self) -> str:
@@ -1022,6 +1190,14 @@ def _register_owned_types(compilation: CompilationResult) -> None:
         for parameter in function.parameters
         if parameter.type_ref.ownership is not None
     }
+    concrete_types.update(
+        (
+            function.module_name or compilation.ir.module_name,
+            function.return_type.underlying,
+        )
+        for function in compilation.ir.functions
+        if function.exported and function.return_type.ownership == "Owned"
+    )
     concrete_types.update(
         (struct.module_name, struct.type_ref) for struct in compilation.ir.structs
     )

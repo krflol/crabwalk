@@ -133,15 +133,17 @@ index, dependency, and provenance policies.
   and narrow unsafe intrinsics are supported as documented.
 - No implicit complex/container graph conversion.
 - Owned/borrowed values cannot be returned or transferred through `async_call`.
-- Nested domain values are supported in native enum payloads, but their consuming
-  Python constructors/getters are not yet exposed.
+- Direct nested domain fields and enum payloads have fingerprint-bound Python
+  constructors/getters and explicit deep-copy conversion. Container-wrapped nested
+  domain fields are not yet part of that codec.
 - Native `@rust.async_fn` uses a small std-only teaching executor, not Tokio.
   `rust.async_call` remains a separate Python executor bridge; cancellation does not
   stop Rust work already running.
 - Rayon is exposed through typed `Vec.par_iter()` adapters when the package
-  explicitly declares Rayon. Copy items support `copied`; borrowed `String`
-  items support `filter`, owned `map`, and `collect_vec`. Broader `Send`/`Sync`
-  wrapper transfer is not exposed.
+  explicitly declares Rayon. Copy and borrowed non-`Copy` items compose through
+  the documented adapters, including filter/map/collect and reduction. Broader
+  `Send`/`Sync` Python-wrapper transfer and arbitrary Rayon API reflection are not
+  exposed.
 - `TcpListener`, `TcpStream`, and `ThreadPool` provide a bounded loopback teaching
   slice, not a production server, TLS stack, general HTTP parser, or persistent
   externally controlled background service.

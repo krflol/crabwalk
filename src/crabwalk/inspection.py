@@ -117,6 +117,12 @@ def function_inspection(function: FunctionIR) -> dict[str, object]:
             native_calls.append(
                 {
                     "name": "::".join(value.path),
+                    "adapter": value.adapter_name,
+                    "declared_effects": (
+                        [effect.value for effect in value.declared_effects]
+                        if value.declared_effects is not None
+                        else None
+                    ),
                     "source": value.span.to_dict(),
                 }
             )
