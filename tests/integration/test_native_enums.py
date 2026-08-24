@@ -22,6 +22,7 @@ class Status:
 class Heterogeneous:
     Text = rust.variant(rust.String)
     Number = rust.variant(rust.u64)
+    Bytes = rust.variant(rust.Vec[rust.u8])
 
 @rust.fn
 def score(status: rust.Ref[Status]) -> rust.u8:
@@ -48,11 +49,18 @@ running = Status.Running(progress=7)
 failed = Status.Failed("oops")
 text = Heterogeneous.Text("crab")
 number = Heterogeneous.Number(42)
+blob = Heterogeneous.Bytes(b"\\x00\\xff")
+
+try:
+    Status.Running(progress=True)
+except TypeError as error:
+    print("exact-integer", "expected int for rust.u8" in str(error))
 
 print(pending.to_python())
 print(running.to_python(), running.progress)
 print(failed.to_python())
 print(text.to_python(), number.to_python())
+print(blob.to_python(), blob._0)
 print(score(pending), score(running), score(failed))
 alias = running
 print(consume(running))
@@ -80,10 +88,12 @@ except CrabwalkMoveError as error:
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
+        "exact-integer True",
         "{'variant': 'Pending'}",
         "{'variant': 'Running', 'progress': 7} 7",
         "{'variant': 'Failed', '_0': 'oops'}",
         "{'variant': 'Text', '_0': 'crab'} {'variant': 'Number', '_0': 42}",
+        "{'variant': 'Bytes', '_0': b'\\x00\\xff'} b'\\x00\\xff'",
         "0 7 255",
         "7",
         "True True",

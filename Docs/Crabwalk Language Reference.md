@@ -44,8 +44,10 @@ tags:
 Bare `Vec` parameters are rejected because they would hide an allocating input
 conversion. Use an ownership annotation and `rust.from_python`; see
 [[Crabwalk Ownership and Domain Types]]. A supported `Vec[T]` return converts to a
-new Python list at the explicit output boundary. Generated domain parameters
-likewise require `Owned`, `Ref`, or `Mut`.
+new Python list at the explicit output boundary, except `Vec[u8]`, which is the
+deliberate byte-oriented boundary and converts to Python `bytes`. The same rule
+applies to `rust.to_python()` and Python-visible domain fields or enum payloads.
+Generated domain parameters likewise require `Owned`, `Ref`, or `Mut`.
 
 ## Statements
 
@@ -253,6 +255,13 @@ and keeps the GIL attached for an opaque call. Effect policy is complete for
 Crabwalk-visible operations; developers must audit declared crates and adapters for
 hidden blocking, threading, FFI, mutation, or PyO3 behavior. A future typed adapter
 surface can make those effects explicit and recover safe detachment.
+
+Every concrete `ExpressionIR` variant has one mandatory direct-effect rule; adding
+a new expression without updating that table fails the compiler invariant suite.
+Ordinary panic-capable forms include integer arithmetic, signed minimum-value
+negation, indexing, integer `HashMap.add`, fallible synchronization/channel paths,
+and explicit unwrap/expect operations. Child-call effects are then propagated over
+the complete Crabwalk-visible dispatch graph.
 
 Before code generation, an IR validation pass checks effect consistency and rejects
 a Rust worker closure that directly or transitively reaches Python runtime state

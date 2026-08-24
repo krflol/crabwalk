@@ -46,6 +46,13 @@ from crabwalk.diagnostics import (
 )
 
 CompilationMode = Literal["expand", "check", "build"]
+MAX_LOCK_REPLANS = 3
+
+
+class _DependencyLockReplan(Exception):
+    def __init__(self, ir: PackageIR) -> None:
+        super().__init__(ir.module_name)
+        self.ir = ir
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +97,50 @@ class CompilationService:
         return existing
 
     def compile_path(
+        self,
+        path: str | Path,
+        *,
+        module_name: str | None = None,
+        mode: CompilationMode = "build",
+        load: bool = False,
+        locked: bool = False,
+        offline: bool = False,
+        project: str | Path | None = None,
+        progress: Callable[[str], None] | None = None,
+    ) -> CompilationResult:
+        report = progress or (lambda _phase: None)
+        last_replan: _DependencyLockReplan | None = None
+        for attempt in range(1, MAX_LOCK_REPLANS + 1):
+            try:
+                return self._compile_path_once(
+                    path,
+                    module_name=module_name,
+                    mode=mode,
+                    load=load,
+                    locked=locked,
+                    offline=offline,
+                    project=project,
+                    progress=progress,
+                )
+            except _DependencyLockReplan as replan:
+                last_replan = replan
+                if attempt < MAX_LOCK_REPLANS:
+                    report("Dependency lock changed; refreshing the build identity")
+        assert last_replan is not None
+        raise CrabwalkCompilationError(
+            Diagnostic(
+                "CRAB308",
+                "Cargo dependency lock did not stabilize",
+                (
+                    "The dependency graph changed during all "
+                    f"{MAX_LOCK_REPLANS} build plans."
+                ),
+                _primary_span(last_replan.ir),
+                "Stop concurrent lock writers or fix a build process that rewrites Cargo.lock.",
+            )
+        )
+
+    def _compile_path_once(
         self,
         path: str | Path,
         *,
@@ -233,25 +284,9 @@ class CompilationService:
             )
 
         report("Waiting for the build lock")
-        with (
-            FileLock(dependency_guard_path) as dependency_guard,
-            FileLock(lock_path) as build_guard,
-        ):
+        with FileLock(dependency_guard_path), FileLock(lock_path):
             if _lock_hash_changed(ir, dependency_lock, dependency_lock_hash):
-                # Release both locks before recursively planning the new graph.
-                build_guard.release()
-                dependency_guard.release()
-                report("Dependency lock changed; refreshing the build identity")
-                return self.compile_path(
-                    path,
-                    module_name=module_name,
-                    mode=mode,
-                    load=load,
-                    locked=locked,
-                    offline=offline,
-                    project=project,
-                    progress=progress,
-                )
+                raise _DependencyLockReplan(ir)
             # Recheck after acquiring the cross-process lock. The first caller
             # remembers its loaded result before releasing this lock, keeping a
             # second thread from replacing a DLL already mapped by Windows.
@@ -358,17 +393,7 @@ class CompilationService:
                 )
 
         if dependency_lock_changed:
-            report("Dependency lock changed; refreshing the build identity")
-            return self.compile_path(
-                path,
-                module_name=module_name,
-                mode=mode,
-                load=load,
-                locked=locked,
-                offline=offline,
-                project=project,
-                progress=progress,
-            )
+            raise _DependencyLockReplan(ir)
 
         return completed_result()
 

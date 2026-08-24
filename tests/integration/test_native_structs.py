@@ -28,6 +28,10 @@ from . import serde
 class User:
     id: rust.u64
     name: rust.String
+
+@rust.struct
+class Blob:
+    data: rust.Vec[rust.u8]
 """,
         encoding="utf-8",
     )
@@ -36,7 +40,7 @@ class User:
 from crabwalk import rust
 
 from . import serde_json
-from .model import User
+from .model import Blob, User
 
 @rust.fn
 def encode(user: rust.Ref[User]) -> rust.String:
@@ -57,10 +61,20 @@ def consume(user: rust.Owned[User]) -> rust.u64:
 from crabwalk import CrabwalkMoveError
 
 from .codec import consume, encode, user_name
-from .model import User
+from .model import Blob, User
 
 user = User(id=42, name="Alice")
 alias = user
+for operation in (
+    lambda: User(id=True, name="invalid"),
+    lambda: setattr(user, "id", True),
+):
+    try:
+        operation()
+    except TypeError as error:
+        print("exact-integer", "expected int for rust.u64" in str(error))
+blob = Blob(data=b"\\x00\\xff")
+print(blob.data, blob.to_python())
 print(user.id, user.name)
 print(user.to_python())
 user.name = "Bob"
@@ -95,6 +109,9 @@ def test_struct_derive_fields_serde_and_move_state_are_native(tmp_path: Path) ->
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
+        "exact-integer True",
+        "exact-integer True",
+        "b'\\x00\\xff' {'data': b'\\x00\\xff'}",
         "42 Alice",
         "{'id': 42, 'name': 'Alice'}",
         "Bob",

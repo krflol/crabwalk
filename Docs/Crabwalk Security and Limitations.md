@@ -109,10 +109,12 @@ Opaque calls also carry `MayPanic` and are not automatically detached from the G
 this remains conservative until a typed adapter can declare a dependency boundary's
 actual effects.
 
-No signature or publisher attestation is currently provided. SHA-256 detects
-accidental/stale corruption and local mismatch; it does not establish who produced
-a malicious wheel. Use the normal Python index/signing/provenance controls for
-distribution.
+SHA-256 detects accidental/stale corruption and local mismatch; by itself it does
+not establish who produced a malicious wheel. Version-tag releases build once,
+verify the checksum inventory after every artifact transfer, publish through PyPI
+Trusted Publishing, and attach a GitHub/Sigstore SLSA provenance attestation to the
+wheel and source distribution. Consumers should still apply their normal Python
+index, dependency, and provenance policies.
 
 ## Current limitations
 

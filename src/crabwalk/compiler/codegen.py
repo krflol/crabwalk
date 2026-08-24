@@ -804,6 +804,8 @@ def _write_export_wrapper(
     )
     writer.enter()
     for parameter in function.parameters:
+        _write_wrapper_ownership_preflight(writer, parameter)
+    for parameter in function.parameters:
         _write_wrapper_extraction(writer, parameter)
     if function.return_type.rust_name == "Result":
         native_call = f"__cw_native_{function.rust_symbol}({arguments})"
@@ -2186,4 +2188,22 @@ def _write_wrapper_extraction(writer: _Writer, parameter: ParameterIR) -> None:
         ),
         parameter.span,
         "ownership_boundary",
+    )
+
+
+def _write_wrapper_ownership_preflight(
+    writer: _Writer,
+    parameter: ParameterIR,
+) -> None:
+    if parameter.type_ref.ownership is None:
+        return
+    writer.line(
+        (
+            f"if {parameter.name}.value.is_none() {{ "
+            f"return std::result::Result::Err("
+            f"{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("
+            f'"CrabwalkMoveError: {parameter.name} was moved")); }}'
+        ),
+        parameter.span,
+        "ownership_preflight",
     )

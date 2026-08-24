@@ -294,6 +294,36 @@ def identity(value: rust.u64) -> rust.u64:
     ).exists()
 
 
+def test_dependency_lock_replanning_is_bounded(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    source = tmp_path / "unstable_lock.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def identity(value: rust.u64) -> rust.u64:
+    return value
+""",
+        encoding="utf-8",
+    )
+    cargo = _ArtifactCargo()
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "crabwalk.service._lock_hash_changed",
+        lambda *_arguments: True,
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        CompilationService(cargo).compile_path(source)
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB308"
+    assert "3 build plans" in diagnostic.message
+    assert cargo.run_count == 0
+
+
 def test_repaired_entry_refreshes_access_before_pruning(tmp_path: Path) -> None:
     source = tmp_path / "repair.py"
     source.write_text(

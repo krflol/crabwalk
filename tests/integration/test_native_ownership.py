@@ -47,6 +47,35 @@ def consume_i64(values: rust.Owned[rust.Vec[rust.i64]]) -> rust.usize:
     return values.len()
 
 @rust.fn
+def consume_two(
+    first: rust.Owned[rust.Vec[rust.u64]],
+    second: rust.Owned[rust.Vec[rust.u64]],
+) -> rust.usize:
+    return first.len() + second.len()
+
+@rust.fn
+def owned_then_ref(
+    first: rust.Owned[rust.Vec[rust.u64]],
+    second: rust.Ref[rust.Vec[rust.u64]],
+) -> rust.usize:
+    return first.len() + second.len()
+
+@rust.fn
+def consume_three(
+    first: rust.Owned[rust.Vec[rust.u64]],
+    second: rust.Owned[rust.Vec[rust.u64]],
+    third: rust.Owned[rust.Vec[rust.u64]],
+) -> rust.usize:
+    return first.len() + second.len() + third.len()
+
+@rust.fn
+def byte_values() -> rust.Vec[rust.u8]:
+    values: rust.Vec[rust.u8] = rust.Vec([])
+    values.push(0)
+    values.push(255)
+    return values
+
+@rust.fn
 def conflicting(
     shared: rust.Ref[rust.Vec[rust.u64]],
     mutable: rust.Mut[rust.Vec[rust.u64]],
@@ -95,6 +124,37 @@ print(second.moved)
 inferred = rust.Vec([8, 9])
 print(rust.to_python(inferred))
 print(consume_i64(inferred), inferred.moved)
+byte_result = byte_values()
+print(type(byte_result).__name__, byte_result)
+
+moved_tail = rust.Vec[rust.u64]([90])
+consume(moved_tail)
+atomic_first = rust.Vec[rust.u64]([91])
+try:
+    consume_two(atomic_first, moved_tail)
+except CrabwalkMoveError as error:
+    print("atomic-owned", "second was moved" in str(error))
+print(atomic_first.moved, atomic_first.to_python())
+
+atomic_ref_first = rust.Vec[rust.u64]([92])
+try:
+    owned_then_ref(atomic_ref_first, moved_tail)
+except CrabwalkMoveError as error:
+    print("atomic-ref", "second was moved" in str(error))
+print(atomic_ref_first.moved, atomic_ref_first.to_python())
+
+atomic_three_first = rust.Vec[rust.u64]([93])
+atomic_three_second = rust.Vec[rust.u64]([94])
+try:
+    consume_three(atomic_three_first, atomic_three_second, moved_tail)
+except CrabwalkMoveError as error:
+    print("atomic-three", "third was moved" in str(error))
+print(
+    atomic_three_first.moved,
+    atomic_three_first.to_python(),
+    atomic_three_second.moved,
+    atomic_three_second.to_python(),
+)
 
 converted = rust.from_python([10, 11], rust.Vec[rust.u64])
 print(converted.to_python())
@@ -198,6 +258,13 @@ print(borrowed.to_python())
         "True",
         "[8, 9]",
         "2 True",
+        "bytes b'\\x00\\xff'",
+        "atomic-owned True",
+        "False [91]",
+        "atomic-ref True",
+        "False [92]",
+        "atomic-three True",
+        "False [93] False [94]",
         "[10, 11]",
         "OverflowError True",
         "TypeError True",
@@ -314,6 +381,111 @@ print(reload_owned.total(new), new.to_python())
         "True",
         "[1, 2, 3]",
         "2 [4, 5]",
+    ]
+
+
+def test_stale_domain_markers_keep_their_compilation_schema(tmp_path: Path) -> None:
+    module = tmp_path / "reload_domains.py"
+    module.write_text(
+        """\
+from crabwalk import rust
+
+@rust.struct
+class User:
+    id: rust.u64
+
+@rust.enum
+class State:
+    Old = rust.variant()
+
+@rust.fn
+def user_id(value: rust.Ref[User]) -> rust.u64:
+    return value.id
+
+@rust.fn
+def state_score(value: rust.Ref[State]) -> rust.u8:
+    match value:
+        case State.Old:
+            return 1
+""",
+        encoding="utf-8",
+    )
+    driver = tmp_path / "reload_domain_driver.py"
+    driver.write_text(
+        """\
+import importlib
+from pathlib import Path
+
+import reload_domains
+
+OldUser = reload_domains.User
+OldState = reload_domains.State
+old_fingerprint = OldUser.compilation_fingerprint
+old_user = OldUser(id=1)
+old_state = OldState.Old()
+
+Path(reload_domains.__file__).write_text(
+    "from crabwalk import rust\\n\\n"
+    "@rust.struct\\n"
+    "class User:\\n"
+    "    id: rust.u64\\n"
+    "    name: rust.String\\n\\n"
+    "@rust.enum\\n"
+    "class State:\\n"
+    "    New = rust.variant(code=rust.u8)\\n\\n"
+    "@rust.fn\\n"
+    "def user_id(value: rust.Ref[User]) -> rust.u64:\\n"
+    "    return value.id\\n\\n"
+    "@rust.fn\\n"
+    "def state_score(value: rust.Ref[State]) -> rust.u8:\\n"
+    "    match value:\\n"
+    "        case State.New(code=value):\\n"
+    "            return value\\n",
+    encoding="utf-8",
+)
+importlib.invalidate_caches()
+reload_domains = importlib.reload(reload_domains)
+
+stale_user = OldUser(id=2)
+stale_state = OldState.Old()
+print(old_user.to_python(), old_state.to_python())
+print(stale_user.to_python(), stale_state.to_python())
+
+new_user = reload_domains.User(id=3, name="new")
+new_state = reload_domains.State.New(code=7)
+print(new_user.to_python(), new_state.to_python())
+print(old_fingerprint != reload_domains.User.compilation_fingerprint)
+
+try:
+    reload_domains.user_id(stale_user)
+except TypeError as error:
+    print("different compiled Crabwalk module identity" in str(error))
+print(stale_user.to_python())
+""",
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join((str(root / "src"), str(tmp_path)))
+
+    result = subprocess.run(
+        [sys.executable, "-u", str(driver)],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "{'id': 1} {'variant': 'Old'}",
+        "{'id': 2} {'variant': 'Old'}",
+        "{'id': 3, 'name': 'new'} {'variant': 'New', 'code': 7}",
+        "True",
+        "True",
+        "{'id': 2}",
     ]
 
 

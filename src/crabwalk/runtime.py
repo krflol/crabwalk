@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import inspect
-import math
-import struct as struct_module
 import threading
-from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from crabwalk._version import RUNTIME_ABI_VERSION, __version__
+from crabwalk.boundary import (
+    normalize_boundary_output,
+    validate_boundary_input,
+    validate_primitive,
+    validate_unicode_value_tree,
+)
 from crabwalk.build.cache import read_json, sha256_file
 from crabwalk.build.loader import load_extension
 from crabwalk.compiler.codegen import function_releases_gil
+from crabwalk.compiler.ir import TypeRef
 from crabwalk.compiler.naming import owned_class_names
 from crabwalk.compiler.frontend import (
     analyze_project_path,
@@ -34,26 +39,23 @@ from crabwalk.service import CompilationResult, default_service
 _compile_lock = threading.RLock()
 _results: dict[tuple[str, str], CompilationResult] = {}
 _owned_registry_lock = threading.RLock()
-_owned_types_by_module: dict[tuple[str, str], type[Any]] = {}
-_owned_type_fields: dict[str, tuple[str, ...]] = {}
-_owned_enum_variants: dict[str, dict[str, tuple[str, ...]]] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedTypeRegistration:
+    native_type: type[Any]
+    fingerprint: str
+    type_ref: TypeRef
+    fields: tuple[tuple[str, TypeRef], ...] = ()
+    variants: tuple[tuple[str, tuple[tuple[str, TypeRef], ...]], ...] = ()
+
+
+_owned_types_by_module: dict[tuple[str, str], _OwnedTypeRegistration] = {}
+_owned_types_by_compilation: dict[tuple[str, str], _OwnedTypeRegistration] = {}
 
 _MOVE_ERROR_PREFIX = "CrabwalkMoveError:"
 _PANIC_ERROR_PREFIX = "CrabwalkPanicError:"
 _RUST_ERROR_PREFIX = "CrabwalkRustError:"
-_INTEGER_RANGES = {
-    "i8": (-(1 << 7), (1 << 7) - 1),
-    "i16": (-(1 << 15), (1 << 15) - 1),
-    "i32": (-(1 << 31), (1 << 31) - 1),
-    "i64": (-(1 << 63), (1 << 63) - 1),
-    "i128": (-(1 << 127), (1 << 127) - 1),
-    "u8": (0, (1 << 8) - 1),
-    "u16": (0, (1 << 16) - 1),
-    "u32": (0, (1 << 32) - 1),
-    "u64": (0, (1 << 64) - 1),
-    "u128": (0, (1 << 128) - 1),
-    "usize": (0, (1 << (struct_module.calcsize("P") * 8)) - 1),
-}
 
 
 class _RustOwnedValue:
@@ -61,10 +63,14 @@ class _RustOwnedValue:
 
     __slots__ = (
         "_native",
+        "_registration",
         "_type_key",
         "_move_site",
         "_field_names",
+        "_field_types",
         "_enum_variants",
+        "_enum_variant_types",
+        "_fingerprint",
         "_thread_id",
         "_definition_site",
         "_borrow_contexts",
@@ -73,15 +79,33 @@ class _RustOwnedValue:
     def __init__(
         self,
         native: object,
-        type_key: str,
-        field_names: tuple[str, ...] = (),
-        enum_variants: dict[str, tuple[str, ...]] | None = None,
+        registration: _OwnedTypeRegistration,
     ) -> None:
+        fields = dict(registration.fields)
+        variants = {name: dict(values) for name, values in registration.variants}
+        field_names = tuple(
+            fields
+            or sorted(
+                {
+                    field_name
+                    for variant_fields in variants.values()
+                    for field_name in variant_fields
+                }
+            )
+        )
         object.__setattr__(self, "_native", native)
-        object.__setattr__(self, "_type_key", type_key)
+        object.__setattr__(self, "_registration", registration)
+        object.__setattr__(self, "_type_key", registration.type_ref.render())
         object.__setattr__(self, "_move_site", None)
         object.__setattr__(self, "_field_names", field_names)
-        object.__setattr__(self, "_enum_variants", enum_variants or {})
+        object.__setattr__(self, "_field_types", fields)
+        object.__setattr__(
+            self,
+            "_enum_variants",
+            {name: tuple(values) for name, values in variants.items()},
+        )
+        object.__setattr__(self, "_enum_variant_types", variants)
+        object.__setattr__(self, "_fingerprint", registration.fingerprint)
         object.__setattr__(self, "_thread_id", threading.get_ident())
         object.__setattr__(self, "_definition_site", _call_location())
         object.__setattr__(self, "_borrow_contexts", ())
@@ -102,8 +126,11 @@ class _RustOwnedValue:
             try:
                 variant = self._native.variant()
                 result = {"variant": variant}
-                for field_name in self._enum_variants[variant]:
-                    result[field_name] = getattr(self._native, field_name)
+                for field_name, type_ref in self._enum_variant_types[variant].items():
+                    result[field_name] = normalize_boundary_output(
+                        getattr(self._native, field_name),
+                        type_ref,
+                    )
                 return result
             except RuntimeError as error:
                 _raise_translated_runtime_error(error, self)
@@ -112,8 +139,11 @@ class _RustOwnedValue:
         except RuntimeError as error:
             _raise_translated_runtime_error(error, self)
         if self._field_names:
-            return dict(zip(self._field_names, value))
-        return value
+            return {
+                name: normalize_boundary_output(item, self._field_types[name])
+                for name, item in zip(self._field_names, value)
+            }
+        return normalize_boundary_output(value, self._registration.type_ref)
 
     def __len__(self) -> int:
         self._check_thread()
@@ -131,14 +161,24 @@ class _RustOwnedValue:
         if name not in self._field_names:
             raise AttributeError(name)
         try:
-            return getattr(self._native, name)
+            value = getattr(self._native, name)
+            if self._enum_variant_types:
+                variant = self._native.variant()
+                type_ref = self._enum_variant_types[variant].get(name)
+                if type_ref is None or value is None:
+                    return None
+            else:
+                type_ref = self._field_types[name]
+            return normalize_boundary_output(value, type_ref)
         except RuntimeError as error:
             _raise_translated_runtime_error(error, self)
 
     def __setattr__(self, name: str, value: object) -> None:
         self._check_thread()
         if name in self._field_names:
-            _validate_unicode_value_tree(value)
+            if self._enum_variant_types:
+                raise AttributeError("Crabwalk enum payloads are immutable")
+            value = validate_boundary_input(value, self._field_types[name])
             try:
                 setattr(self._native, name, value)
             except RuntimeError as error:
@@ -176,22 +216,25 @@ class _RustOwnedValue:
             )
 
 
-def _resolve_owned_native_type(
+def _resolve_owned_registration(
     rust_type: object,
     type_key: str,
     *,
     for_context: object | None = None,
-) -> type[Any] | None:
+) -> _OwnedTypeRegistration | None:
     """Resolve one wrapper without load-order-dependent ambient fallback."""
 
+    marker_fingerprint = getattr(rust_type, "compilation_fingerprint", None)
+    if isinstance(marker_fingerprint, str):
+        with _owned_registry_lock:
+            return _owned_types_by_compilation.get((marker_fingerprint, type_key))
+
     if for_context is not None and isinstance(for_context, RustFunction):
-        module = for_context._compilation.module
-        if module is None:
-            return None
-        type_ref = _runtime_type_ref(rust_type)
-        python_name, _ = owned_class_names(type_ref)
-        candidate = getattr(module, python_name, None)
-        if isinstance(candidate, type):
+        with _owned_registry_lock:
+            candidate = _owned_types_by_compilation.get(
+                (for_context._compilation.fingerprint, type_key)
+            )
+        if candidate is not None:
             return candidate
 
     context_module = (
@@ -206,14 +249,14 @@ def _resolve_owned_native_type(
         if exact is not None:
             return exact
         candidates = {
-            native_type
-            for (registered_module, registered_key), native_type in (
+            (registration.fingerprint, registration.native_type): registration
+            for (registered_module, registered_key), registration in (
                 _owned_types_by_module.items()
             )
             if registered_key == type_key
         }
     if len(candidates) == 1:
-        return next(iter(candidates))
+        return next(iter(candidates.values()))
     if len(candidates) > 1:
         raise RuntimeError(
             f"Multiple generated wrappers for {rust_type!r} are loaded. "
@@ -255,22 +298,18 @@ def construct_rust_value(
     if not isinstance(rust_type, RustType):
         raise TypeError("expected a Crabwalk Rust type")
     type_key = rust_type.rust_key()
-    native_type = _resolve_owned_native_type(
+    registration = _resolve_owned_registration(
         rust_type,
         type_key,
         for_context=for_context,
     )
-    if native_type is None:
+    if registration is None:
         raise RuntimeError(
             f"No generated wrapper for {rust_type!r} is loaded. Define an "
             "@rust.fn ownership parameter or @rust.struct declaration for this "
             "concrete type before constructing it."
         )
     try:
-        for value in values:
-            _validate_unicode_value_tree(value)
-        for value in keywords.values():
-            _validate_unicode_value_tree(value)
         if rust_type.name == "Vec" and len(rust_type.arguments) == 1:
             if keywords:
                 names = ", ".join(sorted(keywords))
@@ -282,78 +321,70 @@ def construct_rust_value(
                     f"{rust_type!r} expects one Python sequence; got "
                     f"{len(values)} arguments"
                 )
-            native = native_type(
-                _validated_vector_values(values[0], rust_type.arguments[0])
-            )
+            converted = validate_boundary_input(values[0], registration.type_ref)
+            native = registration.native_type(converted)
         else:
-            native = native_type(*values, **keywords)
+            converted_values, converted_keywords = _validated_domain_arguments(
+                values,
+                keywords,
+                registration.fields,
+            )
+            native = registration.native_type(
+                *converted_values,
+                **converted_keywords,
+            )
     except (OverflowError, TypeError, ValueError) as error:
         raise type(error)(f"cannot construct {rust_type!r}: {error}") from error
-    return _RustOwnedValue(
-        native,
-        type_key,
-        _owned_type_fields.get(type_key, ()),
-        _owned_enum_variants.get(type_key),
-    )
+    return _RustOwnedValue(native, registration)
 
 
 def _validated_vector_values(value: object, element_type: object) -> list[object]:
     from crabwalk.rust import RustType
 
-    if not isinstance(value, Sequence):
-        raise TypeError(f"expected a Python sequence, found {type(value).__name__}")
-    if not isinstance(element_type, RustType) or element_type.arguments:
+    if not isinstance(element_type, RustType):
         raise TypeError("expected a supported concrete Vec element type")
-    result: list[object] = []
-    for index, item in enumerate(value):
-        try:
-            result.append(_validated_primitive(item, element_type.name))
-        except (OverflowError, TypeError, ValueError) as error:
-            raise type(error)(f"element {index}: {error}") from error
-    return result
+    converted = validate_boundary_input(
+        value,
+        TypeRef("Vec", (_runtime_type_ref(element_type),)),
+    )
+    assert isinstance(converted, list)
+    return converted
 
 
 def _validated_primitive(value: object, rust_name: str) -> object:
-    bounds = _INTEGER_RANGES.get(rust_name)
-    if bounds is not None:
-        if type(value) is not int:
-            raise TypeError(
-                f"expected int for rust.{rust_name}, found {type(value).__name__}"
-            )
-        if not bounds[0] <= value <= bounds[1]:
-            raise OverflowError(f"{value} is outside the rust.{rust_name} range")
-        return value
-    if rust_name == "bool":
-        if type(value) is not bool:
-            raise TypeError(f"expected bool, found {type(value).__name__}")
-        return value
-    if rust_name == "char":
-        if type(value) is not str or len(value) != 1:
-            raise TypeError("expected a one-character str for rust.char")
-        _validate_unicode_value_tree(value)
-        return value
-    if rust_name in {"String", "Str"}:
-        if type(value) is not str:
-            raise TypeError(
-                f"expected str for rust.{rust_name}, found {type(value).__name__}"
-            )
-        _validate_unicode_value_tree(value)
-        return value
-    if rust_name in {"f32", "f64"}:
-        if type(value) not in {int, float}:
-            raise TypeError(
-                f"expected int or float for rust.{rust_name}, "
-                f"found {type(value).__name__}"
-            )
-        converted = float(value)
-        if (
-            rust_name == "f32"
-            and math.isfinite(converted)
-            and abs(converted) > 3.4028235e38
-        ):
-            raise OverflowError(f"{value} is outside the finite rust.f32 range")
-        return converted
-    raise TypeError(f"rust.{rust_name} is not a supported Vec boundary element")
+    return validate_primitive(value, rust_name)
+
+
+def _validated_domain_arguments(
+    values: tuple[object, ...],
+    keywords: dict[str, object],
+    fields: tuple[tuple[str, TypeRef], ...],
+) -> tuple[tuple[object, ...], dict[str, object]]:
+    if len(values) > len(fields):
+        raise TypeError(f"expected at most {len(fields)} positional arguments")
+    field_types = dict(fields)
+    positional_names = {name for name, _ in fields[: len(values)]}
+    unknown = set(keywords) - set(field_types)
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise TypeError(f"unexpected field argument(s): {names}")
+    duplicate = positional_names & set(keywords)
+    if duplicate:
+        names = ", ".join(sorted(duplicate))
+        raise TypeError(f"multiple values for field(s): {names}")
+    supplied = positional_names | set(keywords)
+    missing = [name for name, _ in fields if name not in supplied]
+    if missing:
+        raise TypeError(f"missing required field(s): {', '.join(missing)}")
+    converted_values = tuple(
+        validate_boundary_input(value, fields[index][1])
+        for index, value in enumerate(values)
+    )
+    converted_keywords = {
+        name: validate_boundary_input(value, field_types[name])
+        for name, value in keywords.items()
+    }
+    return converted_values, converted_keywords
 
 
 def construct_rust_variant(
@@ -367,45 +398,27 @@ def construct_rust_variant(
     if not isinstance(rust_type, RustType) or variant not in rust_type.variants:
         raise TypeError("expected a generated Crabwalk enum variant")
     type_key = rust_type.rust_key()
-    native_type = _resolve_owned_native_type(rust_type, type_key)
-    if native_type is None:
+    registration = _resolve_owned_registration(rust_type, type_key)
+    if registration is None:
         raise RuntimeError(f"No generated wrapper for {rust_type!r} is loaded.")
     try:
-        for value in values:
-            _validate_unicode_value_tree(value)
-        for value in keywords.values():
-            _validate_unicode_value_tree(value)
-        constructor = getattr(native_type, variant)
-        native = constructor(*values, **keywords)
+        variant_fields = dict(registration.variants)[variant]
+        converted_values, converted_keywords = _validated_domain_arguments(
+            values,
+            keywords,
+            variant_fields,
+        )
+        constructor = getattr(registration.native_type, variant)
+        native = constructor(*converted_values, **converted_keywords)
     except (AttributeError, OverflowError, TypeError, ValueError) as error:
         raise type(error)(
             f"cannot construct {rust_type!r}.{variant}: {error}"
         ) from error
-    return _RustOwnedValue(
-        native,
-        type_key,
-        _owned_type_fields.get(type_key, ()),
-        _owned_enum_variants.get(type_key),
-    )
+    return _RustOwnedValue(native, registration)
 
 
 def _validate_unicode_value_tree(value: object) -> None:
-    if isinstance(value, str):
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError as error:
-            raise ValueError(
-                "Rust strings and chars cannot contain an escaped lone surrogate"
-            ) from error
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            _validate_unicode_value_tree(item)
-        return
-    if isinstance(value, dict):
-        for key, item in value.items():
-            _validate_unicode_value_tree(key)
-            _validate_unicode_value_tree(item)
+    validate_unicode_value_tree(value)
 
 
 def construct_inferred_vector(
@@ -490,6 +503,11 @@ class RustFunction:
         )
         self._rust_symbol = function_ir.rust_symbol
         self._parameters = function_ir.parameters
+        self._return_type = (
+            function_ir.return_type.arguments[0]
+            if function_ir.return_type.rust_name == "Result"
+            else function_ir.return_type
+        )
         self._releases_gil = function_releases_gil(function_ir)
         self._effects = function_ir.effects
 
@@ -545,6 +563,16 @@ class RustFunction:
             native_args[index] = value._native
             owned_arguments.append((parameter, value))
 
+        # Check every ownership handle before the generated wrapper can take any
+        # Owned value. The native wrapper repeats this preflight authoritatively;
+        # doing it here preserves source-rich diagnostics for normal Python calls.
+        for parameter, value in owned_arguments:
+            if value.moved:
+                _raise_translated_runtime_error(
+                    RuntimeError(f"{_MOVE_ERROR_PREFIX} {parameter.name} was moved"),
+                    value,
+                )
+
         call_location = _call_location() if owned_arguments else ""
         prior_borrow_contexts: dict[int, tuple[_RustOwnedValue, tuple[str, ...]]] = {}
         for parameter, value in owned_arguments:
@@ -563,7 +591,7 @@ class RustFunction:
                 (*value._borrow_contexts, context),
             )
         try:
-            return self._native(*native_args)
+            result = self._native(*native_args)
         except RuntimeError as error:
             source_value = next(
                 (value for _, value in owned_arguments if value.moved),
@@ -582,6 +610,7 @@ class RustFunction:
                         call_location,
                         _span_location(parameter.span),
                     )
+        return normalize_boundary_output(result, self._return_type)
 
     def __repr__(self) -> str:
         fingerprint = self._compilation.fingerprint[:12]
@@ -631,29 +660,9 @@ async def call_rust_async(
 
 
 def _validated_boundary_input(value: object, type_ref: object) -> object:
-    from crabwalk.compiler.ir import TypeRef
-
     if not isinstance(type_ref, TypeRef):
         raise TypeError("invalid compiled boundary type")
-    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
-        if value is None:
-            return None
-        return _validated_boundary_input(value, type_ref.arguments[0])
-    if type_ref.rust_name == "Tuple" and type_ref.arguments:
-        if type(value) is not tuple:
-            raise TypeError(f"expected tuple, found {type(value).__name__}")
-        if len(value) != len(type_ref.arguments):
-            raise ValueError(
-                f"expected a {len(type_ref.arguments)}-item tuple, found {len(value)}"
-            )
-        converted: list[object] = []
-        for index, (item, item_type) in enumerate(zip(value, type_ref.arguments)):
-            try:
-                converted.append(_validated_boundary_input(item, item_type))
-            except (OverflowError, TypeError, ValueError) as error:
-                raise type(error)(f"tuple item {index}: {error}") from error
-        return tuple(converted)
-    return _validated_primitive(value, type_ref.rust_name)
+    return validate_boundary_input(value, type_ref)
 
 
 def compile_function(function: Callable[..., object]) -> RustFunction:
@@ -732,6 +741,7 @@ def compile_struct(original: type[object]) -> object:
     return RustType(
         struct_ir.symbol,
         python_name=f"{original.__module__}.{original.__qualname__}",
+        compilation_fingerprint=cached.fingerprint,
     )
 
 
@@ -774,6 +784,7 @@ def compile_enum(original: type[object]) -> object:
         enum_ir.symbol,
         python_name=f"{original.__module__}.{original.__qualname__}",
         variants=tuple(value.name for value in enum_ir.variants),
+        compilation_fingerprint=cached.fingerprint,
     )
 
 
@@ -953,28 +964,42 @@ def _register_owned_types(compilation: CompilationResult) -> None:
     concrete_types.update(
         (enum.module_name, enum.type_ref) for enum in compilation.ir.enums
     )
+    structs = {struct.type_ref.render(): struct for struct in compilation.ir.structs}
+    enums = {enum.type_ref.render(): enum for enum in compilation.ir.enums}
     with _owned_registry_lock:
         for module_name, type_ref in concrete_types:
             python_name, _ = owned_class_names(type_ref)
             native_type = getattr(module, python_name)
             type_key = type_ref.render()
-            _owned_types_by_module[(module_name, type_key)] = native_type
-    for struct in compilation.ir.structs:
-        _owned_type_fields[struct.type_ref.render()] = tuple(
-            field.name for field in struct.fields
-        )
-    for enum in compilation.ir.enums:
-        type_key = enum.type_ref.render()
-        variants = {
-            variant.name: tuple(field.name for field in variant.fields)
-            for variant in enum.variants
-        }
-        _owned_enum_variants[type_key] = variants
-        _owned_type_fields[type_key] = tuple(
-            sorted(
-                {field.name for variant in enum.variants for field in variant.fields}
+            struct = structs.get(type_key)
+            enum = enums.get(type_key)
+            fields = (
+                tuple((field.name, field.type_ref) for field in struct.fields)
+                if struct is not None
+                else ()
             )
-        )
+            variants = (
+                tuple(
+                    (
+                        variant.name,
+                        tuple((field.name, field.type_ref) for field in variant.fields),
+                    )
+                    for variant in enum.variants
+                )
+                if enum is not None
+                else ()
+            )
+            registration = _OwnedTypeRegistration(
+                native_type,
+                compilation.fingerprint,
+                type_ref,
+                fields,
+                variants,
+            )
+            _owned_types_by_module[(module_name, type_key)] = registration
+            _owned_types_by_compilation[(compilation.fingerprint, type_key)] = (
+                registration
+            )
 
 
 def _calling_module_name() -> str:

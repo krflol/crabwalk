@@ -40,7 +40,9 @@ print(consume(values))
 wrapper for that concrete `T` is loaded. `rust.Vec(sequence)` infers homogeneous
 `bool`, `i64`, `f64`, or `String`; an empty vector requires an explicit type.
 Conversion errors name the failing element index and enforce exact primitive
-types/ranges before native construction.
+types/ranges before native construction. `Vec[u8]` is byte-oriented: construction
+accepts a checked byte sequence and `to_python()` returns Python `bytes`. Other
+supported vectors return a newly allocated Python list.
 
 Owned wrapper identity belongs to a compiled module/fingerprint, not merely a Rust
 type spelling. When exactly one compatible wrapper is loaded, inferred construction
@@ -73,6 +75,11 @@ Python `copy.copy` and `copy.deepcopy` intentionally alias the same ownership
 state. There is no implicit deep clone. A value from a different compiled module
 fingerprint must be reconstructed explicitly from `value.to_python()`.
 
+All ownership arguments are validated before any `Owned` slot is taken. If a later
+`Owned`, `Ref`, or `Mut` argument has already moved, the call is rejected and every
+earlier valid handle remains live. Generated Rust repeats this preflight even though
+the Python wrapper normally provides the richer source-linked diagnostic first.
+
 Borrowed returns and retained Python-crossing lifetimes are rejected. Ownership
 handles are thread-affine: access from another Python thread raises
 `CrabwalkThreadError`, even when the underlying Rust type might implement `Send`.
@@ -101,6 +108,11 @@ print(user.id)
 user.name = "Bob"
 print(user.to_python())  # {'id': 42, 'name': 'Bob'}
 ```
+
+Constructors and field setters use the same exact boundary codec as exported
+functions. For example, `User(id=True, name="Alice")` is rejected because a Python
+`bool` is not an exact integer boundary value. Field getters and `to_python()` use
+the matching output policy, including the `Vec[u8]` to `bytes` rule.
 
 Passing the object to a native function requires `rust.Ref[User]`,
 `rust.Mut[User]`, or `rust.Owned[User]`. Domain values are not implicitly copied
@@ -139,6 +151,11 @@ Enums support unit, record, and tuple payload variants. Python constructors are
 Variant names also cannot shadow the `RustType` marker API (for example `name`,
 `variants`, or `rust_key`), and payload fields follow the same owned-handle rule as
 struct fields. These restrictions keep constructor and field lookup unambiguous.
+
+Struct and enum markers are tied to the compilation fingerprint that created them.
+After a source reload changes a domain schema, a retained old marker continues to
+construct the old native class with the old schema; new markers use the new class.
+Passing either value across compilation identities remains an explicit error.
 
 Payload patterns accept captures, `_`, nested domain patterns, tuple/rest forms,
 or-patterns, ranges, at-bindings, and typed guards. rustc remains the exhaustiveness
