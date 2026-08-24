@@ -13,6 +13,7 @@ htmlcov/
 
 # Crabwalk specific
 .crabwalk/
+.qa-triage/
 
 # Rust / Cargo generated files
 target/

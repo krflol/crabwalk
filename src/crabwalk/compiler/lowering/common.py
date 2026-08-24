@@ -34,11 +34,16 @@ def unsupported(
     node: ast.AST,
     path: Path,
     help_text: str | None = None,
+    *,
+    construct_name: str | None = None,
 ) -> NoReturn:
     fail(
         "CRAB102",
         "Unsupported construct in @rust.fn",
-        f"{type(node).__name__} cannot be lowered by the active compiler.",
+        (
+            f"{construct_name or type(node).__name__} cannot be lowered by "
+            "the active compiler."
+        ),
         path,
         node,
         help_text or "Move it outside @rust.fn or use a supported Rust equivalent.",

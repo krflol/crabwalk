@@ -4,6 +4,23 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-08-24
+
+### Added
+
+- Projects can set `source-locked = true` for decorator-driven source imports;
+  inspection and function metadata expose the effective Cargo policy.
+
+### Changed
+
+- The GitHub release attachment job supplies explicit repository context to `gh`,
+  allowing it to create or update a release without a source checkout.
+
+### Fixed
+
+- Unsupported floor division now reports the source expression rather than the
+  module origin and explains the supported Rust typed `/` division semantics.
+
 ## [1.0.2] - 2026-08-24
 
 ### Added

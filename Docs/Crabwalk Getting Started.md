@@ -109,6 +109,7 @@ For explicit, bounded project discovery:
 [tool.crabwalk]
 packages = ["src/my_package"]
 python-boundaries = "warn"
+source-locked = true
 extra-files = ["native/schema.proto"]
 extra-env = ["MY_NATIVE_MODE"]
 wheel-include = ["templates/**/*.html"]
@@ -119,6 +120,11 @@ keys are errors rather than silently ignored. Configured paths must remain insid
 the project and contain `__init__.py`. A project-directory command resolves the
 package only when exactly one entry is configured; otherwise select a package or
 source file explicitly, optionally with `--project`.
+
+`source-locked = true` makes decorator-driven source imports compile with Cargo's
+locked policy. Without it, source imports use the normal lock-maintaining policy
+and intentionally do not reuse a CLI artifact built with `--locked`. Function
+`__crabwalk__` metadata and `crabwalk inspect` report the effective Cargo policy.
 
 ## Where state goes
 

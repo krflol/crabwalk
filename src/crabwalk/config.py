@@ -16,6 +16,7 @@ class ProjectConfig:
     pyproject: Path
     packages: tuple[Path, ...]
     python_boundaries: str
+    source_locked: bool
     extra_files: tuple[Path, ...]
     extra_env: tuple[str, ...]
     wheel_include: tuple[str, ...]
@@ -101,6 +102,7 @@ def _read_config(pyproject: Path, *, required: bool) -> ProjectConfig | None:
     supported = {
         "packages",
         "python-boundaries",
+        "source-locked",
         "extra-files",
         "extra-env",
         "wheel-include",
@@ -145,6 +147,13 @@ def _read_config(pyproject: Path, *, required: bool) -> ProjectConfig | None:
             "CRAB010",
             "Invalid Python-boundary policy",
             "python-boundaries must be 'allow', 'warn', or 'deny'.",
+        )
+    source_locked = table.get("source-locked", False)
+    if not isinstance(source_locked, bool):
+        _fail(
+            "CRAB010",
+            "Invalid source build policy",
+            "[tool.crabwalk].source-locked must be true or false.",
         )
     extra_file_values = table.get("extra-files", [])
     if not isinstance(extra_file_values, list) or not all(
@@ -195,6 +204,7 @@ def _read_config(pyproject: Path, *, required: bool) -> ProjectConfig | None:
         pyproject=pyproject.resolve(),
         packages=tuple(packages),
         python_boundaries=str(policy),
+        source_locked=source_locked,
         extra_files=tuple(extra_files),
         extra_env=tuple(extra_env_values),
         wheel_include=tuple(wheel_include_values),

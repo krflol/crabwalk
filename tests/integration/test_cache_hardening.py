@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -41,6 +42,108 @@ def _run(
         timeout=timeout,
         check=False,
     )
+
+
+def test_locked_source_import_reuses_locked_cli_artifact(tmp_path: Path) -> None:
+    package = tmp_path / "repro_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def double(value: rust.u64) -> rust.u64:
+    return value * 2
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        """\
+[tool.crabwalk]
+packages = ["repro_pkg"]
+source-locked = true
+""",
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[2]
+    environment = _environment(root)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (environment["PYTHONPATH"], str(tmp_path))
+    )
+    environment["CRABWALK_PROGRESS"] = "never"
+    cli = [sys.executable, "-m", "crabwalk.cli"]
+
+    for arguments in (
+        ["build", str(tmp_path), "--project", str(tmp_path)],
+        ["build", str(tmp_path), "--project", str(tmp_path), "--locked"],
+    ):
+        completed = subprocess.run(
+            [*cli, *arguments],
+            cwd=root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        assert completed.returncode == 0, completed.stderr
+
+    inspected = subprocess.run(
+        [
+            *cli,
+            "inspect",
+            str(tmp_path),
+            "--project",
+            str(tmp_path),
+            "--locked",
+            "--json",
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert inspected.returncode == 0, inspected.stderr
+    locked = json.loads(inspected.stdout)
+    assert locked["cargo_policy"] == {"locked": True, "offline": False}
+    assert locked["cache"]["status"] == "hit"
+
+    imported = subprocess.run(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            (
+                "import json, repro_pkg; "
+                "print(json.dumps({"
+                "'fingerprint': repro_pkg.double.__crabwalk__['fingerprint'], "
+                "'cargo_policy': repro_pkg.double.__crabwalk__['cargo_policy'], "
+                "'cache_hit': repro_pkg.double.__crabwalk__['cache_hit'], "
+                "'value': repro_pkg.double(21)"
+                "}))"
+            ),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    assert imported.returncode == 0, imported.stderr
+    metadata = json.loads(imported.stdout)
+    assert metadata == {
+        "fingerprint": locked["fingerprint"],
+        "cargo_policy": {
+            "locked": True,
+            "offline": False,
+            "origin": "source",
+        },
+        "cache_hit": True,
+        "value": 42,
+    }
 
 
 @capability_contract("cache.corruption-repair")
