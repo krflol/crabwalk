@@ -3,22 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import fields, is_dataclass
-from typing import Any, Iterator
+from typing import Any, Iterator, cast
 
 from crabwalk.diagnostics import CrabwalkCompilationError, Diagnostic
 
+from .effects import EXPRESSION_EFFECT_RULE_TYPES, direct_expression_effects
 from .ir import (
     BinaryIR,
     CallIR,
     ClosureIR,
     ConstructorIR,
-    CrateCallIR,
     Effect,
+    ExpressionIR,
     FunctionPointerTwiceIR,
     FunctionIR,
     MethodCallIR,
     PackageIR,
-    PanicIR,
     PythonPrintIR,
     StringLiteralIR,
     TraitCallIR,
@@ -422,19 +422,8 @@ def _validate_effect_annotations(
     effects = set(function.effects)
     required: set[Effect] = set()
     for expression in expressions:
-        if isinstance(expression, PythonPrintIR):
-            required.add(Effect.PYTHON_RUNTIME)
-        elif isinstance(expression, PanicIR):
-            required.add(Effect.MAY_PANIC)
-        elif isinstance(expression, ConstructorIR):
-            if expression.constructor in {"UnsafeRead", "UnsafeWrite"}:
-                required.add(Effect.UNSAFE_MEMORY)
-            elif expression.constructor == "CAbs":
-                required.update({Effect.UNSAFE_FFI, Effect.MAY_PANIC})
-            elif expression.constructor == "UnsafeStaticIncrement":
-                required.update({Effect.GLOBAL_MUTATION, Effect.MAY_PANIC})
-        elif isinstance(expression, CrateCallIR) and expression.path[0] != "std":
-            required.update({Effect.OPAQUE_CRATE_CALL, Effect.MAY_PANIC})
+        if type(expression) in EXPRESSION_EFFECT_RULE_TYPES:
+            required.update(direct_expression_effects(cast(ExpressionIR, expression)))
     missing = required - effects
     if missing:
         names = ", ".join(sorted(effect.value for effect in missing))

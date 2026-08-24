@@ -15,6 +15,15 @@ All notable Crabwalk changes are recorded here.
 - Version tags now run an immutable release workflow that reuses the complete CI
   gate, builds distributions once, smoke-installs the exact files, publishes via
   PyPI Trusted Publishing, and attaches artifacts plus hashes to GitHub.
+- Python/native conversion is now described by one typed boundary codec shared by
+  exported functions, owned construction, domain constructors and fields, enum
+  payloads, and `to_python`. `Vec[u8]` deliberately converts to Python `bytes`;
+  other supported vectors convert to new lists.
+- Direct expression effects now have an exhaustive compiler rule table. Indexing,
+  signed negation, and integer `HashMap.add` correctly carry `MayPanic`.
+- CI and release actions use reviewed full commit SHAs, the Rust 1.97.0 toolchain,
+  pinned Python build tooling, verified release inventories, and GitHub provenance
+  attestations.
 
 ### Fixed
 
@@ -38,6 +47,16 @@ All notable Crabwalk changes are recorded here.
 - Generic type and lifetime parameters can no longer shadow Crabwalk built-in or
   generated runtime types. A rustc-backed oracle covers every supported weak
   keyword across Crabwalk's emitted identifier positions.
+- Ownership wrappers preflight every argument before extracting any `Owned` value,
+  so a moved later argument cannot partially consume earlier valid handles.
+- Struct constructors, field setters, and enum payload constructors now apply the
+  same exact primitive policy as exported functions, including rejecting `bool`
+  for Rust integer fields.
+- Struct and enum markers retain their compilation fingerprint and resolve their
+  native class and schema through that identity, so stale markers remain stable
+  across hot reloads.
+- Cargo dependency-lock replanning is iterative and bounded; a graph that changes
+  during three consecutive plans now fails as `CRAB308` instead of recursing.
 
 ## [1.0.1] - 2026-08-23
 

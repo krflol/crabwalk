@@ -35,7 +35,9 @@ compilation unit has a persisted generated dependency lock, even when mandatory
 PyO3 is its only dependency. A normal build copies that lock into the generated
 crate, runs without `--locked`, and atomically persists intentional Cargo updates
 beneath `crabwalk-locks/`. A changed lock abandons the old-key staging result and
-restarts under a fresh fingerprint before publication or loading.
+restarts under a fresh fingerprint before publication or loading. Replanning is
+iterative and bounded: a dependency graph that changes during three consecutive
+plans fails as `CRAB308` instead of recursing indefinitely.
 
 ## Fingerprints
 

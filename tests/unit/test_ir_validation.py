@@ -2,14 +2,69 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
 from crabwalk.compiler.codegen import generate_project
+from crabwalk.compiler.effects import EXPRESSION_EFFECT_RULE_TYPES
 from crabwalk.compiler.frontend import analyze_path
-from crabwalk.compiler.ir import BinaryIR, Effect, MethodCallIR, ReturnIR, TraitCallIR
+from crabwalk.compiler.ir import (
+    BinaryIR,
+    Effect,
+    ExpressionIR,
+    MethodCallIR,
+    ReturnIR,
+    TraitCallIR,
+)
 from crabwalk.compiler.validation import validate_package_ir
 from crabwalk.diagnostics import CrabwalkCompilationError
+
+
+def test_every_expression_ir_variant_has_an_effect_rule() -> None:
+    assert EXPRESSION_EFFECT_RULE_TYPES == frozenset(get_args(ExpressionIR))
+
+
+@pytest.mark.parametrize(
+    ("body", "effect"),
+    [
+        ("return -value", Effect.MAY_PANIC),
+        ("return values[index]", Effect.MAY_PANIC),
+        (
+            "counts: rust.HashMap[rust.String, rust.u64] = rust.HashMap()\n"
+            '    counts.add("item", value)\n'
+            "    return value",
+            Effect.MAY_PANIC,
+        ),
+    ],
+)
+def test_ordinary_panic_capable_expressions_are_effectful(
+    tmp_path: Path,
+    body: str,
+    effect: Effect,
+) -> None:
+    parameters = (
+        "value: rust.i64"
+        if body == "return -value"
+        else (
+            "values: rust.Owned[rust.Vec[rust.u64]], index: rust.usize"
+            if "values[index]" in body
+            else "value: rust.u64"
+        )
+    )
+    return_type = "rust.i64" if body == "return -value" else "rust.u64"
+    source = tmp_path / "panic_effect.py"
+    source.write_text(
+        f"from crabwalk import rust\n\n"
+        f"@rust.fn\n"
+        f"def effectful({parameters}) -> {return_type}:\n"
+        f"    {body}\n",
+        encoding="utf-8",
+    )
+
+    function = analyze_path(source).functions[0]
+
+    assert effect in function.effects
 
 
 @pytest.mark.parametrize("worker", ["spawn", "pool"])

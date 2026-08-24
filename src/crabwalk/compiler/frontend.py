@@ -25,6 +25,7 @@ from crabwalk.namespaces import (
     STRUCT_FIELD_RESERVED_NAMES,
 )
 
+from .effects import direct_expression_effects
 from .ir import (
     BOOL,
     CHAR,
@@ -6200,55 +6201,7 @@ def _direct_function_effects(function: FunctionIR) -> set[Effect]:
 
 
 def _expression_effects(expression: ExpressionIR) -> set[Effect]:
-    effects: set[Effect] = set()
-    if isinstance(expression, CrateCallIR) and expression.path[0] != "std":
-        effects.update({Effect.OPAQUE_CRATE_CALL, Effect.MAY_PANIC})
-    if isinstance(expression, PythonPrintIR):
-        effects.add(Effect.PYTHON_RUNTIME)
-    if isinstance(expression, PanicIR):
-        effects.add(Effect.MAY_PANIC)
-    if isinstance(expression, BinaryIR) and expression.type_ref.is_numeric:
-        effects.add(Effect.MAY_PANIC)
-    if isinstance(expression, ConstructorIR):
-        if expression.constructor in {"UnsafeRead", "UnsafeWrite"}:
-            effects.add(Effect.UNSAFE_MEMORY)
-        elif expression.constructor == "CAbs":
-            effects.update({Effect.UNSAFE_FFI, Effect.MAY_PANIC})
-        elif expression.constructor == "UnsafeStaticIncrement":
-            effects.update({Effect.GLOBAL_MUTATION, Effect.MAY_PANIC})
-        elif expression.constructor in {"Spawn", "ThreadPool"}:
-            effects.update({Effect.THREAD_SPAWN, Effect.MAY_PANIC})
-        elif expression.constructor in {
-            "BlockOn",
-            "SleepMillis",
-            "TcpListener",
-            "TcpStream",
-        }:
-            effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
-    if isinstance(expression, MethodCallIR):
-        receiver = expression.receiver.type_ref.underlying.rust_name
-        if receiver == "Vec" and expression.method == "split_at_mut_sum":
-            effects.update({Effect.UNSAFE_MEMORY, Effect.MAY_PANIC})
-        if receiver in {"TcpListener", "TcpStream"}:
-            effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
-        if receiver == "ThreadPool":
-            effects.update({Effect.THREAD_SPAWN, Effect.BLOCKING, Effect.MAY_PANIC})
-        if receiver == "ThreadHandle" and expression.method == "join":
-            effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
-        if receiver == "Receiver" and expression.method in {"recv", "recv_async"}:
-            effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
-        if receiver in {"Arc", "Mutex", "RefCell", "Sender"}:
-            effects.add(Effect.MAY_PANIC)
-        if expression.method in {"expect", "unwrap"}:
-            effects.add(Effect.MAY_PANIC)
-    if (
-        isinstance(expression, CrateCallIR)
-        and expression.path == ("std", "mem", "drop")
-        and expression.arguments
-        and expression.arguments[0].type_ref.underlying.rust_name == "ThreadPool"
-    ):
-        effects.add(Effect.BLOCKING)
-    return effects
+    return set(direct_expression_effects(expression))
 
 
 def _statement_calls(statements: tuple[StatementIR, ...]) -> set[str]:

@@ -58,3 +58,31 @@ def validate(value: rust.u64) -> rust.Result[rust.u64, rust.String]:
         not in generated.rust_source
     )
     assert "let __cw_result = __cw_result?;" in generated.rust_source
+
+
+def test_owned_wrapper_preflights_every_argument_before_any_take(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "atomic_owned.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def consume_two(
+    first: rust.Owned[rust.Vec[rust.u64]],
+    second: rust.Owned[rust.Vec[rust.u64]],
+) -> rust.usize:
+    return first.len() + second.len()
+""",
+        encoding="utf-8",
+    )
+
+    generated = generate_project(analyze_path(source), "_crabwalk_atomic_owned")
+    rust_source = generated.rust_source
+
+    first_preflight = rust_source.index("if first.value.is_none()")
+    second_preflight = rust_source.index("if second.value.is_none()")
+    first_take = rust_source.index("first.value.take()")
+    second_take = rust_source.index("second.value.take()")
+    assert first_preflight < second_preflight < first_take < second_take

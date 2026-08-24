@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77.0.3"]
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -37,7 +37,7 @@ Changelog = "https://github.com/krflol/crabwalk/blob/main/CHANGELOG.md"
 [project.optional-dependencies]
 quality = [
     "mypy==1.15.0",
-    "pytest>=8.3,<9",
+    "pytest==8.4.2",
     "ruff==0.15.17",
 ]
 
@@ -72,12 +72,14 @@ show_error_codes = true
 warn_unused_ignores = true
 files = [
     "src/crabwalk/_version.py",
+    "src/crabwalk/boundary.py",
     "src/crabwalk/build/cache.py",
     "src/crabwalk/build/cargo.py",
     "src/crabwalk/build/fingerprint.py",
     "src/crabwalk/compiler/ir.py",
     "src/crabwalk/compiler/naming.py",
     "src/crabwalk/compiler/codegen.py",
+    "src/crabwalk/compiler/effects.py",
     "src/crabwalk/compiler/validation.py",
     "src/crabwalk/config.py",
     "src/crabwalk/diagnostics.py",

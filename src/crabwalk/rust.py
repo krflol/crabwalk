@@ -20,6 +20,7 @@ class RustType:
     const_value: int | None = None
     is_generic: bool = False
     is_lifetime: bool = False
+    compilation_fingerprint: str | None = None
 
     def __repr__(self) -> str:
         if self.is_generic:
