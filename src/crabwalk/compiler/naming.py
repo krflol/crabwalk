@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import keyword
 import re
 
-from .ir import TypeRef
+from .types import TypeRef
 
 PYO3_CARGO_ALIAS = "cw_runtime_pyo3"
 RUST_PORTABLE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -167,25 +168,19 @@ def is_rust_2024_identifier(value: str) -> bool:
 
 
 def is_crabwalk_type_parameter(value: str) -> bool:
-    """Return whether a source type variable is hygienic in generated Rust."""
+    """Return whether ``value`` can name a Python type variable declaration.
 
-    return (
-        is_rust_2024_identifier(value)
-        and value not in CRABWALK_BUILTIN_TYPE_NAMES
-        and not value.startswith(COMPILER_TYPE_PREFIX)
-        and not value.startswith(COMPILER_VALUE_PREFIX)
-    )
+    The emitted Rust identity is allocated later and is deliberately unrelated
+    to this source spelling.
+    """
+
+    return value.isidentifier() and not keyword.iskeyword(value)
 
 
 def is_crabwalk_lifetime_parameter(value: str) -> bool:
-    """Return whether a source lifetime is hygienic in generated Rust."""
+    """Return whether ``value`` can name a Python lifetime declaration."""
 
-    return (
-        is_rust_2024_identifier(value)
-        and value not in CRABWALK_BUILTIN_TYPE_NAMES
-        and not value.startswith(COMPILER_LIFETIME_PREFIX)
-        and not value.startswith(COMPILER_TYPE_PREFIX)
-    )
+    return value.isidentifier() and not keyword.iskeyword(value)
 
 
 def mangle_item(module_name: str, source_name: str, *, namespace: str) -> str:

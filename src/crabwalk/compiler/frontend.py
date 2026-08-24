@@ -24,6 +24,7 @@ from crabwalk.namespaces import (
     STRUCT_FIELD_RESERVED_NAMES,
 )
 
+from .bindings import assign_package_identities
 from .effects import direct_expression_effects
 from .ir import (
     BOOL,
@@ -99,7 +100,6 @@ from .ir import (
 )
 from .naming import (
     COMPILER_VALUE_PREFIX,
-    RUST_PRELUDE_VALUE_CONSTRUCTORS,
     is_crabwalk_lifetime_parameter,
     is_crabwalk_type_parameter,
     is_rust_2024_identifier,
@@ -111,6 +111,7 @@ from .package_graph import (
     package_python_paths,
     single_file_source_graph,
 )
+from .types import IteratorExecution, IteratorItemMode, IteratorType
 
 _ANALYSIS_CACHE_LIMIT = 64
 _analysis_cache: OrderedDict[tuple[str, str, str], PackageIR] = OrderedDict()
@@ -390,18 +391,20 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     )
     functions = _propagate_effects(functions)
     source_graph = single_file_source_graph(source_path)
-    return PackageIR(
-        schema_version=19,
-        module_name=identity,
-        source_path=str(source_path),
-        source_hash=source_graph.compiler_input_hash,
-        wheel_source_integrity_hash=source_graph.wheel_source_integrity_hash,
-        functions=functions,
-        crates=tuple(crates.values()),
-        source_paths=(str(source_path),),
-        structs=tuple(structs.values()),
-        enums=tuple(enums.values()),
-        traits=tuple(traits.values()),
+    return assign_package_identities(
+        PackageIR(
+            schema_version=20,
+            module_name=identity,
+            source_path=str(source_path),
+            source_hash=source_graph.compiler_input_hash,
+            wheel_source_integrity_hash=source_graph.wheel_source_integrity_hash,
+            functions=functions,
+            crates=tuple(crates.values()),
+            source_paths=(str(source_path),),
+            structs=tuple(structs.values()),
+            enums=tuple(enums.values()),
+            traits=tuple(traits.values()),
+        )
     )
 
 
@@ -1019,18 +1022,20 @@ def _analyze_regular_package(
     for name in sorted(modules):
         module = modules[name]
         source_paths.append(str(module.path))
-    return PackageIR(
-        schema_version=19,
-        module_name=package_name,
-        source_path=str(package_root / "__init__.py"),
-        source_hash=source_graph.compiler_input_hash,
-        wheel_source_integrity_hash=source_graph.wheel_source_integrity_hash,
-        functions=functions_tuple,
-        crates=tuple(all_crates[name] for name in sorted(all_crates)),
-        source_paths=tuple(source_paths),
-        structs=all_structs,
-        enums=all_enums,
-        traits=all_traits,
+    return assign_package_identities(
+        PackageIR(
+            schema_version=20,
+            module_name=package_name,
+            source_path=str(package_root / "__init__.py"),
+            source_hash=source_graph.compiler_input_hash,
+            wheel_source_integrity_hash=source_graph.wheel_source_integrity_hash,
+            functions=functions_tuple,
+            crates=tuple(all_crates[name] for name in sorted(all_crates)),
+            source_paths=tuple(source_paths),
+            structs=all_structs,
+            enums=all_enums,
+            traits=all_traits,
+        )
     )
 
 
@@ -2072,7 +2077,7 @@ class _FunctionLowerer:
 
         if isinstance(node, ast.Attribute):
             receiver = self._lower_expression(node.value, environment)
-            struct = self.structs_by_symbol.get(receiver.type_ref.rust_name)
+            struct = self.structs_by_symbol.get(receiver.type_ref.underlying.rust_name)
             field = (
                 next(
                     (value for value in struct.fields if value.name == node.attr), None
@@ -2636,7 +2641,7 @@ class _FunctionLowerer:
 
         if isinstance(pattern, ast.MatchSingleton):
             if pattern.value is None and expected.rust_name == "Option":
-                return "None", {}
+                return "std::option::Option::None", {}
             if isinstance(pattern.value, bool) and expected == BOOL:
                 return ("true" if pattern.value else "false"), {}
             _unsupported(
@@ -2767,6 +2772,24 @@ class _FunctionLowerer:
                 )
                 return f"std::option::Option::Some({rendered})", bindings
 
+            if expected.rust_name == "Result" and path in {
+                ("rust", "Ok"),
+                ("rust", "Err"),
+            }:
+                if pattern.kwd_patterns or len(pattern.patterns) != 1:
+                    _unsupported(
+                        pattern,
+                        self.path,
+                        "rust.Ok and rust.Err patterns take one payload.",
+                    )
+                index = 0 if path == ("rust", "Ok") else 1
+                rendered, bindings = self._lower_general_pattern(
+                    pattern.patterns[0],
+                    expected.arguments[index],
+                )
+                constructor = "Ok" if index == 0 else "Err"
+                return f"std::result::Result::{constructor}({rendered})", bindings
+
             enum = self.enums_by_symbol.get(expected.rust_name)
             if enum is not None:
                 variant = self._enum_pattern_variant(path, enum, pattern)
@@ -2793,7 +2816,7 @@ class _FunctionLowerer:
             _unsupported(
                 pattern,
                 self.path,
-                "Use a matching struct, enum, Option, or rust.Range pattern.",
+                "Use a matching struct, enum, Option, Result, or rust.Range pattern.",
             )
 
         _unsupported(
@@ -3856,6 +3879,7 @@ class _FunctionLowerer:
                 "shared",
             )
 
+        receiver_type = semantic_receiver
         if receiver_type.rust_name == "Vec":
             element_type = receiver_type.arguments[0]
             if method == "push" and len(node.args) == 1:
@@ -3882,12 +3906,17 @@ class _FunctionLowerer:
                         node,
                     )
                 arguments = ()
-                result = TypeRef("Iterator", (element_type,))
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    element_type,
+                    IteratorItemMode.OWNED,
+                )
             elif method == "iter_ref" and not node.args:
                 arguments = ()
-                result = TypeRef(
-                    "Iterator",
-                    (TypeRef("Ref", (element_type,)),),
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    element_type,
+                    IteratorItemMode.SHARED_REF,
                 )
             elif method == "split_at_mut_sum" and len(node.args) == 1:
                 if (
@@ -3915,7 +3944,11 @@ class _FunctionLowerer:
                         'Declare rayon = rust.crate("rayon", version="1") at module scope.',
                     )
                 arguments = ()
-                result = TypeRef("ParallelIteratorRef", (element_type,))
+                result = IteratorType(
+                    IteratorExecution.PARALLEL,
+                    element_type,
+                    IteratorItemMode.SHARED_REF,
+                )
             else:
                 _unsupported(
                     node, self.path, f"Vec.{method} is not in the M2 capability table."
@@ -4120,6 +4153,19 @@ class _FunctionLowerer:
                     self._lower_expression(node.args[1], environment, value_type),
                 )
                 result = value_type
+            elif method in {"get", "get_mut"} and len(node.args) == 1:
+                arguments = (
+                    self._lower_expression(node.args[0], environment, key_type),
+                )
+                result = TypeRef(
+                    "Option",
+                    (
+                        TypeRef(
+                            "Mut" if method == "get_mut" else "Ref",
+                            (value_type,),
+                        ),
+                    ),
+                )
             elif method == "add" and len(node.args) == 2 and value_type.is_numeric:
                 arguments = (
                     self._lower_expression(node.args[0], environment, key_type),
@@ -4132,6 +4178,40 @@ class _FunctionLowerer:
             elif method == "is_empty" and not node.args:
                 arguments = ()
                 result = BOOL
+            elif method in {"iter", "iter_ref"} and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    TypeRef(
+                        "Tuple",
+                        (
+                            TypeRef("Ref", (key_type,)),
+                            TypeRef("Ref", (value_type,)),
+                        ),
+                    ),
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "keys" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    key_type,
+                    IteratorItemMode.SHARED_REF,
+                )
+            elif method == "values" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    value_type,
+                    IteratorItemMode.SHARED_REF,
+                )
+            elif method == "into_iter" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    TypeRef("Tuple", (key_type, value_type)),
+                    IteratorItemMode.OWNED,
+                )
             else:
                 _unsupported(
                     node,
@@ -4147,7 +4227,11 @@ class _FunctionLowerer:
                 result = BOOL
             elif method == "lines" and not node.args:
                 arguments = ()
-                result = TypeRef("Iterator", (STR,))
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    STR,
+                    IteratorItemMode.OWNED,
+                )
             elif receiver_type == STRING and method == "as_str" and not node.args:
                 arguments = ()
                 result = STR
@@ -4174,6 +4258,76 @@ class _FunctionLowerer:
             elif method == "find" and len(node.args) == 1:
                 arguments = (self._lower_expression(node.args[0], environment, STR),)
                 result = TypeRef("Option", (USIZE,))
+            elif method in {"trim", "trim_start", "trim_end"} and not node.args:
+                arguments = ()
+                result = STR
+            elif method == "split" and len(node.args) == 1:
+                arguments = (self._lower_expression(node.args[0], environment, STR),)
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    STR,
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "split_whitespace" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    STR,
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "split_once" and len(node.args) == 1:
+                arguments = (self._lower_expression(node.args[0], environment, STR),)
+                result = TypeRef("Option", (TypeRef("Tuple", (STR, STR)),))
+            elif method in {"strip_prefix", "strip_suffix"} and len(node.args) == 1:
+                arguments = (self._lower_expression(node.args[0], environment, STR),)
+                result = TypeRef("Option", (STR,))
+            elif method == "chars" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    CHAR,
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "bytes" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    TypeRef("u8"),
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "parse" and not node.args:
+                if (
+                    expected is None
+                    or expected.rust_name != "Result"
+                    or expected.arguments[1] != STRING
+                    or not (
+                        expected.arguments[0].is_numeric
+                        or expected.arguments[0].rust_name == "bool"
+                    )
+                ):
+                    _fail(
+                        "CRAB224",
+                        "String.parse needs a typed Result context",
+                        "Assign to rust.Result[number, rust.String] so the target type is explicit.",
+                        self.path,
+                        node,
+                    )
+                arguments = ()
+                result = expected
+            elif method == "join" and len(node.args) == 1:
+                values = self._lower_expression(node.args[0], environment)
+                if values.type_ref.rust_name != "Vec" or values.type_ref.arguments[
+                    0
+                ].rust_name not in {"String", "Str"}:
+                    _fail(
+                        "CRAB224",
+                        "String.join requires a vector of strings",
+                        "Pass rust.Vec[rust.String] or a borrowed string vector.",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (values,)
+                result = STRING
             else:
                 _unsupported(
                     node,
@@ -4194,6 +4348,59 @@ class _FunctionLowerer:
             elif method == "unwrap_or" and len(node.args) == 1:
                 arguments = (self._lower_expression(node.args[0], environment, inner),)
                 result = inner
+            elif method == "map" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, inner, borrowed_parameter=False
+                )
+                arguments = (closure,)
+                result = TypeRef("Option", (closure.body.type_ref,))
+            elif method == "and_then" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, inner, borrowed_parameter=False
+                )
+                if closure.body.type_ref.rust_name != "Option":
+                    _fail(
+                        "CRAB223",
+                        "Option.and_then closure must return Option",
+                        "Return rust.Some(value), None, or another Option expression.",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (closure,)
+                result = closure.body.type_ref
+            elif method == "or_else" and len(node.args) == 1:
+                closure = self._lower_zero_closure(
+                    node.args[0], environment, expected_result=receiver_type
+                )
+                _require_type(
+                    closure.body.type_ref, receiver_type, self.path, node.args[0]
+                )
+                arguments = (closure,)
+                result = receiver_type
+            elif method == "as_ref" and not node.args:
+                arguments = ()
+                result = TypeRef("Option", (TypeRef("Ref", (inner,)),))
+            elif (
+                method in {"copied", "cloned"}
+                and not node.args
+                and (inner.ownership == "Ref")
+            ):
+                value_type = inner.underlying
+                supported = (
+                    _is_copy_semantic_type(value_type)
+                    if method == "copied"
+                    else _is_clone_semantic_type(value_type)
+                )
+                if not supported:
+                    _fail(
+                        "CRAB223",
+                        f"Option item cannot be {method}",
+                        f"{value_type.display()} does not satisfy this adapter.",
+                        self.path,
+                        node,
+                    )
+                arguments = ()
+                result = TypeRef("Option", (value_type,))
             else:
                 _unsupported(
                     node,
@@ -4201,7 +4408,7 @@ class _FunctionLowerer:
                     f"Option.{method} is not in the M2 capability table.",
                 )
         elif receiver_type.rust_name == "Result":
-            success = receiver_type.arguments[0]
+            success, error_type = receiver_type.arguments
             if method in {"is_ok", "is_err"} and not node.args:
                 arguments = ()
                 result = BOOL
@@ -4216,86 +4423,259 @@ class _FunctionLowerer:
                     self._lower_expression(node.args[0], environment, success),
                 )
                 result = success
+            elif method == "map" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, success, borrowed_parameter=False
+                )
+                arguments = (closure,)
+                result = TypeRef("Result", (closure.body.type_ref, error_type))
+            elif method == "map_err" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, error_type, borrowed_parameter=False
+                )
+                arguments = (closure,)
+                result = TypeRef("Result", (success, closure.body.type_ref))
+            elif method == "and_then" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, success, borrowed_parameter=False
+                )
+                if (
+                    closure.body.type_ref.rust_name != "Result"
+                    or closure.body.type_ref.arguments[1] != error_type
+                ):
+                    _fail(
+                        "CRAB223",
+                        "Result.and_then closure has an incompatible error type",
+                        f"Return rust.Result[_, {error_type.display()}].",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (closure,)
+                result = closure.body.type_ref
+            elif method == "or_else" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0], environment, error_type, borrowed_parameter=False
+                )
+                if (
+                    closure.body.type_ref.rust_name != "Result"
+                    or closure.body.type_ref.arguments[0] != success
+                ):
+                    _fail(
+                        "CRAB223",
+                        "Result.or_else closure has an incompatible success type",
+                        f"Return rust.Result[{success.display()}, _].",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (closure,)
+                result = closure.body.type_ref
+            elif method == "as_ref" and not node.args:
+                arguments = ()
+                result = TypeRef(
+                    "Result",
+                    (
+                        TypeRef("Ref", (success,)),
+                        TypeRef("Ref", (error_type,)),
+                    ),
+                )
+            elif method == "ok" and not node.args:
+                arguments = ()
+                result = TypeRef("Option", (success,))
+            elif method == "err" and not node.args:
+                arguments = ()
+                result = TypeRef("Option", (error_type,))
             else:
                 _unsupported(
                     node,
                     self.path,
                     f"Result.{method} is not in the M2 capability table.",
                 )
-        elif receiver_type.rust_name in {
-            "Iterator",
-            "ParallelIterator",
-            "ParallelIteratorRef",
-        }:
-            item_type = receiver_type.arguments[0]
-            is_parallel = receiver_type.rust_name.startswith("ParallelIterator")
+        elif isinstance(receiver_type, IteratorType):
+            item_type = receiver_type.item_type
             if (
                 method == "copied"
                 and not node.args
-                and receiver_type.rust_name == "ParallelIteratorRef"
+                and receiver_type.item_mode != IteratorItemMode.OWNED
             ):
                 if not _is_copy_semantic_type(item_type):
                     _fail(
-                        "CRAB184",
-                        "Parallel iterator copy requires a Copy item",
-                        "Map borrowed String items into owned values before collection.",
+                        "CRAB220",
+                        "Iterator item cannot be copied",
+                        f"{item_type.display()} does not implement Copy.",
+                        self.path,
+                        node,
+                        "Use cloned() for Clone items or map into a new owned value.",
+                    )
+                arguments = ()
+                result = IteratorType(
+                    receiver_type.execution,
+                    item_type,
+                    IteratorItemMode.OWNED,
+                )
+            elif (
+                method == "cloned"
+                and not node.args
+                and receiver_type.item_mode != IteratorItemMode.OWNED
+            ):
+                if not _is_clone_semantic_type(item_type):
+                    _fail(
+                        "CRAB220",
+                        "Iterator item cannot be cloned",
+                        f"{item_type.display()} is not known to implement Clone.",
                         self.path,
                         node,
                     )
                 arguments = ()
-                result = TypeRef("ParallelIterator", (item_type,))
+                result = IteratorType(
+                    receiver_type.execution,
+                    item_type,
+                    IteratorItemMode.OWNED,
+                )
             elif method == "map" and len(node.args) == 1:
                 closure = self._lower_closure(
                     node.args[0],
                     environment,
-                    item_type,
+                    receiver_type.exposed_item_type,
                     borrowed_parameter=False,
                 )
                 arguments = (closure,)
-                result = TypeRef(
-                    "ParallelIterator" if is_parallel else "Iterator",
-                    (closure.body.type_ref,),
+                result = IteratorType(
+                    receiver_type.execution,
+                    closure.body.type_ref,
+                    IteratorItemMode.OWNED,
                 )
             elif method == "filter" and len(node.args) == 1:
-                borrowed_parallel_item = (
-                    receiver_type.rust_name == "ParallelIteratorRef"
-                )
-                if not _is_copy_semantic_type(item_type) and not (
-                    borrowed_parallel_item and item_type == STRING
-                ):
-                    _fail(
-                        "CRAB184",
-                        "Filter closure requires a Copy item",
-                        "Filter supports Copy items and borrowed Rayon String items.",
-                        self.path,
-                        node,
+                if receiver_type.item_mode == IteratorItemMode.OWNED:
+                    copy_item = _is_copy_semantic_type(item_type)
+                    closure_item = (
+                        item_type if copy_item else TypeRef("Ref", (item_type,))
                     )
+                    projection = "deref" if copy_item else "borrow"
+                else:
+                    closure_item = receiver_type.exposed_item_type
+                    projection = "deref"
                 closure = self._lower_closure(
                     node.args[0],
                     environment,
-                    item_type,
+                    closure_item,
                     borrowed_parameter=True,
                     expected_result=BOOL,
+                    parameter_projection=projection,
                 )
                 arguments = (closure,)
                 result = receiver_type
-            elif method == "collect_vec" and not node.args:
-                if receiver_type.rust_name == "ParallelIteratorRef":
+            elif method == "filter_map" and len(node.args) == 1:
+                closure = self._lower_closure(
+                    node.args[0],
+                    environment,
+                    receiver_type.exposed_item_type,
+                    borrowed_parameter=False,
+                )
+                if closure.body.type_ref.rust_name != "Option":
                     _fail(
-                        "CRAB184",
-                        "Borrowed parallel items cannot be collected as owned values",
-                        "Use copied() for Copy items or map the item into an owned value.",
+                        "CRAB221",
+                        "filter_map closure must return Option",
+                        "Return rust.Some(value) or an Option-producing expression.",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (closure,)
+                result = IteratorType(
+                    receiver_type.execution,
+                    closure.body.type_ref.arguments[0],
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "collect_vec" and not node.args:
+                if receiver_type.item_mode != IteratorItemMode.OWNED:
+                    _fail(
+                        "CRAB220",
+                        "Borrowed iterator items cannot become an owned Vec",
+                        "The iterator still yields borrowed values.",
                         self.path,
                         node,
+                        "Use copied(), cloned(), or map into an owned value first.",
                     )
                 arguments = ()
                 result = TypeRef("Vec", (item_type,))
-            elif method == "sum" and not node.args and item_type.is_numeric:
+            elif (
+                method == "collect_map"
+                and not node.args
+                and receiver_type.item_mode == IteratorItemMode.OWNED
+                and item_type.rust_name == "Tuple"
+                and len(item_type.arguments) == 2
+            ):
+                arguments = ()
+                result = TypeRef("HashMap", item_type.arguments)
+            elif (
+                method == "sum"
+                and not node.args
+                and receiver_type.item_mode == IteratorItemMode.OWNED
+                and item_type.is_numeric
+            ):
                 arguments = ()
                 result = item_type
             elif method == "count" and not node.args:
                 arguments = ()
                 result = USIZE
+            elif method in {"any", "all"} and len(node.args) == 1:
+                arguments = (
+                    self._lower_closure(
+                        node.args[0],
+                        environment,
+                        receiver_type.exposed_item_type,
+                        borrowed_parameter=False,
+                        expected_result=BOOL,
+                    ),
+                )
+                result = BOOL
+            elif method == "find" and len(node.args) == 1:
+                arguments = (
+                    self._lower_closure(
+                        node.args[0],
+                        environment,
+                        receiver_type.exposed_item_type,
+                        borrowed_parameter=True,
+                        expected_result=BOOL,
+                        parameter_projection=(
+                            "deref"
+                            if receiver_type.item_mode != IteratorItemMode.OWNED
+                            or _is_copy_semantic_type(item_type)
+                            else "borrow"
+                        ),
+                    ),
+                )
+                result = TypeRef("Option", (receiver_type.exposed_item_type,))
+            elif method == "enumerate" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    receiver_type.execution,
+                    TypeRef("Tuple", (USIZE, receiver_type.exposed_item_type)),
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "zip" and len(node.args) == 1:
+                other = self._lower_expression(node.args[0], environment)
+                if not isinstance(other.type_ref, IteratorType) or (
+                    other.type_ref.execution != receiver_type.execution
+                ):
+                    _fail(
+                        "CRAB221",
+                        "Iterator zip execution modes differ",
+                        "zip requires another sequential or parallel iterator of the same family.",
+                        self.path,
+                        node.args[0],
+                    )
+                arguments = (other,)
+                result = IteratorType(
+                    receiver_type.execution,
+                    TypeRef(
+                        "Tuple",
+                        (
+                            receiver_type.exposed_item_type,
+                            other.type_ref.exposed_item_type,
+                        ),
+                    ),
+                    IteratorItemMode.OWNED,
+                )
             else:
                 _unsupported(
                     node,
@@ -4325,6 +4705,14 @@ class _FunctionLowerer:
         if expected is not None:
             _require_type(result, expected, self.path, node)
         required = _builtin_receiver_access(receiver_type, method)
+        if receiver.type_ref.ownership == "Ref" and required in {"mutable", "owned"}:
+            _fail(
+                "CRAB208",
+                "Shared receiver cannot satisfy mutable or owned method access",
+                f"Method '{method}' requires {required} access to a shared value.",
+                self.path,
+                node,
+            )
         assert isinstance(node.func, ast.Attribute)
         self._require_place_access(node.func.value, required, f"method '{method}'")
         return MethodCallIR(
@@ -4346,6 +4734,7 @@ class _FunctionLowerer:
         *,
         borrowed_parameter: bool,
         expected_result: TypeRef | None = None,
+        parameter_projection: Literal["direct", "deref", "borrow"] = "direct",
     ) -> ClosureIR:
         if not isinstance(node, ast.Lambda):
             _fail(
@@ -4395,12 +4784,15 @@ class _FunctionLowerer:
             borrowed_parameter,
             TypeRef("Closure", (parameter_type, body.type_ref)),
             SourceSpan.from_ast(self.path, node),
+            parameter_projection=parameter_projection,
         )
 
     def _lower_zero_closure(
         self,
         node: ast.expr,
         environment: dict[str, TypeRef],
+        *,
+        expected_result: TypeRef | None = None,
     ) -> ClosureIR:
         if not isinstance(node, ast.Lambda):
             _fail(
@@ -4427,7 +4819,7 @@ class _FunctionLowerer:
                 self.path,
                 node,
             )
-        body = self._lower_expression(node.body, dict(environment))
+        body = self._lower_expression(node.body, dict(environment), expected_result)
         return ClosureIR(
             None,
             UNIT,
@@ -4516,7 +4908,7 @@ def _struct_placeholder(
     module_name: str,
     symbol: str,
 ) -> StructIR:
-    if not is_rust_2024_identifier(node.name):
+    if not node.name.isidentifier() or keyword.iskeyword(node.name):
         _fail(
             "CRAB150",
             "Unsupported Rust struct name",
@@ -4590,6 +4982,7 @@ def _analyze_struct(
             child.target,
             "struct field",
             reserved=STRUCT_FIELD_RESERVED_NAMES,
+            rust_namespace="member",
         )
         names.add(child.target.id)
         field_type = _annotation_type(
@@ -4606,11 +4999,15 @@ def _analyze_struct(
                 path,
                 child.annotation,
             )
-        if not _struct_field_type_supported(field_type):
+        if not _struct_field_type_supported(
+            field_type,
+            {value.rust_name for value in domain_types.values()},
+        ):
             _fail(
                 "CRAB159",
                 "Unsupported Python-visible struct field type",
-                "The domain preview supports primitive, String, Vec, and Option fields.",
+                "Struct fields support primitives, String, Vec/Option of supported "
+                "boundary values, and directly nested domain types.",
                 path,
                 child.annotation,
             )
@@ -4652,11 +5049,43 @@ def _analyze_struct(
     return replace(placeholder, fields=tuple(fields), derives=derives)
 
 
-def _struct_field_type_supported(type_ref: TypeRef) -> bool:
+def _struct_field_type_supported(
+    type_ref: TypeRef,
+    visible_domain_symbols: set[str] | None = None,
+) -> bool:
+    visible_domain_symbols = visible_domain_symbols or set()
     if type_ref.rust_name in _OWNED_VECTOR_ELEMENTS:
         return True
+    if type_ref.rust_name in visible_domain_symbols and not type_ref.arguments:
+        return True
     if type_ref.rust_name in {"Vec", "Option"} and len(type_ref.arguments) == 1:
-        return _struct_field_type_supported(type_ref.arguments[0])
+        return _struct_field_type_supported(type_ref.arguments[0], set())
+    return False
+
+
+def _owned_vector_element_supported(
+    type_ref: TypeRef,
+    domain_symbols: set[str],
+    *,
+    allow_domain: bool,
+) -> bool:
+    if type_ref.rust_name in _OWNED_VECTOR_ELEMENTS and not type_ref.arguments:
+        return True
+    if allow_domain and type_ref.rust_name in domain_symbols and not type_ref.arguments:
+        return True
+    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        return _owned_vector_element_supported(
+            type_ref.arguments[0], domain_symbols, allow_domain=False
+        )
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        return all(
+            _owned_vector_element_supported(value, domain_symbols, allow_domain=False)
+            for value in type_ref.arguments
+        )
+    if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
+        return _owned_vector_element_supported(
+            type_ref.arguments[0], domain_symbols, allow_domain=False
+        )
     return False
 
 
@@ -4664,7 +5093,7 @@ def _enum_field_type_supported(
     type_ref: TypeRef,
     visible_domain_symbols: set[str],
 ) -> bool:
-    if _struct_field_type_supported(type_ref):
+    if _struct_field_type_supported(type_ref, visible_domain_symbols):
         return True
     if type_ref.rust_name in visible_domain_symbols:
         return True
@@ -4744,7 +5173,7 @@ def _enum_placeholder(
     module_name: str,
     symbol: str,
 ) -> EnumIR:
-    if not is_rust_2024_identifier(node.name):
+    if not node.name.isidentifier() or keyword.iskeyword(node.name):
         _fail(
             "CRAB160",
             "Unsupported Rust enum name",
@@ -4841,6 +5270,7 @@ def _analyze_enum(
                     field_node,
                     "enum field",
                     reserved=ENUM_FIELD_RESERVED_NAMES,
+                    rust_namespace="member",
                 )
         fields = tuple(
             StructFieldIR(
@@ -4906,7 +5336,7 @@ def _analyze_signature(
     path: Path,
     domain_types: dict[str, TypeRef] | None = None,
 ) -> _Signature:
-    if not is_rust_2024_identifier(node.name) or keyword.iskeyword(node.name):
+    if not node.name.isidentifier() or keyword.iskeyword(node.name):
         _fail(
             "CRAB105",
             "Unsupported function name",
@@ -4974,8 +5404,16 @@ def _analyze_signature(
             valid_owned_vector = (
                 underlying.rust_name == "Vec"
                 and len(underlying.arguments) == 1
-                and underlying.arguments[0].rust_name in _OWNED_VECTOR_ELEMENTS
-                and not underlying.arguments[0].arguments
+                and _owned_vector_element_supported(
+                    underlying.arguments[0],
+                    {
+                        value.rust_name
+                        for value in (domain_types or {}).values()
+                        if value.python_name is not None
+                        and value.rust_name not in {"Trait", "Dyn"}
+                    },
+                    allow_domain=True,
+                )
             )
             valid_domain = (
                 underlying.python_name is not None and not underlying.arguments
@@ -5079,13 +5517,32 @@ def _analyze_signature(
                 arguments.args[1],
             )
     if exported and return_type.ownership is not None:
-        _fail(
-            "CRAB141",
-            "Borrow/ownership wrapper return is deferred",
-            "Owned, Ref, and Mut are supported on parameters only.",
-            path,
-            node.returns or node,
+        underlying = return_type.underlying
+        valid_owned_return = return_type.ownership == "Owned" and (
+            (underlying.python_name is not None and not underlying.arguments)
+            or (
+                underlying.rust_name == "Vec"
+                and len(underlying.arguments) == 1
+                and _owned_vector_element_supported(
+                    underlying.arguments[0],
+                    {
+                        value.rust_name
+                        for value in (domain_types or {}).values()
+                        if value.python_name is not None
+                        and value.rust_name not in {"Trait", "Dyn"}
+                    },
+                    allow_domain=True,
+                )
+            )
         )
+        if not valid_owned_return:
+            _fail(
+                "CRAB141",
+                "Unsupported owned return boundary",
+                "Exported returns support rust.Owned around a domain value or supported Vec.",
+                path,
+                node.returns or node,
+            )
     if exported and return_type.python_name is not None:
         _fail(
             "CRAB154",
@@ -5103,7 +5560,11 @@ def _analyze_signature(
             node.returns or node,
             "Return rust.String instead.",
         )
-    if exported and not _python_return_boundary_supported(return_type):
+    if (
+        exported
+        and return_type.ownership is None
+        and not _python_return_boundary_supported(return_type)
+    ):
         _fail(
             "CRAB202",
             "Implicit complex return conversion is unsupported",
@@ -5183,6 +5644,10 @@ def _python_return_boundary_supported(type_ref: TypeRef) -> bool:
     if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
         return _python_return_boundary_supported(type_ref.arguments[0])
     if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        return all(
+            _python_return_boundary_supported(value) for value in type_ref.arguments
+        )
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
         return all(
             _python_return_boundary_supported(value) for value in type_ref.arguments
         )
@@ -5443,7 +5908,7 @@ def _discover_traits(
                 path,
                 call,
             )
-        if not is_rust_2024_identifier(binding):
+        if not binding.isidentifier() or keyword.iskeyword(binding):
             _fail(
                 "CRAB191",
                 "Unsupported Rust trait name",
@@ -5784,7 +6249,7 @@ def _discover_crates(tree: ast.Module, path: Path) -> dict[str, CrateIR]:
         ):
             continue
         binding = node.targets[0].id
-        if not is_rust_2024_identifier(binding):
+        if not binding.isidentifier() or keyword.iskeyword(binding):
             _fail(
                 "CRAB130",
                 "Invalid crate binding",
@@ -5966,6 +6431,7 @@ def _builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
     if receiver == "HashMap" and method in {
         "insert",
         "remove",
+        "get_mut",
         "entry_or_insert",
         "add",
     }:
@@ -5990,15 +6456,30 @@ def _builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
         "Result",
     } and method in {
         "map",
+        "map_err",
+        "and_then",
+        "or_else",
         "filter",
+        "filter_map",
         "copied",
+        "cloned",
         "collect_vec",
+        "collect_map",
         "sum",
         "count",
+        "any",
+        "all",
+        "find",
+        "enumerate",
+        "zip",
         "unwrap",
         "expect",
         "unwrap_or",
+        "ok",
+        "err",
     }:
+        return "owned"
+    if receiver == "HashMap" and method == "into_iter":
         return "owned"
     return "shared"
 
@@ -6035,6 +6516,7 @@ def _mutated_receiver_names(
                 "push_str",
                 "insert",
                 "remove",
+                "get_mut",
                 "entry_or_insert",
                 "add",
                 "split_at_mut_sum",
@@ -6412,11 +6894,10 @@ def _substitute_generics(
         return substitutions.get(type_ref.rust_name, type_ref)
     if not type_ref.arguments:
         return type_ref
-    return replace(
-        type_ref,
-        arguments=tuple(
+    return type_ref.with_arguments(
+        tuple(
             _substitute_generics(value, substitutions) for value in type_ref.arguments
-        ),
+        )
     )
 
 
@@ -6472,6 +6953,22 @@ def _is_copy_semantic_type(type_ref: TypeRef) -> bool:
     )
 
 
+def _is_clone_semantic_type(type_ref: TypeRef) -> bool:
+    return (
+        _is_copy_semantic_type(type_ref)
+        or type_ref.rust_name == "String"
+        or (
+            type_ref.rust_name in {"Vec", "Option"}
+            and len(type_ref.arguments) == 1
+            and _is_clone_semantic_type(type_ref.arguments[0])
+        )
+        or (
+            type_ref.rust_name in {"Tuple", "Array"}
+            and all(_is_clone_semantic_type(value) for value in type_ref.arguments)
+        )
+    )
+
+
 def _require_integer(type_ref: TypeRef, path: Path, node: ast.AST) -> None:
     if not type_ref.is_integer:
         _fail(
@@ -6508,23 +7005,24 @@ def _validate_source_binding(
     rust_namespace: Literal["value", "member"] = "value",
 ) -> None:
     reserved = reserved or ()
-    prelude_collision = (
-        rust_namespace == "value" and name in RUST_PRELUDE_VALUE_CONSTRUCTORS
-    )
+    directly_emitted = rust_namespace == "member"
+    prelude_collision = False
     if (
-        not is_rust_2024_identifier(name)
-        or name.startswith(COMPILER_VALUE_PREFIX)
+        not name.isidentifier()
+        or keyword.iskeyword(name)
+        or (directly_emitted and not is_rust_2024_identifier(name))
+        or (directly_emitted and name.startswith(COMPILER_VALUE_PREFIX))
         or name in reserved
         or prelude_collision
     ):
         reason = (
             "a compiler-reserved __cw_ name"
-            if name.startswith(COMPILER_VALUE_PREFIX)
+            if directly_emitted and name.startswith(COMPILER_VALUE_PREFIX)
             else "a Rust prelude constructor in the value namespace"
             if prelude_collision
             else "a generated or runtime-reserved Python member"
             if name in reserved
-            else "a Rust keyword or unsupported Rust identifier"
+            else "an unsupported identifier in this emitted namespace"
         )
         _fail(
             "CRAB210",
@@ -6533,8 +7031,8 @@ def _validate_source_binding(
             path,
             node,
             (
-                "Choose a source name that is valid in Rust 2024, does not start "
-                "with __cw_, and does not overlap Crabwalk's Python wrapper API."
+                "Choose a valid Python identifier that does not overlap the "
+                "generated Python wrapper API for this declaration."
             ),
         )
 

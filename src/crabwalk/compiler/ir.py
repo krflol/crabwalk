@@ -7,6 +7,20 @@ from enum import StrEnum
 from typing import Literal, TypeAlias
 
 from crabwalk.diagnostics import SourceSpan
+from . import types as _types
+from .symbols import BindingIR, SymbolId
+
+BOOL = _types.BOOL
+CHAR = _types.CHAR
+F64 = _types.F64
+I64 = _types.I64
+INFERRED = _types.INFERRED
+STR = _types.STR
+STRING = _types.STRING
+UNIT = _types.UNIT
+U64 = _types.U64
+USIZE = _types.USIZE
+TypeRef = _types.TypeRef
 
 
 class Effect(StrEnum):
@@ -22,142 +36,6 @@ class Effect(StrEnum):
     UNSAFE_MEMORY = "UnsafeMemory"
     UNSAFE_FFI = "UnsafeFfi"
     MAY_PANIC = "MayPanic"
-
-
-@dataclass(frozen=True, slots=True)
-class TypeRef:
-    rust_name: str
-    arguments: tuple["TypeRef", ...] = ()
-    python_name: str | None = None
-    const_value: int | None = None
-    is_generic: bool = False
-    is_lifetime: bool = False
-
-    def render(self) -> str:
-        if self.rust_name == "Owned":
-            return self.arguments[0].render()
-        if self.rust_name == "Ref":
-            return f"&{self.arguments[0].render()}"
-        if self.rust_name == "Mut":
-            return f"&mut {self.arguments[0].render()}"
-        if self.rust_name == "LifetimeRef":
-            target = self.arguments[0]
-            rendered = "str" if target.rust_name == "Str" else target.render()
-            return f"&'{self.lifetime} {rendered}"
-        if self.rust_name == "Str":
-            return "&str"
-        if self.rust_name == "Unit":
-            return "()"
-        if self.rust_name == "Tuple":
-            values = ", ".join(value.render() for value in self.arguments)
-            return f"({values}{',' if len(self.arguments) == 1 else ''})"
-        if self.rust_name == "Array":
-            return f"[{self.arguments[0].render()}; {self.const_value}]"
-        if self.rust_name == "HashMap":
-            values = ", ".join(value.render() for value in self.arguments)
-            return f"std::collections::HashMap<{values}>"
-        if self.rust_name == "Dyn":
-            if self.python_name is None:
-                raise ValueError("Dyn TypeRef is missing its trait symbol")
-            return f"dyn {self.python_name}"
-        concrete_paths = {
-            "TcpListener": "std::net::TcpListener",
-            "TcpStream": "std::net::TcpStream",
-            "ThreadPool": "__CwThreadPool",
-        }
-        if self.rust_name in concrete_paths:
-            return concrete_paths[self.rust_name]
-        standard_paths = {
-            "Arc": "std::sync::Arc",
-            "Mutex": "std::sync::Mutex",
-            "Rc": "std::rc::Rc",
-            "RefCell": "std::cell::RefCell",
-            "Receiver": "std::sync::mpsc::Receiver",
-            "Sender": "std::sync::mpsc::Sender",
-            "ThreadHandle": "std::thread::JoinHandle",
-        }
-        if self.rust_name in standard_paths:
-            values = ", ".join(value.render() for value in self.arguments)
-            return f"{standard_paths[self.rust_name]}<{values}>"
-        if not self.arguments:
-            return self.rust_name
-        values = ", ".join(value.render() for value in self.arguments)
-        return f"{self.rust_name}<{values}>"
-
-    def display(self) -> str:
-        if self.rust_name == "LifetimeRef":
-            return f"rust.Borrow[{self.lifetime}, {self.arguments[0].display()}]"
-        if self.is_generic:
-            return f"'{self.rust_name}" if self.is_lifetime else self.rust_name
-        if self.python_name is not None:
-            return self.python_name
-        if self.rust_name == "Unit":
-            return "None"
-        if self.rust_name == "Tuple":
-            values = ", ".join(value.display() for value in self.arguments)
-            return f"rust.Tuple[{values}]"
-        if self.rust_name == "Array":
-            return f"rust.Array[{self.arguments[0].display()}, {self.const_value}]"
-        if not self.arguments:
-            return f"rust.{self.rust_name}"
-        values = ", ".join(value.display() for value in self.arguments)
-        return f"rust.{self.rust_name}[{values}]"
-
-    @property
-    def ownership(self) -> str | None:
-        return self.rust_name if self.rust_name in {"Owned", "Ref", "Mut"} else None
-
-    @property
-    def underlying(self) -> "TypeRef":
-        return (
-            self.arguments[0]
-            if self.ownership is not None or self.rust_name == "LifetimeRef"
-            else self
-        )
-
-    @property
-    def lifetime(self) -> str | None:
-        return self.python_name if self.rust_name == "LifetimeRef" else None
-
-    @property
-    def is_integer(self) -> bool:
-        return self.rust_name in {
-            "i8",
-            "i16",
-            "i32",
-            "i64",
-            "i128",
-            "u8",
-            "u16",
-            "u32",
-            "u64",
-            "u128",
-            "usize",
-        }
-
-    @property
-    def is_signed_integer(self) -> bool:
-        return self.rust_name.startswith("i")
-
-    @property
-    def is_float(self) -> bool:
-        return self.rust_name in {"f32", "f64"}
-
-    @property
-    def is_numeric(self) -> bool:
-        return self.is_integer or self.is_float
-
-
-I64 = TypeRef("i64")
-U64 = TypeRef("u64")
-USIZE = TypeRef("usize")
-F64 = TypeRef("f64")
-BOOL = TypeRef("bool")
-CHAR = TypeRef("char")
-STRING = TypeRef("String")
-STR = TypeRef("Str")
-UNIT = TypeRef("Unit")
-INFERRED = TypeRef("_")
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +55,11 @@ class StructFieldIR:
     name: str
     type_ref: TypeRef
     span: SourceSpan
+    binding: BindingIR | None = None
+
+    @property
+    def rust_name(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +70,7 @@ class StructIR:
     fields: tuple[StructFieldIR, ...]
     derives: tuple[tuple[str, ...], ...]
     span: SourceSpan
+    symbol_id: SymbolId | None = None
 
     @property
     def qualified_name(self) -> str:
@@ -203,6 +87,11 @@ class EnumVariantIR:
     fields: tuple[StructFieldIR, ...]
     tuple_style: bool
     span: SourceSpan
+    binding: BindingIR | None = None
+
+    @property
+    def rust_name(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +102,7 @@ class EnumIR:
     variants: tuple[EnumVariantIR, ...]
     derives: tuple[tuple[str, ...], ...]
     span: SourceSpan
+    symbol_id: SymbolId | None = None
 
     @property
     def qualified_name(self) -> str:
@@ -228,6 +118,11 @@ class TraitMethodIR:
     name: str
     return_type: TypeRef
     span: SourceSpan
+    binding: BindingIR | None = None
+
+    @property
+    def rust_name(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +132,7 @@ class TraitIR:
     symbol: str
     methods: tuple[TraitMethodIR, ...]
     span: SourceSpan
+    symbol_id: SymbolId | None = None
 
     @property
     def qualified_name(self) -> str:
@@ -253,6 +149,11 @@ class ParameterIR:
     type_ref: TypeRef
     span: SourceSpan
     mutable: bool = False
+    binding: BindingIR | None = None
+
+    @property
+    def rust_name(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +162,11 @@ class TypeParameterIR:
     bounds: tuple[str, ...]
     span: SourceSpan
     is_lifetime: bool = False
+    binding: BindingIR | None = None
+
+    @property
+    def rust_name(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +230,11 @@ class NameIR:
     name: str
     type_ref: TypeRef
     span: SourceSpan
+    binding: BindingIR | None = None
+
+    @property
+    def rust_name(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -528,6 +439,14 @@ class ClosureIR:
     borrowed_parameter: bool
     type_ref: TypeRef
     span: SourceSpan
+    parameter_binding: BindingIR | None = None
+    parameter_projection: Literal["direct", "deref", "borrow"] = "direct"
+
+    @property
+    def rust_parameter(self) -> str | None:
+        if self.parameter_binding is not None:
+            return self.parameter_binding.rust_name
+        return self.parameter
 
 
 ExpressionIR: TypeAlias = (
@@ -575,6 +494,11 @@ class LetIR:
     type_ref: TypeRef
     mutable: bool
     span: SourceSpan
+    binding: BindingIR | None = None
+
+    @property
+    def rust_name(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -582,6 +506,11 @@ class AssignIR:
     name: str
     value: ExpressionIR
     span: SourceSpan
+    binding: BindingIR | None = None
+
+    @property
+    def rust_name(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -599,6 +528,13 @@ class DestructureIR:
     type_ref: TypeRef
     mutable: tuple[bool, ...]
     span: SourceSpan
+    bindings: tuple[BindingIR, ...] = ()
+
+    @property
+    def rust_names(self) -> tuple[str, ...]:
+        if self.bindings:
+            return tuple(binding.rust_name for binding in self.bindings)
+        return self.names
 
 
 @dataclass(frozen=True, slots=True)
@@ -607,6 +543,11 @@ class LocalConstIR:
     value: ExpressionIR
     type_ref: TypeRef
     span: SourceSpan
+    binding: BindingIR | None = None
+
+    @property
+    def rust_name(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -637,6 +578,11 @@ class ForRangeIR:
     stop: ExpressionIR
     body: tuple["StatementIR", ...]
     span: SourceSpan
+    binding: BindingIR | None = None
+
+    @property
+    def rust_variable(self) -> str:
+        return self.binding.rust_name if self.binding is not None else self.variable
 
 
 @dataclass(frozen=True, slots=True)
@@ -646,6 +592,15 @@ class ForEachIR:
     item_type: TypeRef
     body: tuple["StatementIR", ...]
     span: SourceSpan
+    bindings: tuple[BindingIR, ...] = ()
+
+    @property
+    def rust_variable(self) -> str:
+        if not self.bindings:
+            return self.variable
+        if len(self.bindings) == 1:
+            return self.bindings[0].rust_name
+        return f"({', '.join(binding.rust_name for binding in self.bindings)})"
 
 
 @dataclass(frozen=True, slots=True)
@@ -671,6 +626,7 @@ class MatchArmIR:
     tuple_style: bool
     body: tuple["StatementIR", ...]
     span: SourceSpan
+    local_bindings: tuple[BindingIR | None, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -689,6 +645,7 @@ class PatternMatchArmIR:
     guard: ExpressionIR | None
     body: tuple["StatementIR", ...]
     span: SourceSpan
+    local_bindings: tuple[BindingIR, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -738,6 +695,7 @@ class FunctionIR:
     method_for: TypeRef | None = None
     trait_symbol: str | None = None
     operator_kind: str | None = None
+    symbol_id: SymbolId | None = None
 
     @property
     def rust_symbol(self) -> str:

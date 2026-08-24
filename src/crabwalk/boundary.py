@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import struct as struct_module
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
@@ -22,6 +22,7 @@ class InputPolicy(StrEnum):
     OPTION = "Option"
     TUPLE = "Tuple"
     SEQUENCE = "Sequence"
+    MAPPING = "Mapping"
     RUST_HANDLE = "RustHandle"
     UNSUPPORTED = "Unsupported"
 
@@ -33,6 +34,7 @@ class OutputPolicy(StrEnum):
     TUPLE = "Tuple"
     LIST = "List"
     BYTES = "Bytes"
+    DICT = "Dict"
     RUST_HANDLE = "RustHandle"
     UNSUPPORTED = "Unsupported"
 
@@ -175,6 +177,15 @@ def boundary_codec(type_ref: TypeRef) -> BoundaryCodec:
             OwnershipPolicy.CLONE,
             (boundary_codec(type_ref.arguments[0]),),
         )
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        return BoundaryCodec(
+            type_ref,
+            InputPolicy.MAPPING,
+            OutputPolicy.DICT,
+            AllocationKind.PYTHON_CONTAINER,
+            OwnershipPolicy.CLONE,
+            tuple(boundary_codec(value) for value in type_ref.arguments),
+        )
     return BoundaryCodec(
         type_ref,
         InputPolicy.UNSUPPORTED,
@@ -222,6 +233,16 @@ def validate_boundary_input(value: object, type_ref: TypeRef) -> object:
             except (OverflowError, TypeError, ValueError) as error:
                 raise type(error)(f"element {index}: {error}") from error
         return converted
+    if codec.input_policy == InputPolicy.MAPPING:
+        if not isinstance(value, Mapping):
+            raise TypeError(f"expected a Python mapping, found {type(value).__name__}")
+        converted_mapping: dict[object, object] = {}
+        key_codec, value_codec = codec.children
+        for key, item in value.items():
+            converted_key = validate_boundary_input(key, key_codec.type_ref)
+            converted_value = validate_boundary_input(item, value_codec.type_ref)
+            converted_mapping[converted_key] = converted_value
+        return converted_mapping
     if codec.input_policy == InputPolicy.NONE:
         if value is not None:
             raise TypeError(f"expected None, found {type(value).__name__}")
@@ -300,6 +321,16 @@ def normalize_boundary_output(value: object, type_ref: TypeRef) -> object:
             normalize_boundary_output(item, codec.children[0].type_ref)
             for item in value
         ]
+    if codec.output_policy == OutputPolicy.DICT:
+        if not isinstance(value, Mapping):
+            raise TypeError("native HashMap output did not produce a mapping")
+        key_codec, value_codec = codec.children
+        return {
+            normalize_boundary_output(
+                key, key_codec.type_ref
+            ): normalize_boundary_output(item, value_codec.type_ref)
+            for key, item in value.items()
+        }
     if codec.output_policy == OutputPolicy.SCALAR:
         # PyO3 has already converted the native scalar. Reuse the exact input
         # validator so output drift is detected at this shared contract too.

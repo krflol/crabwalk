@@ -7,7 +7,7 @@ import pytest
 
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_path, analyze_project_path
-from crabwalk.compiler.ir import TypeRef
+from crabwalk.compiler.ir import LetIR, TypeRef
 from crabwalk.compiler.naming import owned_class_names
 from crabwalk.compiler.validation import validate_package_ir
 from crabwalk.diagnostics import CrabwalkCompilationError
@@ -166,48 +166,6 @@ def identity(py: rust.u64) -> rust.u64:
         """\
 from crabwalk import rust
 
-@rust.fn
-def identity(self: rust.u64) -> rust.u64:
-    return self
-""",
-        """\
-from crabwalk import rust
-
-@rust.fn
-def invalid(value: rust.u64) -> rust.u64:
-    __cw_result = value
-    return __cw_result
-""",
-        """\
-from crabwalk import rust
-
-@rust.fn
-def invalid(value: rust.u64) -> rust.u64:
-    total: rust.u64 = 0
-    for ref in range(value):
-        total += ref
-    return total
-""",
-        """\
-from crabwalk import rust
-
-@rust.fn
-def invalid() -> rust.u64:
-    values: rust.Vec[rust.u64] = rust.Vec([1, 2, 3])
-    return values.iter().map(lambda ref: ref).sum()
-""",
-        """\
-from crabwalk import rust
-
-@rust.fn
-def invalid(value: rust.u64) -> rust.u64:
-    match value:
-        case ref:
-            return ref
-""",
-        """\
-from crabwalk import rust
-
 @rust.struct
 class Invalid:
     to_python: rust.u64
@@ -242,3 +200,37 @@ def test_unsafe_source_bindings_fail_before_rustc(
     diagnostic = captured.value.diagnostics[0]
     assert diagnostic.code == "CRAB210"
     assert diagnostic.span is not None
+
+
+def test_function_local_reserved_spellings_receive_hygienic_rust_names(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "hygienic_bindings.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def identity(self: rust.u64) -> rust.u64:
+    __cw_result: rust.u64 = self
+    total: rust.u64 = 0
+    for ref in range(__cw_result):
+        total += ref
+    values: rust.Vec[rust.u64] = rust.Vec([total])
+    return values.iter().map(lambda ref: ref).sum()
+""",
+        encoding="utf-8",
+    )
+
+    ir = analyze_path(source)
+    generated = generate_project(ir, "_crabwalk_hygienic_bindings")
+    function = ir.functions[0]
+
+    assert function.parameters[0].name == "self"
+    assert function.parameters[0].rust_name != "self"
+    assert "__cw_result" not in {
+        statement.rust_name
+        for statement in function.body
+        if isinstance(statement, LetIR)
+    }
+    assert "fn __cw_native_" in generated.rust_source
