@@ -95,6 +95,8 @@ def double(value: rust.u64) -> rust.u64:
 
         manifest = json.loads(archive.read("sample_pkg/_crabwalk_prebuilt.json"))
         assert manifest["source_hash"] == ir.source_hash
+        assert manifest["compiler_input_hash"] == ir.compiler_input_hash
+        assert manifest["wheel_source_integrity_hash"] == ir.wheel_source_integrity_hash
         assert manifest["artifact"] == native_name.removeprefix("sample_pkg/")
         assert manifest["extension_name"] == compilation.extension_name
         assert manifest["runtime_abi_version"] == RUNTIME_ABI_VERSION
@@ -173,11 +175,12 @@ def value() -> rust.u64:
     (package / "_crabwalk_prebuilt.json").write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "crabwalk_version": __version__,
                 "runtime_abi_version": RUNTIME_ABI_VERSION + 1,
                 "module_name": "abi_pkg",
-                "source_hash": ir.source_hash,
+                "compiler_input_hash": ir.compiler_input_hash,
+                "wheel_source_integrity_hash": ir.wheel_source_integrity_hash,
                 "fingerprint": "a" * 64,
                 "extension_name": "_crabwalk_abi",
                 "artifact": "_crabwalk_native/missing.pyd",

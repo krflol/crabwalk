@@ -64,12 +64,12 @@ def build_fingerprint(
     toolchain_root = (project_root or Path(ir.source_path).parent).resolve()
     toolchain_files_hash = _toolchain_files_hash(toolchain_root)
     payload: dict[str, object] = {
-        "fingerprint_schema": 4,
+        "fingerprint_schema": 5,
         "crabwalk_version": __version__,
         "implementation_hash": _implementation_hash(),
         "ir_schema": ir.schema_version,
         "codegen_schema": CODEGEN_SCHEMA_VERSION,
-        "source_hash": ir.source_hash,
+        "compiler_input_hash": ir.compiler_input_hash,
         "source_path_identity": Path(ir.source_path).name,
         "module_name": ir.module_name,
         "python": {

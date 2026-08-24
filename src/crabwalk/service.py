@@ -480,12 +480,12 @@ def _publish_cargo_artifact(
     write_json(
         cache.manifest,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "fingerprint": fingerprint,
             "extension_name": extension_name,
             "artifact": artifact.name,
             "artifact_sha256": outcome_hash,
-            "source_hash": ir.source_hash,
+            "compiler_input_hash": ir.compiler_input_hash,
         },
     )
     return artifact

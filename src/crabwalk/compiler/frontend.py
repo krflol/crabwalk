@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import keyword
 import math
 import re
@@ -106,6 +105,11 @@ from .naming import (
     is_rust_2024_identifier,
     mangle_dependency,
     mangle_item,
+)
+from .package_graph import (
+    discover_package_source_graph,
+    package_python_paths,
+    single_file_source_graph,
 )
 
 _ANALYSIS_CACHE_LIMIT = 64
@@ -385,11 +389,13 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
         for declaration in declarations
     )
     functions = _propagate_effects(functions)
+    source_graph = single_file_source_graph(source_path)
     return PackageIR(
-        schema_version=18,
+        schema_version=19,
         module_name=identity,
         source_path=str(source_path),
-        source_hash=hashlib.sha256(source_bytes).hexdigest(),
+        source_hash=source_graph.compiler_input_hash,
+        wheel_source_integrity_hash=source_graph.wheel_source_integrity_hash,
         functions=functions,
         crates=tuple(crates.values()),
         source_paths=(str(source_path),),
@@ -455,16 +461,24 @@ def analyze_project_path(
             return cached
         return _remember_analysis(cache_key, analyze_path(source_path, module_name))
 
-    source_identity = project_source_identity(source_path)
     package_name = _package_name_for_entry(
         package_root,
         source_path,
         module_name,
     )
+    source_graph = discover_package_source_graph(
+        package_root,
+        package_name,
+        source_path,
+    )
+    source_identity = source_graph.compiler_input_hash
     cache_key = (str(package_root), package_name, source_identity)
     cached = _cached_analysis(cache_key)
     if cached is not None:
-        return cached
+        return replace(
+            cached,
+            wheel_source_integrity_hash=(source_graph.wheel_source_integrity_hash),
+        )
     return _remember_analysis(
         cache_key,
         _analyze_regular_package(package_root, source_path, module_name),
@@ -489,22 +503,18 @@ def _remember_analysis(key: tuple[str, str, str], result: PackageIR) -> PackageI
 
 
 def project_source_identity(path: str | Path) -> str:
-    """Hash all source files participating in the file's Crabwalk compilation unit."""
+    """Hash only sources participating in generated native output."""
 
     source_path = Path(path).resolve()
     package_root = _regular_package_root(source_path)
-    paths = (
-        _package_python_paths(package_root)
-        if package_root is not None
-        else (source_path,)
+    if package_root is None:
+        return single_file_source_graph(source_path).compiler_input_hash
+    graph = discover_package_source_graph(
+        package_root,
+        package_root.name,
+        source_path,
     )
-    digest = hashlib.sha256()
-    for candidate in paths:
-        digest.update(str(candidate).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(candidate.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
+    return graph.compiler_input_hash
 
 
 def project_source_anchor(path: str | Path) -> Path:
@@ -525,8 +535,13 @@ def _analyze_regular_package(
         entry_path,
         requested_module_name,
     )
+    source_graph = discover_package_source_graph(
+        package_root,
+        package_name,
+        entry_path,
+    )
     modules: dict[str, _PackageModule] = {}
-    for source_path in _package_python_paths(package_root):
+    for source_path in source_graph.compiler_paths:
         source_bytes, tree = _read_package_source(source_path)
         name = _package_module_name(package_root, package_name, source_path)
         declarations = {
@@ -1000,20 +1015,16 @@ def _analyze_regular_package(
         )
 
     functions_tuple = _propagate_effects(tuple(functions))
-    digest = hashlib.sha256()
     source_paths: list[str] = []
     for name in sorted(modules):
         module = modules[name]
-        digest.update(name.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(module.source_bytes)
-        digest.update(b"\0")
         source_paths.append(str(module.path))
     return PackageIR(
-        schema_version=18,
+        schema_version=19,
         module_name=package_name,
         source_path=str(package_root / "__init__.py"),
-        source_hash=digest.hexdigest(),
+        source_hash=source_graph.compiler_input_hash,
+        wheel_source_integrity_hash=source_graph.wheel_source_integrity_hash,
         functions=functions_tuple,
         crates=tuple(all_crates[name] for name in sorted(all_crates)),
         source_paths=tuple(source_paths),
@@ -1100,17 +1111,7 @@ def _regular_package_root(path: Path) -> Path | None:
 
 
 def _package_python_paths(package_root: Path) -> tuple[Path, ...]:
-    paths = [
-        path
-        for path in package_root.rglob("*.py")
-        if not any(
-            part.startswith(".") or part == "__pycache__"
-            for part in path.relative_to(package_root).parts[:-1]
-        )
-    ]
-    return tuple(
-        sorted(paths, key=lambda value: value.relative_to(package_root).as_posix())
-    )
+    return package_python_paths(package_root)
 
 
 def _package_name_for_entry(
@@ -3914,7 +3915,7 @@ class _FunctionLowerer:
                         'Declare rayon = rust.crate("rayon", version="1") at module scope.',
                     )
                 arguments = ()
-                result = INFERRED
+                result = TypeRef("ParallelIteratorRef", (element_type,))
             else:
                 _unsupported(
                     node, self.path, f"Vec.{method} is not in the M2 capability table."
@@ -4221,9 +4222,29 @@ class _FunctionLowerer:
                     self.path,
                     f"Result.{method} is not in the M2 capability table.",
                 )
-        elif receiver_type.rust_name == "Iterator":
+        elif receiver_type.rust_name in {
+            "Iterator",
+            "ParallelIterator",
+            "ParallelIteratorRef",
+        }:
             item_type = receiver_type.arguments[0]
-            if method == "map" and len(node.args) == 1:
+            is_parallel = receiver_type.rust_name.startswith("ParallelIterator")
+            if (
+                method == "copied"
+                and not node.args
+                and receiver_type.rust_name == "ParallelIteratorRef"
+            ):
+                if not _is_copy_semantic_type(item_type):
+                    _fail(
+                        "CRAB184",
+                        "Parallel iterator copy requires a Copy item",
+                        "Map borrowed String items into owned values before collection.",
+                        self.path,
+                        node,
+                    )
+                arguments = ()
+                result = TypeRef("ParallelIterator", (item_type,))
+            elif method == "map" and len(node.args) == 1:
                 closure = self._lower_closure(
                     node.args[0],
                     environment,
@@ -4231,13 +4252,21 @@ class _FunctionLowerer:
                     borrowed_parameter=False,
                 )
                 arguments = (closure,)
-                result = TypeRef("Iterator", (closure.body.type_ref,))
+                result = TypeRef(
+                    "ParallelIterator" if is_parallel else "Iterator",
+                    (closure.body.type_ref,),
+                )
             elif method == "filter" and len(node.args) == 1:
-                if not _is_copy_semantic_type(item_type):
+                borrowed_parallel_item = (
+                    receiver_type.rust_name == "ParallelIteratorRef"
+                )
+                if not _is_copy_semantic_type(item_type) and not (
+                    borrowed_parallel_item and item_type == STRING
+                ):
                     _fail(
                         "CRAB184",
                         "Filter closure requires a Copy item",
-                        "Iterator.filter currently supports primitive Copy items.",
+                        "Filter supports Copy items and borrowed Rayon String items.",
                         self.path,
                         node,
                     )
@@ -4251,6 +4280,14 @@ class _FunctionLowerer:
                 arguments = (closure,)
                 result = receiver_type
             elif method == "collect_vec" and not node.args:
+                if receiver_type.rust_name == "ParallelIteratorRef":
+                    _fail(
+                        "CRAB184",
+                        "Borrowed parallel items cannot be collected as owned values",
+                        "Use copied() for Copy items or map the item into an owned value.",
+                        self.path,
+                        node,
+                    )
                 arguments = ()
                 result = TypeRef("Vec", (item_type,))
             elif method == "sum" and not node.args and item_type.is_numeric:
@@ -5945,9 +5982,16 @@ def _builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
         return "owned"
     if receiver == "ThreadHandle" and method == "join":
         return "owned"
-    if receiver in {"Iterator", "Option", "Result"} and method in {
+    if receiver in {
+        "Iterator",
+        "ParallelIterator",
+        "ParallelIteratorRef",
+        "Option",
+        "Result",
+    } and method in {
         "map",
         "filter",
+        "copied",
         "collect_vec",
         "sum",
         "count",

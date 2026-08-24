@@ -7,6 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from crabwalk.diagnostics import SourceSpan
+from crabwalk.native_exceptions import (
+    NATIVE_BORROW_ERROR,
+    NATIVE_MOVE_ERROR,
+    NATIVE_PANIC_ERROR,
+    NATIVE_RUST_RESULT_ERROR,
+)
 
 from .ir import (
     ArrayLiteralIR,
@@ -67,7 +73,14 @@ from .ir import (
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
 PYO3_VERSION = "0.29.2"
-CODEGEN_SCHEMA_VERSION = 32
+CODEGEN_SCHEMA_VERSION = 33
+
+_NATIVE_EXCEPTION_TYPES = (
+    (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
+    (NATIVE_BORROW_ERROR, "__CwNativeBorrowError"),
+    (NATIVE_PANIC_ERROR, "__CwNativePanicError"),
+    (NATIVE_RUST_RESULT_ERROR, "__CwNativeRustResultError"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +167,8 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
     writer.leave()
     writer.line("}")
     writer.line()
+    _write_native_exceptions(writer)
+    writer.line()
     _write_panic_boundary(writer)
     writer.line()
     _write_thread_pool(writer)
@@ -198,6 +213,8 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
     writer.line(f'#[pymodule(name = "{extension_name}")]')
     writer.line("fn __crabwalk_module(m: &Bound<'_, PyModule>) -> PyResult<()> {")
     writer.enter()
+    for python_name, rust_name in _NATIVE_EXCEPTION_TYPES:
+        writer.line(f'm.add("{python_name}", m.py().get_type::<{rust_name}>())?;')
     for function in ir.functions:
         if not function.exported:
             continue
@@ -241,9 +258,11 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
         'panic = "unwind"\n'
     )
     source_map = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_file": "src/lib.rs",
         "source_hash": ir.source_hash,
+        "compiler_input_hash": ir.compiler_input_hash,
+        "wheel_source_integrity_hash": ir.wheel_source_integrity_hash,
         "entries": writer.mappings,
     }
     return GeneratedProject(
@@ -533,8 +552,7 @@ def _write_owned_enum_class(
         )
     writer.line(
         f"std::option::Option::None => std::result::Result::Err("
-        f"{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("
-        '"CrabwalkMoveError: value was moved")),'
+        f"{_native_move_error('')}),"
     )
     writer.leave()
     writer.line("}")
@@ -567,9 +585,7 @@ def _write_owned_enum_class(
         writer.enter()
         writer.line("let value = self.value.as_ref().ok_or_else(|| {")
         writer.enter()
-        writer.line(
-            f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
-        )
+        writer.line(_native_move_error(""))
         writer.leave()
         writer.line("})?;")
         writer.line("match value {")
@@ -703,9 +719,7 @@ def _write_owned_struct_class(writer: _Writer, struct: StructIR) -> None:
             f"self.value.as_ref().map(|value| value.{field.name}.clone()).ok_or_else(|| {{"
         )
         writer.enter()
-        writer.line(
-            f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
-        )
+        writer.line(_native_move_error(""))
         writer.leave()
         writer.line("})")
         writer.leave()
@@ -718,9 +732,7 @@ def _write_owned_struct_class(writer: _Writer, struct: StructIR) -> None:
         writer.enter()
         writer.line("let target = self.value.as_mut().ok_or_else(|| {")
         writer.enter()
-        writer.line(
-            f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
-        )
+        writer.line(_native_move_error(""))
         writer.leave()
         writer.line("})?;")
         writer.line(f"target.{field.name} = value;")
@@ -741,9 +753,7 @@ def _write_owned_struct_class(writer: _Writer, struct: StructIR) -> None:
     writer.leave()
     writer.line(")).ok_or_else(|| {")
     writer.enter()
-    writer.line(
-        f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
-    )
+    writer.line(_native_move_error(""))
     writer.leave()
     writer.line("})")
     writer.leave()
@@ -828,8 +838,8 @@ def _write_export_wrapper(
         error_type = function.return_type.arguments[1].display()
         writer.line(
             "std::result::Result::Err(error) => std::result::Result::Err("
-            f"{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("
-            f'format!("CrabwalkRustError: {error_type}: {{}}", error))),'
+            "__CwNativeRustResultError::new_err(("
+            f"{json.dumps(error_type)}, error.to_string()))),"
         )
         writer.leave()
         writer.line("}")
@@ -850,6 +860,24 @@ def _write_export_wrapper(
         )
     writer.leave()
     writer.line("}")
+
+
+def _write_native_exceptions(writer: _Writer) -> None:
+    """Declare private, identity-bearing failures for the generated ABI."""
+
+    for _, rust_name in _NATIVE_EXCEPTION_TYPES:
+        writer.line(
+            f"{PYO3_CARGO_ALIAS}::create_exception!("
+            f"__crabwalk_module, {rust_name}, "
+            f"{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError);"
+        )
+
+
+def _native_move_error(parameter: str, message: str = "value was moved") -> str:
+    return (
+        "__CwNativeMoveError::new_err(("
+        f"{json.dumps(parameter)}, {json.dumps(message)}))"
+    )
 
 
 def _write_panic_boundary(writer: _Writer) -> None:
@@ -890,9 +918,7 @@ def _write_panic_boundary(writer: _Writer) -> None:
     writer.line("std::result::Result::Err(payload) => {")
     writer.enter()
     writer.line("let message = __cw_panic_message(payload);")
-    writer.line(
-        f'std::result::Result::Err({PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err(format!("CrabwalkPanicError: {{}}", message)))'
-    )
+    writer.line("std::result::Result::Err(__CwNativePanicError::new_err(message))")
     writer.leave()
     writer.line("}")
     writer.leave()
@@ -1880,7 +1906,11 @@ def _render_expression(
                 f"__cw_left.iter().copied().sum::<{element}>() + "
                 f"__cw_right.iter().copied().sum::<{element}>() }}"
             )
-        if expression.receiver.type_ref.rust_name == "Iterator":
+        if expression.receiver.type_ref.rust_name in {
+            "Iterator",
+            "ParallelIterator",
+            "ParallelIteratorRef",
+        }:
             if expression.method == "collect_vec":
                 return f"{rendered_receiver}.collect::<Vec<_>>()"
         arguments = ", ".join(rendered_arguments)
@@ -2117,9 +2147,7 @@ def _write_owned_vector_class(writer: _Writer, vector_type: TypeRef) -> None:
     writer.enter()
     writer.line("self.value.as_ref().map(|value| value.len()).ok_or_else(|| {")
     writer.enter()
-    writer.line(
-        f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
-    )
+    writer.line(_native_move_error(""))
     writer.leave()
     writer.line("})")
     writer.leave()
@@ -2129,9 +2157,7 @@ def _write_owned_vector_class(writer: _Writer, vector_type: TypeRef) -> None:
     writer.enter()
     writer.line("self.value.as_ref().cloned().ok_or_else(|| {")
     writer.enter()
-    writer.line(
-        f'{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("CrabwalkMoveError: value was moved")'
-    )
+    writer.line(_native_move_error(""))
     writer.leave()
     writer.line("})")
     writer.leave()
@@ -2183,8 +2209,7 @@ def _write_wrapper_extraction(writer: _Writer, parameter: ParameterIR) -> None:
         (
             f"let __cw_arg_{parameter.name} = "
             f"{parameter.name}.value.{access}.ok_or_else(|| "
-            f"{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("
-            f'"CrabwalkMoveError: {parameter.name} was moved"))?;'
+            f"{_native_move_error(parameter.name)})?;"
         ),
         parameter.span,
         "ownership_boundary",
@@ -2201,8 +2226,7 @@ def _write_wrapper_ownership_preflight(
         (
             f"if {parameter.name}.value.is_none() {{ "
             f"return std::result::Result::Err("
-            f"{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError::new_err("
-            f'"CrabwalkMoveError: {parameter.name} was moved")); }}'
+            f"{_native_move_error(parameter.name)}); }}"
         ),
         parameter.span,
         "ownership_preflight",

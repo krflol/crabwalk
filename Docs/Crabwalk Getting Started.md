@@ -83,10 +83,13 @@ native implementation and Python ABI wrapper for one symbol.
 
 ## Packages
 
-A regular package (`__init__.py` present) is one compilation unit. Crabwalk
-statically analyzes every ordinary `.py` file beneath that package without
-importing it, resolves supported relative imports and re-exports, then emits one
-extension. Runtime decorators in all package modules bind to that same artifact.
+A regular package (`__init__.py` present) is one compilation unit. Crabwalk finds
+modules containing native declarations or crate declarations, adds the requested
+entry module and required package initializers, and follows supported internal
+imports and re-exports without importing Python code. It emits that reachable
+native graph as one extension. Unrelated Python-only modules do not block or
+invalidate native compilation; mixed-wheel integrity still covers every shipped
+`.py` and `.pyi` source file.
 
 ```text
 my_package/
@@ -97,7 +100,8 @@ my_package/
 
 Namespace packages are not currently compilation units. Pass a file or regular
 package directory to the CLI. Internal import cycles and `import *` are rejected
-in the current compiler; use an acyclic graph and explicit imported names.
+when they are reachable from the native compiler graph; use an acyclic graph and
+explicit imported names there.
 
 For explicit, bounded project discovery:
 

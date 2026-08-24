@@ -121,8 +121,9 @@ index, dependency, and provenance policies.
 - CPython only; interpreter-specific wheels; free-threaded CPython is not advertised.
 - Regular packages only; namespace packages and multiple configured top-level
   packages in one distribution are not supported.
-- Internal package import cycles and `import *` are rejected by the current compiler rather than
-  approximated. Use explicit imports and an acyclic compiler-visible graph.
+- Internal package import cycles and `import *` are rejected in the reachable
+  native compiler graph rather than approximated. Use explicit imports and an
+  acyclic compiler-visible graph; unrelated Python-only modules remain outside it.
 - No general Python calls, objects, reflection, exceptions-as-control-flow,
   generators, or dynamic imports inside `@rust.fn`. Closures are accepted only in
   statically typed iterator/thread/async/pool positions.
@@ -137,8 +138,10 @@ index, dependency, and provenance policies.
 - Native `@rust.async_fn` uses a small std-only teaching executor, not Tokio.
   `rust.async_call` remains a separate Python executor bridge; cancellation does not
   stop Rust work already running.
-- Rayon is currently exposed through `Vec.par_iter()` when the package explicitly
-  declares Rayon; broader `Send`/`Sync` wrapper transfer is not exposed.
+- Rayon is exposed through typed `Vec.par_iter()` adapters when the package
+  explicitly declares Rayon. Copy items support `copied`; borrowed `String`
+  items support `filter`, owned `map`, and `collect_vec`. Broader `Send`/`Sync`
+  wrapper transfer is not exposed.
 - `TcpListener`, `TcpStream`, and `ThreadPool` provide a bounded loopback teaching
   slice, not a production server, TLS stack, general HTTP parser, or persistent
   externally controlled background service.

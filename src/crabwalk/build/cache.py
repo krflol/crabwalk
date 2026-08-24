@@ -227,7 +227,7 @@ def artifact_cache_info(
             "corrupt", artifact, manifest_path, 0, "artifact is missing"
         )
     if (
-        manifest.get("schema_version") != 1
+        manifest.get("schema_version") not in {1, 2}
         or manifest.get("fingerprint") != fingerprint
         or manifest.get("extension_name") != extension_name
         or manifest.get("artifact") != artifact.name

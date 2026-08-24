@@ -56,6 +56,10 @@ def contains_number(value: rust.Str) -> rust.bool:
 """,
         encoding="utf-8",
     )
+    (package / "presentation.py").write_text(
+        "LABEL = 'python-only package data'\n",
+        encoding="utf-8",
+    )
     return package
 
 
@@ -211,8 +215,11 @@ print((pathlib.Path.cwd() / ".crabwalk").exists())
     assert not (artifact.parent.parent / ".crabwalk").exists()
 
     installed_package = artifact.parent.parent
-    (installed_package / "math.py").write_text(
-        (installed_package / "math.py").read_text(encoding="utf-8") + "\n# tampered\n",
+    # Python-only source is excluded from the native compiler hash but remains
+    # covered by the wheel-wide integrity identity.
+    (installed_package / "presentation.py").write_text(
+        (installed_package / "presentation.py").read_text(encoding="utf-8")
+        + "\n# tampered\n",
         encoding="utf-8",
     )
     rejected = subprocess.run(

@@ -147,21 +147,65 @@ class CrabwalkCompilationError(CrabwalkError):
 class CrabwalkMoveError(CrabwalkError, RuntimeError):
     """A Rust-owned value was used after its value had moved."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        parameter: str | None = None,
+        definition_site: str | None = None,
+        move_site: str | None = None,
+        parameter_site: str | None = None,
+        call_site: str | None = None,
+    ) -> None:
+        self.parameter = parameter
+        self.definition_site = definition_site
+        self.move_site = move_site
+        self.parameter_site = parameter_site
+        self.call_site = call_site
+        super().__init__(message)
+
 
 class CrabwalkBorrowError(CrabwalkError, RuntimeError):
     """A call-scoped shared/mutable borrow conflicted with another access."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        parameters: tuple[str, ...] = (),
+        definition_site: str | None = None,
+        parameter_sites: tuple[str, ...] = (),
+        call_site: str | None = None,
+    ) -> None:
+        self.parameters = parameters
+        self.definition_site = definition_site
+        self.parameter_sites = parameter_sites
+        self.call_site = call_site
+        super().__init__(message)
 
 
 class CrabwalkPanicError(CrabwalkError, RuntimeError):
     """Generated Rust panicked and the extension boundary contained it."""
 
+    def __init__(self, message: str, *, call_site: str | None = None) -> None:
+        self.panic_message = message
+        self.call_site = call_site
+        super().__init__(message)
+
 
 class CrabwalkRustError(CrabwalkError, RuntimeError):
     """An exported Rust ``Result`` contained ``Err``."""
 
-    def __init__(self, rust_type: str, message: str):
+    def __init__(
+        self,
+        rust_type: str,
+        message: str,
+        *,
+        call_site: str | None = None,
+    ) -> None:
         self.rust_type = rust_type
         self.rust_message = message
+        self.call_site = call_site
         super().__init__(f"{rust_type}: {message}")
 
 

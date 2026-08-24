@@ -10,6 +10,7 @@ SAFETY_SOURCE = """\
 from __future__ import annotations
 
 import threading
+import builtins
 
 from crabwalk import CrabwalkPanicError, CrabwalkRustError, rust
 
@@ -100,7 +101,28 @@ except CrabwalkRustError as error:
 try:
     python_result(9)
 except CrabwalkPanicError as error:
-    print("python-result-panic", "python result panic" in str(error))
+    print(
+        "python-result-panic",
+        "python result panic" in str(error),
+        error.panic_message == "python result panic",
+        bool(error.call_site),
+    )
+
+real_print = builtins.print
+def prefixed_user_failure(value):
+    raise RuntimeError("CrabwalkPanicError: raised by user Python")
+builtins.print = prefixed_user_failure
+try:
+    python_result(7)
+except RuntimeError as error:
+    user_failure = (
+        type(error) is RuntimeError
+        and "raised by user Python" in str(error)
+        and not isinstance(error, CrabwalkPanicError)
+    )
+finally:
+    builtins.print = real_print
+print("python-prefix-is-not-native", user_failure)
 """
 
 
@@ -138,5 +160,6 @@ def test_unsafe_and_double_panic_edges_survive_in_subprocess(tmp_path: Path) -> 
         "0",
         "python-result-err rust.String zero",
         "9",
-        "python-result-panic True",
+        "python-result-panic True True True",
+        "python-prefix-is-not-native True",
     ]

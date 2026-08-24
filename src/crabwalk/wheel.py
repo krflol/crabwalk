@@ -219,11 +219,13 @@ def _prebuilt_manifest(
     if artifact is None:
         raise AssertionError("wheel compilation has no artifact")
     value = {
-        "schema_version": 2,
+        "schema_version": 3,
         "crabwalk_version": __version__,
         "runtime_abi_version": RUNTIME_ABI_VERSION,
         "module_name": compilation.ir.module_name,
         "source_hash": compilation.ir.source_hash,
+        "compiler_input_hash": compilation.ir.compiler_input_hash,
+        "wheel_source_integrity_hash": (compilation.ir.wheel_source_integrity_hash),
         "fingerprint": compilation.fingerprint,
         "extension_name": compilation.extension_name,
         "artifact": str(artifact_relative),

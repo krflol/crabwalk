@@ -33,9 +33,11 @@ def compilation_inspection(result: CompilationResult) -> dict[str, object]:
         suffix,
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "module": result.ir.module_name,
         "source_hash": result.ir.source_hash,
+        "compiler_input_hash": result.ir.compiler_input_hash,
+        "wheel_source_integrity_hash": result.ir.wheel_source_integrity_hash,
         "source_files": list(result.ir.source_paths or (result.ir.source_path,)),
         "fingerprint": result.fingerprint,
         "extension_name": result.extension_name,

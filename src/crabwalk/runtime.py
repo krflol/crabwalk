@@ -35,6 +35,12 @@ from crabwalk.diagnostics import (
 )
 from crabwalk.progress import ImplicitBuildProgress
 from crabwalk.service import CompilationResult, default_service
+from crabwalk.native_exceptions import (
+    NATIVE_BORROW_ERROR,
+    NATIVE_MOVE_ERROR,
+    NATIVE_PANIC_ERROR,
+    NATIVE_RUST_RESULT_ERROR,
+)
 
 _compile_lock = threading.RLock()
 _results: dict[tuple[str, str], CompilationResult] = {}
@@ -44,18 +50,29 @@ _owned_registry_lock = threading.RLock()
 @dataclass(frozen=True, slots=True)
 class _OwnedTypeRegistration:
     native_type: type[Any]
+    native_module: object
     fingerprint: str
     type_ref: TypeRef
     fields: tuple[tuple[str, TypeRef], ...] = ()
     variants: tuple[tuple[str, tuple[tuple[str, TypeRef], ...]], ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _BorrowContext:
+    ownership: str
+    parameter: str
+    parameter_site: str
+    call_site: str
+
+    def render(self) -> str:
+        return (
+            f"{self.ownership} parameter '{self.parameter}' defined at "
+            f"{self.parameter_site}; call at {self.call_site}"
+        )
+
+
 _owned_types_by_module: dict[tuple[str, str], _OwnedTypeRegistration] = {}
 _owned_types_by_compilation: dict[tuple[str, str], _OwnedTypeRegistration] = {}
-
-_MOVE_ERROR_PREFIX = "CrabwalkMoveError:"
-_PANIC_ERROR_PREFIX = "CrabwalkPanicError:"
-_RUST_ERROR_PREFIX = "CrabwalkRustError:"
 
 
 class _RustOwnedValue:
@@ -113,15 +130,18 @@ class _RustOwnedValue:
     @property
     def rust_type(self) -> str:
         self._check_thread()
+        self._check_borrow_access("shared")
         return self._type_key
 
     @property
     def moved(self) -> bool:
         self._check_thread()
+        self._check_borrow_access("shared")
         return bool(self._native.is_moved())
 
     def to_python(self) -> object:
         self._check_thread()
+        self._check_borrow_access("shared")
         if self._enum_variants:
             try:
                 variant = self._native.variant()
@@ -147,6 +167,7 @@ class _RustOwnedValue:
 
     def __len__(self) -> int:
         self._check_thread()
+        self._check_borrow_access("shared")
         try:
             return int(len(self._native))
         except RuntimeError as error:
@@ -154,10 +175,12 @@ class _RustOwnedValue:
 
     def __repr__(self) -> str:
         self._check_thread()
+        self._check_borrow_access("shared")
         return repr(self._native)
 
     def __getattr__(self, name: str) -> object:
         self._check_thread()
+        self._check_borrow_access("shared")
         if name not in self._field_names:
             raise AttributeError(name)
         try:
@@ -175,6 +198,7 @@ class _RustOwnedValue:
 
     def __setattr__(self, name: str, value: object) -> None:
         self._check_thread()
+        self._check_borrow_access("mutable")
         if name in self._field_names:
             if self._enum_variant_types:
                 raise AttributeError("Crabwalk enum payloads are immutable")
@@ -214,6 +238,15 @@ class _RustOwnedValue:
                 "Rust-owned Crabwalk handles are thread-affine until an explicit "
                 "Send/Sync policy is exposed; reconstruct the value in the target thread"
             )
+
+    def _check_borrow_access(self, requested: str) -> None:
+        conflicts = tuple(
+            context
+            for context in self._borrow_contexts
+            if requested == "mutable" or context.ownership == "Mut"
+        )
+        if conflicts:
+            _raise_borrow_error(conflicts, self)
 
 
 def _resolve_owned_registration(
@@ -566,24 +599,50 @@ class RustFunction:
         # Check every ownership handle before the generated wrapper can take any
         # Owned value. The native wrapper repeats this preflight authoritatively;
         # doing it here preserves source-rich diagnostics for normal Python calls.
+        call_location = _call_location() if owned_arguments else ""
         for parameter, value in owned_arguments:
             if value.moved:
-                _raise_translated_runtime_error(
-                    RuntimeError(f"{_MOVE_ERROR_PREFIX} {parameter.name} was moved"),
+                _raise_move_error(
+                    parameter.name,
                     value,
+                    parameter_site=_span_location(parameter.span),
+                    call_site=call_location,
                 )
 
-        call_location = _call_location() if owned_arguments else ""
-        prior_borrow_contexts: dict[int, tuple[_RustOwnedValue, tuple[str, ...]]] = {}
+        aliases: dict[int, list[tuple[object, _RustOwnedValue]]] = {}
+        for parameter, value in owned_arguments:
+            aliases.setdefault(id(value), []).append((parameter, value))
+        for alias_group in aliases.values():
+            if len(alias_group) < 2 or not any(
+                parameter.type_ref.ownership in {"Owned", "Mut"}
+                for parameter, _ in alias_group
+            ):
+                continue
+            contexts = tuple(
+                _BorrowContext(
+                    parameter.type_ref.ownership or "Owned",
+                    parameter.name,
+                    _span_location(parameter.span),
+                    call_location,
+                )
+                for parameter, _ in alias_group
+            )
+            _raise_borrow_error(contexts, alias_group[0][1])
+
+        prior_borrow_contexts: dict[
+            int, tuple[_RustOwnedValue, tuple[_BorrowContext, ...]]
+        ] = {}
         for parameter, value in owned_arguments:
             if parameter.type_ref.ownership not in {"Ref", "Mut"}:
                 continue
             identity = id(value)
             if identity not in prior_borrow_contexts:
                 prior_borrow_contexts[identity] = (value, value._borrow_contexts)
-            context = (
-                f"{parameter.type_ref.ownership} parameter '{parameter.name}' "
-                f"defined at {_span_location(parameter.span)}; call at {call_location}"
+            context = _BorrowContext(
+                parameter.type_ref.ownership,
+                parameter.name,
+                _span_location(parameter.span),
+                call_location,
             )
             object.__setattr__(
                 value,
@@ -593,13 +652,12 @@ class RustFunction:
         try:
             result = self._native(*native_args)
         except RuntimeError as error:
-            source_value = next(
-                (value for _, value in owned_arguments if value.moved),
-                None,
+            _raise_translated_runtime_error(
+                error,
+                owned_arguments=tuple(owned_arguments),
+                native_module=self._compilation.module,
+                call_site=call_location or _call_location(),
             )
-            if source_value is None and owned_arguments:
-                source_value = owned_arguments[0][1]
-            _raise_translated_runtime_error(error, source_value)
         finally:
             for value, prior in prior_borrow_contexts.values():
                 object.__setattr__(value, "_borrow_contexts", prior)
@@ -846,11 +904,12 @@ def _load_prebuilt_compilation(
         "extension_name": str,
         "artifact": str,
         "artifact_sha256": str,
-        "source_hash": str,
+        "compiler_input_hash": str,
+        "wheel_source_integrity_hash": str,
         "crabwalk_version": str,
         "runtime_abi_version": int,
     }
-    if manifest.get("schema_version") != 2 or any(
+    if manifest.get("schema_version") != 3 or any(
         not isinstance(manifest.get(name), expected_type)
         for name, expected_type in expected_fields.items()
     ):
@@ -865,7 +924,12 @@ def _load_prebuilt_compilation(
             ir,
             "The embedded native artifact was generated by a different Crabwalk version.",
         )
-    if manifest["source_hash"] != ir.source_hash:
+    if manifest["compiler_input_hash"] != ir.compiler_input_hash:
+        _invalid_prebuilt(
+            ir,
+            "The installed native compiler inputs do not match the embedded artifact.",
+        )
+    if manifest["wheel_source_integrity_hash"] != ir.wheel_source_integrity_hash:
         _invalid_prebuilt(
             ir,
             "The installed Python sources do not match the embedded native artifact.",
@@ -991,6 +1055,7 @@ def _register_owned_types(compilation: CompilationResult) -> None:
             )
             registration = _OwnedTypeRegistration(
                 native_type,
+                module,
                 compilation.fingerprint,
                 type_ref,
                 fields,
@@ -1047,34 +1112,125 @@ def _span_location(span: object) -> str:
 def _raise_translated_runtime_error(
     error: RuntimeError,
     value: _RustOwnedValue | None = None,
+    *,
+    owned_arguments: tuple[tuple[object, _RustOwnedValue], ...] = (),
+    native_module: object | None = None,
+    call_site: str | None = None,
 ) -> Any:
-    message = str(error)
-    if message in {"Already borrowed", "Already mutably borrowed"}:
-        details = [f"conflicting call-scoped Rust borrow: {message.lower()}"]
-        if value is not None:
-            details.append(f"value created at {value._definition_site}")
-            details.extend(value._borrow_contexts)
-        details.append(
-            "use separate values or change the signature so one alias is not "
-            "borrowed as both rust.Ref and rust.Mut"
+    if native_module is None and value is not None:
+        native_module = value._registration.native_module
+
+    if _is_native_exception(error, native_module, NATIVE_PANIC_ERROR):
+        message = _native_error_argument(error, 0, str(error))
+        raise CrabwalkPanicError(message, call_site=call_site) from error
+
+    if _is_native_exception(error, native_module, NATIVE_RUST_RESULT_ERROR):
+        rust_type = _native_error_argument(error, 0, "unknown")
+        rust_message = _native_error_argument(error, 1, str(error))
+        raise CrabwalkRustError(
+            rust_type,
+            rust_message,
+            call_site=call_site,
+        ) from error
+
+    if _is_native_exception(error, native_module, NATIVE_BORROW_ERROR):
+        parameter = _native_error_argument(error, 0, "")
+        message = _native_error_argument(error, 1, "native borrow conflict")
+        details = [f"conflicting call-scoped Rust borrow: {message}"]
+        if parameter:
+            details.append(f"parameter '{parameter}'")
+        public_error = CrabwalkBorrowError(
+            "; ".join(details),
+            parameters=(parameter,) if parameter else (),
+            definition_site=value._definition_site if value is not None else None,
+            call_site=call_site,
         )
-        raise CrabwalkBorrowError("; ".join(details)) from error
-    if message.startswith(_PANIC_ERROR_PREFIX):
-        raise CrabwalkPanicError(message[len(_PANIC_ERROR_PREFIX) :].strip()) from error
-    if message.startswith(_RUST_ERROR_PREFIX):
-        detail = message[len(_RUST_ERROR_PREFIX) :].strip()
-        rust_type, separator, rust_message = detail.partition(": ")
-        if not separator:
-            rust_type, rust_message = "unknown", detail
-        raise CrabwalkRustError(rust_type, rust_message) from error
-    if not message.startswith(_MOVE_ERROR_PREFIX):
+        raise public_error from error
+
+    if not _is_native_exception(error, native_module, NATIVE_MOVE_ERROR):
         raise error
-    detail = message[len(_MOVE_ERROR_PREFIX) :].strip()
+
+    parameter = _native_error_argument(error, 0, "")
+    selected = value
+    parameter_site: str | None = None
+    if parameter:
+        for candidate_parameter, candidate_value in owned_arguments:
+            if getattr(candidate_parameter, "name", None) != parameter:
+                continue
+            selected = candidate_value
+            parameter_site = _span_location(candidate_parameter.span)
+            break
+    _raise_move_error(
+        parameter,
+        selected,
+        parameter_site=parameter_site,
+        call_site=call_site,
+        cause=error,
+    )
+
+
+def _is_native_exception(
+    error: BaseException,
+    native_module: object | None,
+    attribute: str,
+) -> bool:
+    native_type = getattr(native_module, attribute, None)
+    return isinstance(native_type, type) and type(error) is native_type
+
+
+def _native_error_argument(error: BaseException, index: int, fallback: str) -> str:
+    if index < len(error.args) and isinstance(error.args[index], str):
+        return error.args[index]
+    return fallback
+
+
+def _raise_move_error(
+    parameter: str,
+    value: _RustOwnedValue | None,
+    *,
+    parameter_site: str | None = None,
+    call_site: str | None = None,
+    cause: BaseException | None = None,
+) -> Any:
+    detail = f"{parameter} was moved" if parameter else "value was moved"
+    definition_site = value._definition_site if value is not None else None
+    move_site = value._move_site if value is not None else None
+    if definition_site is not None:
+        detail = f"{detail}; value created at {definition_site}"
+    if move_site is not None:
+        detail = f"{detail}; {move_site}"
     if value is not None:
-        detail = f"{detail}; value created at {value._definition_site}"
-        if value._move_site is not None:
-            detail = f"{detail}; {value._move_site}"
         detail = (
             f"{detail}; pass rust.Ref or rust.Mut if the call should not consume it"
         )
-    raise CrabwalkMoveError(detail) from error
+    public_error = CrabwalkMoveError(
+        detail,
+        parameter=parameter or None,
+        definition_site=definition_site,
+        move_site=move_site,
+        parameter_site=parameter_site,
+        call_site=call_site,
+    )
+    if cause is None:
+        raise public_error
+    raise public_error from cause
+
+
+def _raise_borrow_error(
+    contexts: tuple[_BorrowContext, ...],
+    value: _RustOwnedValue,
+) -> Any:
+    details = ["conflicting call-scoped Rust borrow"]
+    details.append(f"value created at {value._definition_site}")
+    details.extend(context.render() for context in contexts)
+    details.append(
+        "use separate values or change the signature so one alias is not "
+        "borrowed as both rust.Ref, rust.Mut, or rust.Owned"
+    )
+    raise CrabwalkBorrowError(
+        "; ".join(details),
+        parameters=tuple(context.parameter for context in contexts),
+        definition_site=value._definition_site,
+        parameter_sites=tuple(context.parameter_site for context in contexts),
+        call_site=contexts[0].call_site if contexts else None,
+    )
