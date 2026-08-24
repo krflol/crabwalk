@@ -24,6 +24,16 @@ class Customer:
     customer_id: rust.u64
     address: Address
 
+@rust.enum
+class Delivery:
+    Home = rust.variant(address=Address)
+    Pickup = rust.variant(location=rust.String)
+
+@rust.enum
+class Payload:
+    AddressValue = rust.variant(Address)
+    Label = rust.variant(rust.String)
+
 @rust.fn
 def active_customer_ids(
     rows: rust.Owned[rust.Vec[Row]],
@@ -70,6 +80,11 @@ def make_labels() -> rust.Owned[rust.Vec[rust.String]]:
 def make_customer(customer_id: rust.u64, city: rust.String) -> rust.Owned[Customer]:
     address: Address = Address(city=city)
     return Customer(customer_id=customer_id, address=address)
+
+@rust.fn
+def make_delivery(city: rust.String) -> rust.Owned[Delivery]:
+    address: Address = Address(city=city)
+    return Delivery.Home(address=address)
 """
 
 
@@ -82,9 +97,19 @@ def test_recursive_owned_vectors_and_owned_returns_have_generated_codecs(
     ir = analyze_path(source)
     generated = generate_project(ir, "_crabwalk_structured_boundaries")
     row = next(value for value in ir.structs if value.name == "Row")
+    delivery = next(value for value in ir.enums if value.name == "Delivery")
 
     assert ir.functions[0].parameters[0].type_ref.underlying.render() == (
         f"Vec<{row.symbol}>"
+    )
+    assert row.symbol_id is not None
+    assert all(field.binding is not None for field in row.fields)
+    assert delivery.symbol_id is not None
+    assert all(variant.binding is not None for variant in delivery.variants)
+    assert all(
+        field.binding is not None
+        for variant in delivery.variants
+        for field in variant.fields
     )
     assert "Vec<(u64, u64)>" in generated.rust_source
     assert "Vec<Option<u64>>" in generated.rust_source
@@ -94,3 +119,5 @@ def test_recursive_owned_vectors_and_owned_returns_have_generated_codecs(
     assert "value: std::option::Option::Some(__cw_result)" in generated.rust_source
     assert "PyRef<'_, __CwOwned_" in generated.rust_source
     assert "fn address(&self, py: Python<'_>)" in generated.rust_source
+    assert "fn Home(address: PyRef<'_," in generated.rust_source
+    assert ".into_any()" in generated.rust_source

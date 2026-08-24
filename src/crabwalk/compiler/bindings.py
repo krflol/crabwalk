@@ -20,10 +20,17 @@ from .ir import (
     MatchArmIR,
     MatchIR,
     NameIR,
+    EnumIR,
+    EnumVariantIR,
     PackageIR,
+    ParameterIR,
     PatternMatchArmIR,
     PatternMatchIR,
     StatementIR,
+    StructFieldIR,
+    StructIR,
+    TraitIR,
+    TraitMethodIR,
     TypeParameterIR,
     TypeRef,
     WhileIR,
@@ -38,29 +45,9 @@ def assign_package_identities(package: PackageIR) -> PackageIR:
     """Return one package whose symbols and local bindings have stable identities."""
 
     functions = tuple(_bind_function(function) for function in package.functions)
-    structs = tuple(
-        replace(
-            value,
-            symbol_id=SymbolId(f"type:{value.module_name}:{value.name}:{value.symbol}"),
-        )
-        for value in package.structs
-    )
-    enums = tuple(
-        replace(
-            value,
-            symbol_id=SymbolId(f"type:{value.module_name}:{value.name}:{value.symbol}"),
-        )
-        for value in package.enums
-    )
-    traits = tuple(
-        replace(
-            value,
-            symbol_id=SymbolId(
-                f"trait:{value.module_name}:{value.name}:{value.symbol}"
-            ),
-        )
-        for value in package.traits
-    )
+    structs = tuple(_bind_struct(value) for value in package.structs)
+    enums = tuple(_bind_enum(value) for value in package.enums)
+    traits = tuple(_bind_trait(value) for value in package.traits)
     return replace(
         package,
         functions=functions,
@@ -70,20 +57,82 @@ def assign_package_identities(package: PackageIR) -> PackageIR:
     )
 
 
+def _bind_fields(fields: tuple[StructFieldIR, ...]) -> tuple[StructFieldIR, ...]:
+    gensym = Gensym()
+    return tuple(
+        replace(
+            field,
+            binding=gensym.bind(field.name, field.span, RustNamespace.MEMBER),
+        )
+        for field in fields
+    )
+
+
+def _bind_struct(value: StructIR) -> StructIR:
+    return replace(
+        value,
+        fields=_bind_fields(value.fields),
+        symbol_id=SymbolId(f"type:{value.module_name}:{value.name}:{value.symbol}"),
+    )
+
+
+def _bind_enum(value: EnumIR) -> EnumIR:
+    variant_gensym = Gensym()
+    variants: list[EnumVariantIR] = []
+    for variant in value.variants:
+        variants.append(
+            replace(
+                variant,
+                fields=_bind_fields(variant.fields),
+                binding=variant_gensym.bind(
+                    variant.name,
+                    variant.span,
+                    RustNamespace.MEMBER,
+                ),
+            )
+        )
+    return replace(
+        value,
+        variants=tuple(variants),
+        symbol_id=SymbolId(f"type:{value.module_name}:{value.name}:{value.symbol}"),
+    )
+
+
+def _bind_trait(value: TraitIR) -> TraitIR:
+    gensym = Gensym()
+    methods: list[TraitMethodIR] = []
+    for method in value.methods:
+        methods.append(
+            replace(
+                method,
+                binding=gensym.bind(
+                    method.name,
+                    method.span,
+                    RustNamespace.MEMBER,
+                ),
+            )
+        )
+    return replace(
+        value,
+        methods=tuple(methods),
+        symbol_id=SymbolId(f"trait:{value.module_name}:{value.name}:{value.symbol}"),
+    )
+
+
 def _bind_function(function: FunctionIR) -> FunctionIR:
     gensym = Gensym()
     type_bindings: dict[str, BindingIR] = {}
     rewritten_type_parameters: list[TypeParameterIR] = []
-    for parameter in function.type_parameters:
+    for type_parameter in function.type_parameters:
         namespace = (
-            RustNamespace.LIFETIME if parameter.is_lifetime else RustNamespace.TYPE
+            RustNamespace.LIFETIME if type_parameter.is_lifetime else RustNamespace.TYPE
         )
-        binding = gensym.bind(parameter.name, parameter.span, namespace)
-        type_bindings[parameter.name] = binding
-        rewritten_type_parameters.append(replace(parameter, binding=binding))
+        binding = gensym.bind(type_parameter.name, type_parameter.span, namespace)
+        type_bindings[type_parameter.name] = binding
+        rewritten_type_parameters.append(replace(type_parameter, binding=binding))
 
     environment: dict[str, BindingIR] = {}
-    rewritten_parameters = []
+    rewritten_parameters: list[ParameterIR] = []
     for parameter in function.parameters:
         binding = gensym.bind(parameter.name, parameter.span)
         environment[parameter.name] = binding
@@ -248,16 +297,16 @@ def _bind_statement(
         subject = _bind_expression(
             statement.subject, environment, type_bindings, gensym
         )
-        arms = tuple(
+        enum_arms = tuple(
             _bind_enum_arm(arm, environment, type_bindings, gensym)
             for arm in statement.arms
         )
-        return replace(statement, subject=subject, arms=arms)
+        return replace(statement, subject=subject, arms=enum_arms)
     if isinstance(statement, PatternMatchIR):
         subject = _bind_expression(
             statement.subject, environment, type_bindings, gensym
         )
-        arms = tuple(
+        pattern_arms = tuple(
             _bind_pattern_arm(arm, environment, type_bindings, gensym)
             for arm in statement.arms
         )
@@ -265,7 +314,7 @@ def _bind_statement(
             statement,
             subject=subject,
             subject_type=_rename_type(statement.subject_type, type_bindings),
-            arms=arms,
+            arms=pattern_arms,
         )
     return cast(
         StatementIR,
@@ -358,17 +407,30 @@ def _bind_expression(
     if isinstance(expression, ClosureIR):
         closure_environment = dict(environment)
         parameter_binding = None
+        second_parameter_binding = None
         if expression.parameter is not None:
             parameter_binding = gensym.bind(expression.parameter, expression.span)
             closure_environment[expression.parameter] = parameter_binding
+        if expression.second_parameter is not None:
+            second_parameter_binding = gensym.bind(
+                expression.second_parameter,
+                expression.span,
+            )
+            closure_environment[expression.second_parameter] = second_parameter_binding
         return replace(
             expression,
             parameter_type=_rename_type(expression.parameter_type, type_bindings),
+            second_parameter_type=(
+                _rename_type(expression.second_parameter_type, type_bindings)
+                if expression.second_parameter_type is not None
+                else None
+            ),
             body=_bind_expression(
                 expression.body, closure_environment, type_bindings, gensym
             ),
             type_ref=_rename_type(expression.type_ref, type_bindings),
             parameter_binding=parameter_binding,
+            second_parameter_binding=second_parameter_binding,
         )
     return cast(
         ExpressionIR,

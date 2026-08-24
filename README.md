@@ -66,6 +66,7 @@ Open `http://127.0.0.1:8001/docs`, or run the focused examples:
 
 ```text
 python examples/showcase/true_par.py
+python examples/showcase/etl_rayon.py
 python examples/showcase/fastapi_mre.py
 python examples/showcase/ml_mre.py
 ```
@@ -95,8 +96,9 @@ The current compiler surface includes:
 - `Owned`, `Ref`, and `Mut` handles with move/use-after-move and call-scoped
   borrow enforcement;
 - Rust structs, unit/tuple/record enums, exhaustive `match`, and narrow derives;
-- general patterns and guards, inherent methods, trait objects, selected
-  advanced/unsafe Rust, native async, and a finite native thread pool;
+- general patterns and guards, inherent methods, trait objects, audited
+  advanced/unsafe teaching intrinsics, a std-only future teaching executor, and a
+  finite unit-job native thread pool;
 - Python `print` versus native `rust.println`, panic containment, typed `Result`
   errors, dispatch-aware typed effects, boundary-placement validation, and
   non-panicking worker teardown;
@@ -142,6 +144,10 @@ Resolved generated Cargo dependency locks live under `crabwalk-locks/` and shoul
 be committed. Every compilation unit has one because its graph includes mandatory
 PyO3 even when source declares no additional crate.
 
+See the [compiler architecture](Docs/Crabwalk%20Compiler%20Architecture.md) for
+the pass pipeline, hygienic identity model, tagged type algebra, iterator contract,
+and the invariants required when extending the compiled language.
+
 Normal builds may maintain a copied dependency lock and persist an intentional
 Cargo update. Pass `--locked` when the lock must remain byte-for-byte unchanged.
 
@@ -180,6 +186,9 @@ python -m the_rust_book.run_all
 
 The [Rust Book adaptation](https://github.com/krflol/crabwalk/tree/main/examples/the_rust_book)
 covers Chapters 1–21 and doubles as an end-to-end compiler evolution suite.
+That is chapter coverage, not a claim that every represented Rust subsystem is
+feature-complete. The [generated capability maturity table](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Language%20Reference.md#capability-maturity)
+separates proofs, bounded surfaces, and compositional support.
 
 ## Documentation
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 
 from crabwalk.diagnostics import SourceSpan
 from crabwalk.native_exceptions import (
@@ -71,10 +70,10 @@ from .ir import (
     UnaryIR,
     WhileIR,
 )
+from .cargo_emission import render_build_rs, render_cargo_toml
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
-PYO3_VERSION = "0.29.2"
-CODEGEN_SCHEMA_VERSION = 33
+CODEGEN_SCHEMA_VERSION = 34
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
@@ -138,11 +137,8 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
 
     validate_package_ir(ir)
     writer = _Writer()
-    domain_symbols = {value.symbol for value in ir.structs}
-    domain_symbols.update(value.symbol for value in ir.enums)
-    domains_by_symbol = {
-        value.symbol: value.type_ref for value in (*ir.structs, *ir.enums)
-    }
+    domains_by_symbol = {value.symbol: value.type_ref for value in ir.structs}
+    domains_by_symbol.update({value.symbol: value.type_ref for value in ir.enums})
     boundary_names = {
         function.rust_symbol for function in ir.functions if function.python_boundary
     }
@@ -189,7 +185,7 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
     for enum in ir.enums:
         _write_native_enum(writer, enum)
         writer.line()
-        _write_owned_enum_class(writer, enum, domain_symbols)
+        _write_owned_enum_class(writer, enum, domains_by_symbol)
         writer.line()
 
     for struct in ir.structs:
@@ -240,27 +236,6 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
     writer.leave()
     writer.line("}")
 
-    package_name = "crabwalk-generated-module"
-    dependencies = _cargo_dependencies(ir)
-    cargo_toml = (
-        "[package]\n"
-        f'name = "{package_name}"\n'
-        'version = "0.0.0"\n'
-        'edition = "2024"\n'
-        "publish = false\n\n"
-        "[lib]\n"
-        f'name = "{extension_name}"\n'
-        'crate-type = ["cdylib"]\n\n'
-        "[dependencies]\n"
-        f'{PYO3_CARGO_ALIAS} = {{ package = "pyo3", version = "={PYO3_VERSION}", '
-        'features = ["extension-module"] }\n'
-        f"{dependencies}\n"
-        "[build-dependencies]\n"
-        f'pyo3-build-config = {{ version = "={PYO3_VERSION}" }}\n\n'
-        "[profile.release]\n"
-        "overflow-checks = true\n"
-        'panic = "unwind"\n'
-    )
     source_map = {
         "schema_version": 2,
         "generated_file": "src/lib.rs",
@@ -270,15 +245,8 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
         "entries": writer.mappings,
     }
     return GeneratedProject(
-        cargo_toml=cargo_toml,
-        build_rs=(
-            f"// Crabwalk extension unit: {extension_name}\n"
-            'fn main() {\n    println!("cargo:rerun-if-changed=build.rs");\n'
-            "    // MSVC otherwise embeds wall-clock PE/PDB identity when Cargo relinks.\n"
-            '    #[cfg(all(target_os = "windows", target_env = "msvc"))]\n'
-            '    println!("cargo:rustc-link-arg=/Brepro");\n'
-            "    pyo3_build_config::add_extension_module_link_args();\n}\n"
-        ),
+        cargo_toml=render_cargo_toml(ir, extension_name),
+        build_rs=render_build_rs(extension_name),
         rust_source=writer.render(),
         source_map=source_map,
         ir_json=json.dumps(ir.to_dict(), indent=2, sort_keys=True) + "\n",
@@ -503,7 +471,7 @@ def _write_native_enum(writer: _Writer, enum: EnumIR) -> None:
 def _write_owned_enum_class(
     writer: _Writer,
     enum: EnumIR,
-    domain_symbols: set[str],
+    domains_by_symbol: dict[str, TypeRef],
 ) -> None:
     python_name, rust_name = owned_class_names(enum.type_ref)
     writer.line(f'#[pyclass(name = "{python_name}")]')
@@ -517,30 +485,60 @@ def _write_owned_enum_class(
     writer.line("#[allow(non_snake_case)]")
     writer.line(f"impl {rust_name} {{")
     writer.enter()
+
+    def domain_class(type_ref: TypeRef) -> str | None:
+        domain = domains_by_symbol.get(type_ref.rust_name)
+        return owned_class_names(domain)[1] if domain is not None else None
+
     for variant in enum.variants:
-        if any(
-            _type_contains_domain(field.type_ref, domain_symbols)
-            for field in variant.fields
-        ):
-            writer.line(
-                "// Nested domain payload construction stays inside compiled Rust."
-            )
-            continue
         parameters = ", ".join(
-            f"{field.name}: {field.type_ref.render()}" for field in variant.fields
+            (
+                f"{field.name}: PyRef<'_, {domain_class(field.type_ref)}>"
+                if domain_class(field.type_ref) is not None
+                else f"{field.name}: {field.type_ref.render()}"
+            )
+            for field in variant.fields
         )
+        fallible = any(domain_class(field.type_ref) for field in variant.fields)
         writer.line("#[staticmethod]")
-        writer.line(f"fn {variant.name}({parameters}) -> Self {{")
+        return_type = "PyResult<Self>" if fallible else "Self"
+        writer.line(f"fn {variant.name}({parameters}) -> {return_type} {{")
         writer.enter()
+        for field in variant.fields:
+            if domain_class(field.type_ref) is None:
+                continue
+            writer.line(
+                f"let __cw_field_{field.name} = "
+                f"{field.name}.value.as_ref().ok_or_else(|| {{"
+            )
+            writer.enter()
+            writer.line(_native_move_error(field.name))
+            writer.leave()
+            writer.line("})?.clone();")
         if not variant.fields:
             value = f"{enum.symbol}::{variant.name}"
         elif variant.tuple_style:
-            arguments = ", ".join(field.name for field in variant.fields)
+            arguments = ", ".join(
+                (
+                    f"__cw_field_{field.name}"
+                    if domain_class(field.type_ref) is not None
+                    else field.name
+                )
+                for field in variant.fields
+            )
             value = f"{enum.symbol}::{variant.name}({arguments})"
         else:
-            arguments = ", ".join(field.name for field in variant.fields)
+            arguments = ", ".join(
+                (
+                    f"{field.name}: __cw_field_{field.name}"
+                    if domain_class(field.type_ref) is not None
+                    else field.name
+                )
+                for field in variant.fields
+            )
             value = f"{enum.symbol}::{variant.name} {{ {arguments} }}"
-        writer.line(f"Self {{ value: std::option::Option::Some({value}) }}")
+        wrapped = f"Self {{ value: std::option::Option::Some({value}) }}"
+        writer.line(f"std::result::Result::Ok({wrapped})" if fallible else wrapped)
         writer.leave()
         writer.line("}")
         writer.line()
@@ -567,20 +565,20 @@ def _write_owned_enum_class(
         for field in variant.fields:
             field_types.setdefault(field.name, set()).add(field.type_ref)
     for field_name, candidate_types in sorted(field_types.items()):
-        if any(
-            _type_contains_domain(value, domain_symbols) for value in candidate_types
-        ):
-            writer.line()
-            writer.line("// Nested domain payload getters stay inside compiled Rust.")
-            continue
         heterogeneous = len(candidate_types) > 1
         field_type = next(iter(candidate_types))
+        nested_class = domain_class(field_type) if not heterogeneous else None
         writer.line()
         writer.line("#[getter]")
         if heterogeneous:
             writer.line(
                 f"fn {field_name}(&self, py: Python<'_>) -> "
                 "PyResult<Option<Py<PyAny>>> {"
+            )
+        elif nested_class is not None:
+            writer.line(
+                f"fn {field_name}(&self, py: Python<'_>) -> "
+                f"PyResult<Option<Py<{nested_class}>>> {{"
             )
         else:
             writer.line(
@@ -610,11 +608,19 @@ def _write_owned_enum_class(
                 bindings,
                 variant.tuple_style,
             )
-            converted = (
-                "__cw_target.clone().into_py_any(py)?"
-                if heterogeneous
-                else "__cw_target.clone()"
-            )
+            target_class = domain_class(target.type_ref)
+            if target_class is not None:
+                native = (
+                    f"Py::new(py, {target_class} {{ value: "
+                    "std::option::Option::Some(__cw_target.clone()) })?"
+                )
+                converted = f"{native}.into_any()" if heterogeneous else native
+            else:
+                converted = (
+                    "__cw_target.clone().into_py_any(py)?"
+                    if heterogeneous
+                    else "__cw_target.clone()"
+                )
             writer.line(
                 f"{pattern} => std::result::Result::Ok("
                 f"std::option::Option::Some({converted})),"
@@ -645,12 +651,6 @@ def _write_owned_enum_class(
     writer.line("}")
     writer.leave()
     writer.line("}")
-
-
-def _type_contains_domain(type_ref: TypeRef, domain_symbols: set[str]) -> bool:
-    return type_ref.rust_name in domain_symbols or any(
-        _type_contains_domain(value, domain_symbols) for value in type_ref.arguments
-    )
 
 
 def _enum_has_heterogeneous_fields(enum: EnumIR) -> bool:
@@ -1989,10 +1989,12 @@ def _render_expression(
                     f".or_insert({rendered_arguments[1]}).clone()"
                 )
             if expression.method == "add":
+                value_type = expression.receiver.type_ref.underlying.arguments[1]
                 return (
                     "{ *"
                     f"{rendered_receiver}.entry({rendered_arguments[0]})"
-                    f".or_insert(0) += {rendered_arguments[1]}; }}"
+                    f".or_insert({_numeric_zero(value_type)}) "
+                    f"+= {rendered_arguments[1]}; }}"
                 )
         if (
             expression.receiver.type_ref.rust_name == "Vec"
@@ -2033,6 +2035,11 @@ def _render_expression(
                 return (
                     f"{rendered_receiver}.collect::<std::collections::HashMap<_, _>>()"
                 )
+            if (
+                expression.method == "reduce"
+                and expression.receiver.type_ref.rust_name != "Iterator"
+            ):
+                return f"{rendered_receiver}.reduce_with({rendered_arguments[0]})"
         arguments = ", ".join(rendered_arguments)
         return f"{rendered_receiver}.{expression.method}({arguments})"
     if isinstance(expression, TraitCallIR):
@@ -2076,16 +2083,19 @@ def _render_expression(
         body = _render_expression(expression.body, boundary_names)
         if expression.parameter is None:
             return f"move || {body}"
-        parameter = expression.rust_parameter
-        assert parameter is not None
+        closure_parameter = expression.rust_parameter
+        assert closure_parameter is not None
+        second_parameter = expression.rust_second_parameter
+        if second_parameter is not None:
+            return f"|{closure_parameter}, {second_parameter}| {body}"
         if expression.borrowed_parameter:
             projection = (
                 "__cw_item"
                 if expression.parameter_projection == "borrow"
                 else "*__cw_item"
             )
-            return f"|__cw_item| {{ let {parameter} = {projection}; {body} }}"
-        return f"|{parameter}| {body}"
+            return f"|__cw_item| {{ let {closure_parameter} = {projection}; {body} }}"
+        return f"|{closure_parameter}| {body}"
     raise AssertionError(f"unhandled expression IR: {type(expression).__name__}")
 
 
@@ -2176,64 +2186,11 @@ def _rust_char_literal(value: str) -> str:
     return f"'{escaped}'"
 
 
-def _cargo_dependencies(ir: PackageIR) -> str:
-    lines: list[str] = []
-    for dependency in sorted(ir.crates, key=lambda value: value.binding):
-        cargo_key = cargo_dependency_key(dependency.package, dependency.binding)
-        fields: list[str] = []
-        if cargo_key != dependency.package:
-            fields.append(f"package = {_toml_string(dependency.package)}")
-        if dependency.version is not None:
-            fields.append(f"version = {_toml_string(dependency.version)}")
-        if dependency.path is not None:
-            fields.append(f"path = {_toml_string(Path(dependency.path).as_posix())}")
-        if dependency.git is not None:
-            fields.append(f"git = {_toml_string(dependency.git)}")
-        if dependency.rev is not None:
-            fields.append(f"rev = {_toml_string(dependency.rev)}")
-        if dependency.features:
-            features = ", ".join(_toml_string(value) for value in dependency.features)
-            fields.append(f"features = [{features}]")
-        lines.append(f"{cargo_key} = {{ {', '.join(fields)} }}")
-    return "\n".join(lines)
+def _numeric_zero(type_ref: TypeRef) -> str:
+    """Render the additive identity with the map value's concrete Rust type."""
 
-
-def cargo_dependency_specification(ir: PackageIR) -> dict[str, object]:
-    """Return every generated Cargo dependency input in fingerprintable form."""
-
-    return {
-        "mandatory": [
-            {
-                "binding": PYO3_CARGO_ALIAS,
-                "package": "pyo3",
-                "version": f"={PYO3_VERSION}",
-                "features": ["extension-module"],
-            }
-        ],
-        "mandatory_build": [
-            {
-                "package": "pyo3-build-config",
-                "version": f"={PYO3_VERSION}",
-            }
-        ],
-        "declared": [
-            {
-                "binding": crate.binding,
-                "cargo_key": cargo_dependency_key(crate.package, crate.binding),
-                "package": crate.package,
-                "version": crate.version,
-                "features": list(crate.features),
-                "path": crate.path,
-                "git": crate.git,
-                "rev": crate.rev,
-            }
-            for crate in sorted(ir.crates, key=lambda value: value.binding)
-        ],
-    }
-
-
-def _toml_string(value: str) -> str:
-    return json.dumps(value, ensure_ascii=False)
+    prefix = "0.0" if type_ref.is_float else "0"
+    return f"{prefix}{type_ref.render()}"
 
 
 def _owned_vector_types(ir: PackageIR) -> tuple[TypeRef, ...]:

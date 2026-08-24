@@ -78,7 +78,7 @@ class StructIR:
 
     @property
     def type_ref(self) -> TypeRef:
-        return TypeRef(self.symbol, python_name=self.qualified_name)
+        return _types.DomainType(self.symbol, self.qualified_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +110,7 @@ class EnumIR:
 
     @property
     def type_ref(self) -> TypeRef:
-        return TypeRef(self.symbol, python_name=self.qualified_name)
+        return _types.DomainType(self.symbol, self.qualified_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +140,7 @@ class TraitIR:
 
     @property
     def type_ref(self) -> TypeRef:
-        return TypeRef("Trait", python_name=self.symbol)
+        return _types.TraitMarkerType(self.symbol)
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,12 +443,21 @@ class ClosureIR:
     span: SourceSpan
     parameter_binding: BindingIR | None = None
     parameter_projection: Literal["direct", "deref", "borrow"] = "direct"
+    second_parameter: str | None = None
+    second_parameter_type: TypeRef | None = None
+    second_parameter_binding: BindingIR | None = None
 
     @property
     def rust_parameter(self) -> str | None:
         if self.parameter_binding is not None:
             return self.parameter_binding.rust_name
         return self.parameter
+
+    @property
+    def rust_second_parameter(self) -> str | None:
+        if self.second_parameter_binding is not None:
+            return self.second_parameter_binding.rust_name
+        return self.second_parameter
 
 
 ExpressionIR: TypeAlias = (

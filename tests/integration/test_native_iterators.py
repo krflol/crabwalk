@@ -54,6 +54,9 @@ print(normalize_active(rows))
 print(clone_active(rows))
 print(has_active(rows))
 print(rows.to_python())
+numbers = rust.Vec[rust.u64]([1, 2, 3, 4])
+print(fold_total(numbers))
+print(reduce_total(numbers))
 """,
         encoding="utf-8",
     )
@@ -78,4 +81,6 @@ print(rows.to_python())
         "['1|ALICE|active|', '3|CAROL|active|']",
         "True",
         "['1|ALICE|active|', '2|BOB|inactive|', '3|CAROL|active|']",
+        "10",
+        "10",
     ]

@@ -4,6 +4,31 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- Sequential and Rayon iterators now share a semantic execution/item-mode model
+  with `map`, `filter`, `filter_map`, `copied`, `cloned`, `collect_vec`,
+  `collect_map`, `sum`, `count`, `any`, `all`, `find`, `fold`, `reduce`,
+  `enumerate`, and `zip`. Borrowed `String` and domain items auto-dereference for
+  their supported method and field surface.
+- Explicit `rust.extern_type` and `@rust.extern` adapters describe external crate
+  values, functions, borrow signatures, closure callbacks, and reviewed effects.
+  Untyped crate values may no longer escape an expected terminal expression.
+- Explicit ownership boundaries accept recursively structured vectors, including
+  tuples, options, nested vectors, and generated domain rows. Native functions can
+  return owned domain values, and direct nested struct/enum values have
+  fingerprint-bound constructors, getters, setters, and deep conversion.
+- The typed standard-library subset now includes iterable `HashMap`, common
+  `Option`/`Result` patterns and combinators, and the string trim/split/parse/join
+  operations needed by a complete delimited transformation.
+- A generated capability-maturity registry distinguishes proof, bounded,
+  compositional, and production contracts. A cross-product iterator matrix,
+  structured filter-group-emit workload, and runnable Rayon String ETL showcase
+  provide application-level evidence.
+- Compiler responsibilities now have independently typed source, declaration,
+  ABI, ownership, semantic type, binding, capability, and Cargo-emission modules,
+  with a documented pass pipeline and extension invariants.
+
 ### Changed
 
 - Post-release development builds now identify themselves as `1.0.2.dev0`,
@@ -30,6 +55,12 @@ All notable Crabwalk changes are recorded here.
 - Rayon `Vec.par_iter()` now carries a typed borrowed-item state. `Vec<String>`
   pipelines can filter borrowed rows, map them into owned strings, and collect a
   native `Vec<String>` without consuming the input handle.
+- Source and emitted identities are separated through `SymbolId`, `BindingId`, and
+  per-scope gensym allocation. Semantic types are tagged variants for primitives,
+  domains, external crate values, generics, lifetimes, ownership, containers, and
+  iterator execution/item modes rather than one overloaded string record.
+- IR schema 21 and codegen schema 34 invalidate older development artifacts for
+  the expanded type, closure, domain, and generated-Cargo contracts.
 
 ### Fixed
 
@@ -66,6 +97,8 @@ All notable Crabwalk changes are recorded here.
 - Generated move, panic, and Rust-result failures now use private native exception
   identities with structured payloads. Public translation no longer trusts error
   message prefixes, and borrow conflicts retain structured parameter/source data.
+- Numeric `HashMap.add` now emits the additive identity with its concrete value
+  type; floating-point maps no longer receive an invalid integer `or_insert(0)`.
 
 ## [1.0.1] - 2026-08-23
 

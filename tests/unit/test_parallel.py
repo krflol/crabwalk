@@ -79,6 +79,10 @@ def normalize_active(
         .map(lambda row: row.to_lowercase())
         .collect_vec()
     )
+
+@rust.fn
+def reduce_total(values: rust.Ref[rust.Vec[rust.u64]]) -> rust.Option[rust.u64]:
+    return values.par_iter().copied().reduce(lambda left, right: left + right)
 """,
         encoding="utf-8",
     )
@@ -101,3 +105,4 @@ def normalize_active(
         'row.contains("|active|") }).map(|row| row.to_lowercase())'
         ".collect::<Vec<_>>()" in generated.rust_source
     )
+    assert ".reduce_with(|left, right| (left + right))" in generated.rust_source

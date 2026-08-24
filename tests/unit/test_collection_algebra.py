@@ -37,6 +37,12 @@ def word_counts() -> rust.HashMap[rust.String, rust.u64]:
     return counts
 
 @rust.fn
+def amount_totals() -> rust.HashMap[rust.String, rust.f64]:
+    totals: rust.HashMap[rust.String, rust.f64] = rust.HashMap()
+    totals.add("active", 12.5)
+    return totals
+
+@rust.fn
 def count_keys() -> rust.Vec[rust.String]:
     counts: rust.HashMap[rust.String, rust.u64] = rust.HashMap()
     counts.add("Rust", 2)
@@ -92,3 +98,5 @@ def test_collection_and_error_algebra_lower_as_typed_compositions(
         generated.rust_source
     )
     assert '.join(String::from(",").as_str())' in generated.rust_source
+    assert ".or_insert(0u64) += 2u64" in generated.rust_source
+    assert ".or_insert(0.0f64) += 12.5f64" in generated.rust_source

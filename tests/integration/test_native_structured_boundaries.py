@@ -43,6 +43,14 @@ customer.address = {"city": "Madison"}
 print(customer.address.city)
 created_customer = make_customer(12, "Milwaukee")
 print(created_customer.to_python())
+delivery = Delivery.Home(address={"city": "Evanston"})
+print(delivery.address.to_python())
+print(delivery.to_python())
+created_delivery = make_delivery("Detroit")
+print(created_delivery.to_python())
+payload = Payload.AddressValue({"city": "Toledo"})
+print(payload._0.to_python())
+print(payload.to_python())
 """,
         encoding="utf-8",
     )
@@ -74,4 +82,9 @@ print(created_customer.to_python())
         "{'customer_id': 11, 'address': {'city': 'Chicago'}}",
         "Madison",
         "{'customer_id': 12, 'address': {'city': 'Milwaukee'}}",
+        "{'city': 'Evanston'}",
+        "{'variant': 'Home', 'address': {'city': 'Evanston'}}",
+        "{'variant': 'Home', 'address': {'city': 'Detroit'}}",
+        "{'city': 'Toledo'}",
+        "{'variant': 'AddressValue', '_0': {'city': 'Toledo'}}",
     ]

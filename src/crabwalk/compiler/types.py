@@ -84,7 +84,7 @@ class IteratorItemMode(StrEnum):
 class _TypeRefMeta(type):
     def __call__(cls, *args: object, **kwargs: object) -> TypeRef:
         if cls is not TypeRef:
-            return super().__call__(*args, **kwargs)  # type: ignore[no-any-return]
+            return super().__call__(*args, **kwargs)
         names = (
             "rust_name",
             "arguments",
@@ -163,13 +163,13 @@ class TypeRef(metaclass=_TypeRefMeta):
     def with_arguments(self, arguments: tuple[TypeRef, ...]) -> TypeRef:
         """Rebuild one composite variant after recursive type substitution."""
 
-        return TypeRef(
+        return _legacy_type_ref(
             self.rust_name,
             arguments,
-            python_name=self.python_name,
-            const_value=self.const_value,
-            is_generic=self.is_generic,
-            is_lifetime=self.is_lifetime,
+            self.python_name,
+            self.const_value,
+            self.is_generic,
+            self.is_lifetime,
         )
 
     def render(self) -> str:

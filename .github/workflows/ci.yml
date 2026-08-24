@@ -26,8 +26,10 @@ jobs:
         run: python -m pip install -e ".[quality]"
       - name: Check Python formatting and lint
         run: |
-          python -m ruff format --check src tests examples
-          python -m ruff check src tests examples
+          python -m ruff format --check src tests examples scripts
+          python -m ruff check src tests examples scripts
+      - name: Verify generated capability documentation
+        run: python scripts/update_capabilities.py --check
       - name: Check typed hardening boundary
         run: python -m mypy
       - name: Compile Python sources

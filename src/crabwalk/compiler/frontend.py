@@ -11,7 +11,7 @@ from collections import Counter, OrderedDict
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal, TypeAlias
+from typing import Literal
 
 from crabwalk.diagnostics import (
     CrabwalkCompilationError,
@@ -25,6 +25,21 @@ from crabwalk.namespaces import (
 )
 
 from .bindings import assign_package_identities
+from .abi import (
+    enum_field_type_supported as _enum_field_type_supported,
+    owned_vector_element_supported as _owned_vector_element_supported,
+    python_parameter_boundary_supported as _python_parameter_boundary_supported,
+    python_return_boundary_supported as _python_return_boundary_supported,
+    struct_field_type_supported as _struct_field_type_supported,
+)
+from .declarations import (
+    DeclarationIndex,
+    has_rust_async_fn_decorator as _has_rust_async_fn_decorator,
+    has_rust_fn_decorator as _has_rust_fn_decorator,
+    is_extern_declaration as _is_extern_declaration,
+    is_rust_attribute as _is_rust_attribute,
+    is_rust_call_named as _is_rust_call_named,
+)
 from .effects import direct_expression_effects
 from .ir import (
     BOOL,
@@ -111,6 +126,13 @@ from .package_graph import (
     package_python_paths,
     single_file_source_graph,
 )
+from .ownership import (
+    ReceiverAccess,
+    builtin_receiver_access as _builtin_receiver_access,
+    place_from_ast as _place_from_ast,
+    receiver_access_for_ownership as _receiver_access_for_ownership,
+)
+from .source import parse_source
 from .types import ExternalType, IteratorExecution, IteratorItemMode, IteratorType
 
 _ANALYSIS_CACHE_LIMIT = 64
@@ -163,24 +185,6 @@ _GENERIC_ARITY = {
     "Mut": 1,
     "Closure": 2,
 }
-_OWNED_VECTOR_ELEMENTS = {
-    "i8",
-    "i16",
-    "i32",
-    "i64",
-    "i128",
-    "u8",
-    "u16",
-    "u32",
-    "u64",
-    "u128",
-    "usize",
-    "f32",
-    "f64",
-    "bool",
-    "char",
-    "String",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,56 +210,12 @@ class _Signature:
         return self.symbol or self.name
 
 
-ReceiverAccess: TypeAlias = Literal["shared", "mutable", "owned", "interior"]
-
-
-@dataclass(frozen=True, slots=True)
-class _Place:
-    """A semantic storage location rooted in a local or parameter binding."""
-
-    root: str
-    projections: tuple[str, ...] = ()
-
-
 def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     """Analyze one Python module without importing or executing it."""
 
-    source_path = Path(path).resolve()
-    try:
-        source_bytes = source_path.read_bytes()
-        source = source_bytes.decode("utf-8-sig")
-    except OSError as error:
-        raise CrabwalkCompilationError(
-            Diagnostic(
-                "CRAB001",
-                "Cannot read source",
-                str(error),
-                help="Check the path and file permissions.",
-            )
-        ) from error
-    except UnicodeDecodeError as error:
-        raise CrabwalkCompilationError(
-            Diagnostic(
-                "CRAB002",
-                "Source is not UTF-8",
-                str(error),
-                help="Save Crabwalk source as UTF-8.",
-            )
-        ) from error
-
-    try:
-        tree = ast.parse(source, filename=str(source_path))
-    except SyntaxError as error:
-        span = SourceSpan(
-            str(source_path),
-            error.lineno or 1,
-            error.offset or 1,
-            error.end_lineno or error.lineno or 1,
-            error.end_offset or (error.offset or 1) + 1,
-        )
-        raise CrabwalkCompilationError(
-            Diagnostic("CRAB100", "Invalid Python syntax", error.msg, span)
-        ) from error
+    parsed = parse_source(path)
+    source_path = parsed.path
+    tree = parsed.tree
 
     _validate_rust_import(tree, source_path)
     for node in tree.body:
@@ -276,22 +236,10 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
                 "@rust.async_fn requires Python's 'async def' syntax.",
             )
 
-    declarations = [
-        node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and _has_rust_fn_decorator(node)
-    ]
-    struct_nodes = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and _has_rust_struct_decorator(node)
-    ]
-    enum_nodes = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.ClassDef) and _has_rust_enum_decorator(node)
-    ]
+    declarations_index = DeclarationIndex.discover(tree)
+    declarations = declarations_index.functions
+    struct_nodes = declarations_index.structs
+    enum_nodes = declarations_index.enums
     identity = module_name or source_path.stem
     traits = _discover_traits(
         tree,
@@ -408,7 +356,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     source_graph = single_file_source_graph(source_path)
     return assign_package_identities(
         PackageIR(
-            schema_version=20,
+            schema_version=21,
             module_name=identity,
             source_path=str(source_path),
             source_hash=source_graph.compiler_input_hash,
@@ -563,22 +511,10 @@ def _analyze_regular_package(
     for source_path in source_graph.compiler_paths:
         source_bytes, tree = _read_package_source(source_path)
         name = _package_module_name(package_root, package_name, source_path)
-        declarations = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and _has_rust_fn_decorator(node)
-        }
-        struct_nodes = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, ast.ClassDef) and _has_rust_struct_decorator(node)
-        }
-        enum_nodes = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, ast.ClassDef) and _has_rust_enum_decorator(node)
-        }
+        declarations_index = DeclarationIndex.discover(tree)
+        declarations = {node.name: node for node in declarations_index.functions}
+        struct_nodes = {node.name: node for node in declarations_index.structs}
+        enum_nodes = {node.name: node for node in declarations_index.enums}
         traits = _discover_traits(
             tree,
             source_path,
@@ -1056,7 +992,7 @@ def _analyze_regular_package(
         source_paths.append(str(module.path))
     return assign_package_identities(
         PackageIR(
-            schema_version=20,
+            schema_version=21,
             module_name=package_name,
             source_path=str(package_root / "__init__.py"),
             source_hash=source_graph.compiler_input_hash,
@@ -1191,30 +1127,8 @@ def _package_module_name(
 
 
 def _read_package_source(path: Path) -> tuple[bytes, ast.Module]:
-    try:
-        source_bytes = path.read_bytes()
-        source = source_bytes.decode("utf-8-sig")
-    except OSError as error:
-        raise CrabwalkCompilationError(
-            Diagnostic("CRAB001", "Cannot read source", str(error))
-        ) from error
-    except UnicodeDecodeError as error:
-        raise CrabwalkCompilationError(
-            Diagnostic("CRAB002", "Source is not UTF-8", str(error))
-        ) from error
-    try:
-        return source_bytes, ast.parse(source, filename=str(path))
-    except SyntaxError as error:
-        span = SourceSpan(
-            str(path),
-            error.lineno or 1,
-            error.offset or 1,
-            error.end_lineno or error.lineno or 1,
-            error.end_offset or (error.offset or 1) + 1,
-        )
-        raise CrabwalkCompilationError(
-            Diagnostic("CRAB100", "Invalid Python syntax", error.msg, span)
-        ) from error
+    parsed = parse_source(path)
+    return parsed.source_bytes, parsed.tree
 
 
 def _resolved_import_module(
@@ -4730,6 +4644,39 @@ class _FunctionLowerer:
                     ),
                 )
                 result = TypeRef("Option", (receiver_type.exposed_item_type,))
+            elif method == "fold" and len(node.args) == 2:
+                if receiver_type.execution != IteratorExecution.SEQUENTIAL:
+                    _fail(
+                        "CRAB221",
+                        "Parallel fold needs an explicit reduction strategy",
+                        "Use map(...).reduce(...) for one deterministic final value.",
+                        self.path,
+                        node,
+                    )
+                initial = self._lower_expression(
+                    node.args[0],
+                    environment,
+                    expected,
+                )
+                closure = self._lower_binary_closure(
+                    node.args[1],
+                    environment,
+                    initial.type_ref,
+                    receiver_type.exposed_item_type,
+                    expected_result=initial.type_ref,
+                )
+                arguments = (initial, closure)
+                result = initial.type_ref
+            elif method == "reduce" and len(node.args) == 1:
+                closure = self._lower_binary_closure(
+                    node.args[0],
+                    environment,
+                    receiver_type.exposed_item_type,
+                    receiver_type.exposed_item_type,
+                    expected_result=receiver_type.exposed_item_type,
+                )
+                arguments = (closure,)
+                result = TypeRef("Option", (receiver_type.exposed_item_type,))
             elif method == "enumerate" and not node.args:
                 arguments = ()
                 result = IteratorType(
@@ -4914,6 +4861,71 @@ class _FunctionLowerer:
             SourceSpan.from_ast(self.path, node),
         )
 
+    def _lower_binary_closure(
+        self,
+        node: ast.expr,
+        environment: dict[str, TypeRef],
+        first_type: TypeRef,
+        second_type: TypeRef,
+        *,
+        expected_result: TypeRef,
+    ) -> ClosureIR:
+        if not isinstance(node, ast.Lambda):
+            _fail(
+                "CRAB185",
+                "Iterator reduction requires a lambda",
+                "Use a one-expression lambda with two positional parameters.",
+                self.path,
+                node,
+            )
+        arguments = node.args
+        if (
+            len(arguments.args) != 2
+            or arguments.posonlyargs
+            or arguments.kwonlyargs
+            or arguments.vararg is not None
+            or arguments.kwarg is not None
+            or arguments.defaults
+            or arguments.kw_defaults
+        ):
+            _fail(
+                "CRAB185",
+                "Unsupported reduction closure signature",
+                "fold and reduce lambdas take exactly two required parameters.",
+                self.path,
+                node,
+            )
+        first, second = (value.arg for value in arguments.args)
+        for argument in arguments.args:
+            _validate_source_binding(
+                argument.arg,
+                self.path,
+                argument,
+                "closure parameter",
+            )
+        closure_environment = dict(environment)
+        closure_environment[first] = first_type
+        closure_environment[second] = second_type
+        body = self._lower_expression(
+            node.body,
+            closure_environment,
+            expected_result,
+        )
+        _require_type(body.type_ref, expected_result, self.path, node.body)
+        return ClosureIR(
+            first,
+            first_type,
+            body,
+            False,
+            TypeRef(
+                "Closure",
+                (TypeRef("Tuple", (first_type, second_type)), body.type_ref),
+            ),
+            SourceSpan.from_ast(self.path, node),
+            second_parameter=second,
+            second_parameter_type=second_type,
+        )
+
 
 def _validate_rust_import(tree: ast.Module, path: Path) -> None:
     valid = False
@@ -4939,62 +4951,6 @@ def _validate_rust_import(tree: ast.Module, path: Path) -> None:
             path,
             tree,
         )
-
-
-def _has_rust_fn_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    return any(
-        (
-            isinstance(item, ast.Attribute)
-            and isinstance(item.value, ast.Name)
-            and item.value.id == "rust"
-            and item.attr in {"fn", "async_fn"}
-        )
-        or (
-            isinstance(item, ast.Call)
-            and isinstance(item.func, ast.Attribute)
-            and _is_rust_attribute(item.func)
-            and item.func.attr in {"generic", "method", "impl", "operator", "extern"}
-        )
-        for item in node.decorator_list
-    )
-
-
-def _is_extern_declaration(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
-    return bool(
-        len(node.decorator_list) == 1
-        and isinstance(node.decorator_list[0], ast.Call)
-        and isinstance(node.decorator_list[0].func, ast.Attribute)
-        and _is_rust_attribute(node.decorator_list[0].func)
-        and node.decorator_list[0].func.attr == "extern"
-    )
-
-
-def _has_rust_async_fn_decorator(
-    node: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> bool:
-    return any(
-        isinstance(item, ast.Attribute)
-        and _is_rust_attribute(item)
-        and item.attr == "async_fn"
-        for item in node.decorator_list
-    )
-
-
-def _has_rust_struct_decorator(node: ast.ClassDef) -> bool:
-    return any(
-        (
-            isinstance(item, ast.Attribute)
-            and _is_rust_attribute(item)
-            and item.attr == "struct"
-        )
-        or (
-            isinstance(item, ast.Call)
-            and isinstance(item.func, ast.Attribute)
-            and _is_rust_attribute(item.func)
-            and item.func.attr == "struct"
-        )
-        for item in node.decorator_list
-    )
 
 
 def _struct_placeholder(
@@ -5144,59 +5100,6 @@ def _analyze_struct(
     return replace(placeholder, fields=tuple(fields), derives=derives)
 
 
-def _struct_field_type_supported(
-    type_ref: TypeRef,
-    visible_domain_symbols: set[str] | None = None,
-) -> bool:
-    visible_domain_symbols = visible_domain_symbols or set()
-    if type_ref.rust_name in _OWNED_VECTOR_ELEMENTS:
-        return True
-    if type_ref.rust_name in visible_domain_symbols and not type_ref.arguments:
-        return True
-    if type_ref.rust_name in {"Vec", "Option"} and len(type_ref.arguments) == 1:
-        return _struct_field_type_supported(type_ref.arguments[0], set())
-    return False
-
-
-def _owned_vector_element_supported(
-    type_ref: TypeRef,
-    domain_symbols: set[str],
-    *,
-    allow_domain: bool,
-) -> bool:
-    if type_ref.rust_name in _OWNED_VECTOR_ELEMENTS and not type_ref.arguments:
-        return True
-    if allow_domain and type_ref.rust_name in domain_symbols and not type_ref.arguments:
-        return True
-    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
-        return _owned_vector_element_supported(
-            type_ref.arguments[0], domain_symbols, allow_domain=False
-        )
-    if type_ref.rust_name == "Tuple" and type_ref.arguments:
-        return all(
-            _owned_vector_element_supported(value, domain_symbols, allow_domain=False)
-            for value in type_ref.arguments
-        )
-    if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
-        return _owned_vector_element_supported(
-            type_ref.arguments[0], domain_symbols, allow_domain=False
-        )
-    return False
-
-
-def _enum_field_type_supported(
-    type_ref: TypeRef,
-    visible_domain_symbols: set[str],
-) -> bool:
-    if _struct_field_type_supported(type_ref, visible_domain_symbols):
-        return True
-    if type_ref.rust_name in visible_domain_symbols:
-        return True
-    if type_ref.rust_name in {"Vec", "Option"} and len(type_ref.arguments) == 1:
-        return _enum_field_type_supported(type_ref.arguments[0], visible_domain_symbols)
-    return False
-
-
 def _domain_derives(
     node: ast.ClassDef,
     path: Path,
@@ -5243,23 +5146,6 @@ def _domain_derives(
             )
         derives.append(derive)
     return tuple(derives)
-
-
-def _has_rust_enum_decorator(node: ast.ClassDef) -> bool:
-    return any(
-        (
-            isinstance(item, ast.Attribute)
-            and _is_rust_attribute(item)
-            and item.attr == "enum"
-        )
-        or (
-            isinstance(item, ast.Call)
-            and isinstance(item.func, ast.Attribute)
-            and _is_rust_attribute(item.func)
-            and item.func.attr == "enum"
-        )
-        for item in node.decorator_list
-    )
 
 
 def _enum_placeholder(
@@ -5705,103 +5591,6 @@ def _analyze_signature(
     )
 
 
-def _python_parameter_boundary_supported(type_ref: TypeRef) -> bool:
-    if type_ref.rust_name in {
-        "i8",
-        "i16",
-        "i32",
-        "i64",
-        "i128",
-        "u8",
-        "u16",
-        "u32",
-        "u64",
-        "u128",
-        "usize",
-        "f32",
-        "f64",
-        "bool",
-        "char",
-        "String",
-        "Str",
-    }:
-        return not type_ref.arguments
-    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
-        return _python_parameter_boundary_supported(type_ref.arguments[0])
-    if type_ref.rust_name == "Tuple" and type_ref.arguments:
-        return all(
-            _python_parameter_boundary_supported(value) for value in type_ref.arguments
-        )
-    return False
-
-
-def _python_return_boundary_supported(type_ref: TypeRef) -> bool:
-    if type_ref.rust_name in {
-        "Unit",
-        "i8",
-        "i16",
-        "i32",
-        "i64",
-        "i128",
-        "u8",
-        "u16",
-        "u32",
-        "u64",
-        "u128",
-        "usize",
-        "f32",
-        "f64",
-        "bool",
-        "char",
-        "String",
-    }:
-        return not type_ref.arguments
-    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
-        return _python_return_boundary_supported(type_ref.arguments[0])
-    if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
-        return _python_return_boundary_supported(type_ref.arguments[0])
-    if type_ref.rust_name == "Tuple" and type_ref.arguments:
-        return all(
-            _python_return_boundary_supported(value) for value in type_ref.arguments
-        )
-    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
-        return all(
-            _python_return_boundary_supported(value) for value in type_ref.arguments
-        )
-    if type_ref.rust_name == "Result" and len(type_ref.arguments) == 2:
-        success, error = type_ref.arguments
-        return _python_return_boundary_supported(
-            success
-        ) and _rust_error_display_supported(error)
-    return False
-
-
-def _rust_error_display_supported(type_ref: TypeRef) -> bool:
-    return (
-        type_ref.rust_name
-        in {
-            "i8",
-            "i16",
-            "i32",
-            "i64",
-            "i128",
-            "u8",
-            "u16",
-            "u32",
-            "u64",
-            "u128",
-            "usize",
-            "f32",
-            "f64",
-            "bool",
-            "char",
-            "String",
-            "Str",
-        }
-        and not type_ref.arguments
-    )
-
-
 def _annotation_type(
     annotation: ast.expr | None,
     path: Path,
@@ -5967,23 +5756,6 @@ def _annotation_type(
         "Use a supported type from the canonical rust namespace.",
         path,
         annotation or node,
-    )
-
-
-def _is_rust_attribute(node: ast.AST | None) -> bool:
-    return (
-        isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "rust"
-    )
-
-
-def _is_rust_call_named(node: ast.AST | None, name: str) -> bool:
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and _is_rust_attribute(node.func)
-        and node.func.attr == name
     )
 
 
@@ -6694,94 +6466,6 @@ def _attribute_parts(node: ast.expr) -> tuple[str, ...]:
         parts.append(current.id)
         return tuple(reversed(parts))
     return ()
-
-
-def _place_from_ast(node: ast.expr) -> _Place | None:
-    """Resolve a supported expression to its storage root and projections."""
-
-    if isinstance(node, ast.Name):
-        return _Place(node.id)
-    if isinstance(node, ast.Attribute):
-        base = _place_from_ast(node.value)
-        return (
-            None
-            if base is None
-            else _Place(base.root, (*base.projections, f"field:{node.attr}"))
-        )
-    if isinstance(node, ast.Subscript):
-        base = _place_from_ast(node.value)
-        return None if base is None else _Place(base.root, (*base.projections, "index"))
-    return None
-
-
-def _receiver_access_for_ownership(ownership: str | None) -> ReceiverAccess:
-    if ownership == "Mut":
-        return "mutable"
-    if ownership == "Owned":
-        return "owned"
-    return "shared"
-
-
-def _builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
-    """Return the Rust receiver capability for one built-in method."""
-
-    receiver = type_ref.underlying.rust_name
-    if receiver == "Vec" and method in {"push", "pop", "split_at_mut_sum"}:
-        return "mutable"
-    if receiver == "HashMap" and method in {
-        "insert",
-        "remove",
-        "get_mut",
-        "entry_or_insert",
-        "add",
-    }:
-        return "mutable"
-    if receiver == "String" and method == "push_str":
-        return "mutable"
-    if receiver == "TcpStream" and method in {"write_get", "read_to_string"}:
-        return "mutable"
-    if receiver == "RefCell" and method == "replace":
-        return "interior"
-    if receiver == "Arc" and method in {"add_locked", "get_locked"}:
-        return "interior"
-    if receiver == "ThreadPool" and method == "finish":
-        return "owned"
-    if receiver == "ThreadHandle" and method == "join":
-        return "owned"
-    if receiver in {
-        "Iterator",
-        "ParallelIterator",
-        "ParallelIteratorRef",
-        "Option",
-        "Result",
-    } and method in {
-        "map",
-        "map_err",
-        "and_then",
-        "or_else",
-        "filter",
-        "filter_map",
-        "copied",
-        "cloned",
-        "collect_vec",
-        "collect_map",
-        "sum",
-        "count",
-        "any",
-        "all",
-        "find",
-        "enumerate",
-        "zip",
-        "unwrap",
-        "expect",
-        "unwrap_or",
-        "ok",
-        "err",
-    }:
-        return "owned"
-    if receiver == "HashMap" and method == "into_iter":
-        return "owned"
-    return "shared"
 
 
 def _assignment_counts(

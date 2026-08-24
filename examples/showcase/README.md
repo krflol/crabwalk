@@ -56,6 +56,22 @@ cold build from a warm execution.
 | [`true_par.py`](true_par.py) | Native types, Rayon concurrency, execution speed | Python timing and reference loop | `Vec<u64>`, tuple return, Rayon |
 | [`fastapi_mre.py`](fastapi_mre.py) | Native computation inside an async web API | FastAPI, Uvicorn, asyncio | Rayon, GIL-detached native call |
 | [`ml_mre.py`](ml_mre.py) | Train in Rust and analyze/plot in Python | NumPy, Matplotlib | Owned vectors, `libm`, native gradient descent |
+| [`etl_rayon.py`](etl_rayon.py) | Non-`Copy` String filter/map/collect pipeline | Python input and reporting | typed Rayon adapters, owned vectors |
+
+## Typed Rayon String ETL
+
+```text
+python examples/showcase/etl_rayon.py
+```
+
+This example is the compositional acceptance case that a scalar reduction cannot
+stand in for. Python explicitly allocates an owned `Vec<String>`, the native region
+moves it, Rayon filters borrowed non-`Copy` items, the map changes each borrowed
+row into an owned lowercase `String`, and `collect_vec()` returns the resulting
+list. The script asserts both its records and the observable moved state.
+
+The timer measures warm kernel execution when the artifact is cached. It is a
+small deterministic correctness demonstration, not an ETL throughput benchmark.
 
 ## Unified FastAPI, concurrency, and ML application
 

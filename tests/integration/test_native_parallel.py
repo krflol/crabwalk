@@ -16,6 +16,11 @@ from crabwalk import rust
 
 rayon = rust.crate("rayon", version="1")
 
+@rust.struct
+class Row:
+    customer_id: rust.u64
+    status: rust.String
+
 @rust.fn
 def parallel_sum(stop: rust.u64) -> rust.u64:
     values: rust.Vec[rust.u64] = rust.Vec([])
@@ -31,6 +36,22 @@ def normalize_active(
         lambda row: row.contains("|active|")
     ).map(
         lambda row: row.to_lowercase()
+    ).collect_vec()
+
+@rust.fn
+def parallel_reduce_total(
+    values: rust.Ref[rust.Vec[rust.u64]],
+) -> rust.Option[rust.u64]:
+    return values.par_iter().copied().reduce(lambda left, right: left + right)
+
+@rust.fn
+def parallel_active_customer_ids(
+    rows: rust.Ref[rust.Vec[Row]],
+) -> rust.Vec[rust.u64]:
+    return rows.par_iter().filter(
+        lambda row: row.status.starts_with("active")
+    ).map(
+        lambda row: row.customer_id
     ).collect_vec()
 
 @rust.fn
@@ -64,13 +85,21 @@ async def main():
         await rust.async_call(python_boundary, 7)
     except TypeError as error:
         print("Python runtime boundaries" in str(error))
-        rows = rust.Vec[rust.String]([
-            "1|ALICE|active|",
+    rows = rust.Vec[rust.String]([
+        "1|ALICE|active|",
         "2|BOB|INACTIVE|",
         "3|CAROL|active|",
     ])
     print(normalize_active(rows))
     print(rows.to_python())
+    numbers = rust.Vec[rust.u64]([1, 2, 3, 4])
+    print(parallel_reduce_total(numbers))
+    domain_rows = rust.Vec[Row]([
+        {"customer_id": 7, "status": "active"},
+        {"customer_id": 8, "status": "inactive"},
+        {"customer_id": 9, "status": "active"},
+    ])
+    print(parallel_active_customer_ids(domain_rows))
 
 asyncio.run(main())
 """,
@@ -101,4 +130,6 @@ asyncio.run(main())
         "True",
         "['1|alice|active|', '3|carol|active|']",
         "['1|ALICE|active|', '2|BOB|INACTIVE|', '3|CAROL|active|']",
+        "10",
+        "[7, 9]",
     ]

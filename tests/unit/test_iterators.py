@@ -61,6 +61,16 @@ def clone_active(
 @rust.fn
 def has_active(rows: rust.Ref[rust.Vec[rust.String]]) -> rust.bool:
     return rows.iter_ref().any(lambda row: row.contains("|active|"))
+
+@rust.fn
+def fold_total(values: rust.Ref[rust.Vec[rust.u64]]) -> rust.u64:
+    return values.iter().fold(0, lambda total, value: total + value)
+
+@rust.fn
+def reduce_total(
+    values: rust.Ref[rust.Vec[rust.u64]],
+) -> rust.Option[rust.u64]:
+    return values.iter().reduce(lambda left, right: left + right)
 """
 
 
@@ -106,3 +116,5 @@ def test_non_copy_iterator_pipeline_is_typed_by_execution_and_item_mode(
     )
     assert ".cloned().collect::<Vec<_>>()" in generated.rust_source
     assert '.any(|row| row.contains("|active|"))' in generated.rust_source
+    assert ".fold(0u64, |total, value| (total + value))" in generated.rust_source
+    assert ".reduce(|left, right| (left + right))" in generated.rust_source

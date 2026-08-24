@@ -47,7 +47,7 @@ def test_book_foundation_types_and_bindings_lower_to_real_rust(
     ir = analyze_path(source)
     generated = generate_project(ir, "_crabwalk_book_foundations")
 
-    assert ir.schema_version == 20
+    assert ir.schema_version == 21
     assert "const THREE_HOURS_IN_SECONDS: u32" in generated.rust_source
     assert "let value: u32 = 5u32;" in generated.rust_source
     assert "let value: u32 = (value + 1u32);" in generated.rust_source
@@ -58,5 +58,5 @@ def test_book_foundation_types_and_bindings_lower_to_real_rust(
     assert "values[4usize]" in generated.rust_source
     assert "std::collections::HashMap<String, u64>" in generated.rust_source
     assert "std::collections::HashMap::new()" in generated.rust_source
-    assert '.entry(String::from("Blue")).or_insert(0)' in generated.rust_source
+    assert '.entry(String::from("Blue")).or_insert(0u64)' in generated.rust_source
     assert "'🦀'" in generated.rust_source

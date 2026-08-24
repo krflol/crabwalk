@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from crabwalk.compiler.codegen import generate_project
-from crabwalk.compiler.frontend import analyze_path
+from crabwalk.compiler.frontend import analyze_path, analyze_project_path
 from crabwalk.compiler.ir import CrateCallIR, Effect, LetIR, ReturnIR
 from crabwalk.compiler.types import ExternalType
 from crabwalk.diagnostics import CrabwalkCompilationError
@@ -110,3 +110,55 @@ def call(value: rust.u64) -> rust.u64:
     function = analyze_path(source).functions[0]
     assert Effect.OPAQUE_CRATE_CALL in function.effects
     assert Effect.MAY_PANIC in function.effects
+
+
+def test_typed_adapter_types_and_functions_resolve_across_package_imports(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "adapter_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "from .kernel import adapted\n",
+        encoding="utf-8",
+    )
+    (package / "adapters.py").write_text(
+        """\
+from crabwalk import rust
+
+native = rust.crate("native-adapter", path="../native")
+Counter = rust.extern_type(native, path="model::Counter")
+
+@rust.extern(native, path="model::make_counter", effects=[rust.Pure])
+def make_counter(value: rust.u64) -> Counter:
+    ...
+
+@rust.extern(native, path="model::counter_value", effects=[rust.Pure])
+def counter_value(counter: rust.Ref[Counter]) -> rust.u64:
+    ...
+""",
+        encoding="utf-8",
+    )
+    kernel = package / "kernel.py"
+    kernel.write_text(
+        """\
+from crabwalk import rust
+from .adapters import Counter, counter_value, make_counter
+
+@rust.fn
+def adapted(value: rust.u64) -> rust.u64:
+    counter: Counter = make_counter(value)
+    return counter_value(counter)
+""",
+        encoding="utf-8",
+    )
+
+    ir = analyze_project_path(kernel, "adapter_pkg.kernel")
+
+    assert [function.qualified_name for function in ir.functions] == [
+        "adapter_pkg.kernel.adapted"
+    ]
+    first = ir.functions[0].body[0]
+    assert isinstance(first, LetIR)
+    assert isinstance(first.type_ref, ExternalType)
+    assert first.type_ref.source_name == "Counter"
+    assert first.type_ref.render().endswith("::model::Counter")
