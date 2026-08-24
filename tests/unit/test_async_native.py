@@ -13,8 +13,10 @@ async def async_double(value: rust.u64) -> rust.u64:
 
 @rust.async_fn
 async def async_pipeline(value: rust.u64) -> rust.u64:
-    first: rust.u64 = await async_double(value)
-    second: rust.u64 = await async_double(first)
+    first_pending = async_double(value)
+    first: rust.u64 = await first_pending
+    second_pending = async_double(first)
+    second: rust.u64 = await second_pending
     return second
 
 @rust.fn
@@ -95,9 +97,10 @@ def test_async_helpers_lower_to_native_futures_and_std_executor(
     assert f"async fn __cw_native_{functions['async_double']}(value: u64) -> u64" in (
         generated.rust_source
     )
-    assert (
-        f"__cw_native_{functions['async_double']}(value).await" in generated.rust_source
+    assert f"let first_pending = __cw_native_{functions['async_double']}(value);" in (
+        generated.rust_source
     )
+    assert "let first: u64 = first_pending.await;" in generated.rust_source
     assert f"__cw_block_on(__cw_native_{functions['async_pipeline']}(value))" in (
         generated.rust_source
     )

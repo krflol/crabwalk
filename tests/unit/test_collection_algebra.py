@@ -77,6 +77,38 @@ def parse_amount(text: rust.Str) -> rust.Result[rust.f64, rust.String]:
 def join_fields() -> rust.String:
     fields: rust.Vec[rust.String] = rust.Vec(["alpha", "beta"])
     return ",".join(fields)
+
+@rust.fn
+def tuple_keyed() -> rust.HashMap[
+    rust.Tuple[rust.String, rust.Option[rust.Vec[rust.u8]]],
+    rust.u64,
+]:
+    result: rust.HashMap[
+        rust.Tuple[rust.String, rust.Option[rust.Vec[rust.u8]]],
+        rust.u64,
+    ] = rust.HashMap()
+    result.insert(("key", rust.Some(rust.Vec([1, 2]))), 3)
+    return result
+
+@rust.fn
+def map_loop_total() -> rust.usize:
+    values: rust.HashMap[rust.String, rust.usize] = rust.HashMap()
+    values.insert("active", 2)
+    total: rust.usize = 0
+    for key in values.keys():
+        total += key.len()
+    for value in values.values().copied():
+        total += value
+    return total
+
+@rust.fn
+def split_map_keys() -> rust.Vec[rust.String]:
+    values: rust.HashMap[rust.String, rust.u64] = rust.HashMap()
+    values.insert("active", 2)
+    values.insert("inactive", 1)
+    borrowed = values.keys()
+    owned = borrowed.cloned()
+    return owned.collect_vec()
 """
 
 

@@ -5,9 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_methods_traits import METHOD_TRAIT_SOURCE
 
 
+@capability_contract("traits.dynamic-dispatch")
 def test_inherent_methods_and_dynamic_dispatch_run_natively(tmp_path: Path) -> None:
     source = tmp_path / "methods_traits.py"
     source.write_text(

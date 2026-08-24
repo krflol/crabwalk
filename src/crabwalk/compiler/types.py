@@ -81,6 +81,13 @@ class IteratorItemMode(StrEnum):
     MUTABLE_REF = "mutable_ref"
 
 
+class IteratorIndexing(StrEnum):
+    """Rayon capability retained by one parallel iterator adapter stack."""
+
+    INDEXED = "indexed"
+    UNINDEXED = "unindexed"
+
+
 class _TypeRefMeta(type):
     def __call__(cls, *args: object, **kwargs: object) -> TypeRef:
         if cls is not TypeRef:
@@ -236,9 +243,12 @@ class TypeRef(metaclass=_TypeRefMeta):
         if isinstance(self, ArrayType):
             return f"rust.Array[{self.item.display()}, {self.length}]"
         if isinstance(self, IteratorType):
+            capabilities: str = self.item_mode
+            if self.indexing is not None:
+                capabilities = f"{capabilities},{self.indexing}"
             return (
                 f"rust.{self.rust_name}[{self.exposed_item_type.display()}]"
-                f"<{self.item_mode}>"
+                f"<{capabilities}>"
             )
         if not self.arguments:
             return f"rust.{self.rust_name}"
@@ -478,7 +488,16 @@ class IteratorType(TypeRef):
     execution: IteratorExecution
     item_type: TypeRef
     item_mode: IteratorItemMode = IteratorItemMode.OWNED
+    indexing: IteratorIndexing | None = None
     kind: TypeKind = TypeKind.ITERATOR
+
+    def __post_init__(self) -> None:
+        if self.execution == IteratorExecution.SEQUENTIAL:
+            if self.indexing is not None:
+                raise ValueError("sequential iterators cannot carry Rayon indexing")
+            return
+        if self.indexing is None:
+            raise ValueError("parallel iterators require an indexing capability")
 
     @property
     def rust_name(self) -> str:
@@ -503,7 +522,12 @@ class IteratorType(TypeRef):
     def with_arguments(self, arguments: tuple[TypeRef, ...]) -> TypeRef:
         if len(arguments) != 1:
             raise ValueError("iterator types require exactly one item type")
-        return IteratorType(self.execution, arguments[0], self.item_mode)
+        return IteratorType(
+            self.execution,
+            arguments[0],
+            self.item_mode,
+            self.indexing,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -634,7 +658,12 @@ def _legacy_type_ref(
             if rust_name == "Iterator"
             else IteratorExecution.PARALLEL
         )
-        return IteratorType(execution, item, mode)
+        indexing = (
+            None
+            if execution == IteratorExecution.SEQUENTIAL
+            else IteratorIndexing.UNINDEXED
+        )
+        return IteratorType(execution, item, mode, indexing)
     if rust_name == "Trait":
         if arguments or python_name is None or const_value is not None:
             raise ValueError("Trait marker requires one trait symbol")

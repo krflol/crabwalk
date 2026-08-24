@@ -95,14 +95,47 @@ def python_return_boundary_supported(type_ref: TypeRef) -> bool:
             python_return_boundary_supported(value) for value in type_ref.arguments
         )
     if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
-        return all(
-            python_return_boundary_supported(value) for value in type_ref.arguments
-        )
+        key_type, value_type = type_ref.arguments
+        return python_mapping_key_supported(
+            key_type
+        ) and python_return_boundary_supported(value_type)
     if type_ref.rust_name == "Result" and len(type_ref.arguments) == 2:
         success, error = type_ref.arguments
         return python_return_boundary_supported(
             success
         ) and rust_error_display_supported(error)
+    return False
+
+
+def python_mapping_key_supported(type_ref: TypeRef) -> bool:
+    """Whether one native value has a hashable documented Python output form."""
+
+    if type_ref.rust_name in {
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "i128",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "u128",
+        "usize",
+        "bool",
+        "char",
+        "String",
+        "Unit",
+    }:
+        return not type_ref.arguments
+    if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
+        # Vec<u8> deliberately normalizes to bytes. Every other Vec becomes a
+        # Python list and therefore cannot be a dictionary key.
+        return type_ref.arguments[0].rust_name == "u8"
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        return all(python_mapping_key_supported(value) for value in type_ref.arguments)
+    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        return python_mapping_key_supported(type_ref.arguments[0])
     return False
 
 

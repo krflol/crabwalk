@@ -29,6 +29,9 @@ All notable Crabwalk changes are recorded here.
   signature, expression/statement/pattern lowering, ABI, ownership, effect,
   semantic type, binding, Rust-emission, capability, and Cargo-emission modules,
   with pass-boundary tests and documented extension invariants.
+- Capability maturity now references executable contract IDs attached to native
+  and diagnostic tests. Compositional claims require a larger evidence set than
+  bounded or proof-level demonstrations.
 
 ### Changed
 
@@ -63,8 +66,9 @@ All notable Crabwalk changes are recorded here.
 - Domain fields, enum payload fields/variants, and trait members now carry their
   own Rust member identities. Python-visible names remain stable through explicit
   PyO3 names, including Rust 2024-reserved source spellings such as `gen`.
-- IR schema 21 and codegen schema 35 invalidate older development artifacts for
-  the expanded type, closure, domain, and generated-Cargo contracts.
+- IR schema 22 and codegen schema 36 invalidate older development artifacts for
+  structured patterns, inferred anonymous locals, Rayon indexing, and the updated
+  generated-Rust contract.
 
 ### Fixed
 
@@ -98,6 +102,20 @@ All notable Crabwalk changes are recorded here.
   across hot reloads.
 - Cargo dependency-lock replanning is iterative and bounded; a graph that changes
   during three consecutive plans now fails as `CRAB308` instead of recursing.
+- Semantically typed iterator stacks and native futures assigned to unannotated
+  locals now rely on Rust inference instead of emitting invalid nominal
+  `Iterator<Item = T>` or `Future<T>` annotations.
+- Sequential `for` targets retain shared/mutable iterator item modes, including
+  tuple projection, so borrowed collection values cannot be mistaken for owned
+  values by the frontend.
+- Rayon iterator types now track indexed versus unindexed capability. Parallel
+  `enumerate`/`zip` validate that capability, and search uses explicit
+  `find_any`/`find_first`/`find_last` semantics.
+- Match patterns are structured semantic IR. Capture hygiene no longer performs
+  regex substitution over Rust source, eliminating field and literal corruption.
+- Exported `HashMap` signatures now reject key types whose documented Python
+  representation is unhashable while accepting recursively hashable tuple,
+  option, scalar, string, and byte-vector keys.
 - Generated move, panic, and Rust-result failures now use private native exception
   identities with structured payloads. Public translation no longer trusts error
   message prefixes, and borrow conflicts retain structured parameter/source data.

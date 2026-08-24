@@ -5,7 +5,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 
+
+@capability_contract(
+    "rayon.string-split-local",
+    "rayon.domain-filter-map-collect",
+    "rayon.indexed-enumerate",
+    "rayon.indexed-zip",
+    "rayon.explicit-find-semantics",
+)
 def test_rayon_and_explicit_python_async_boundary(tmp_path: Path) -> None:
     source = tmp_path / "parallel_app.py"
     source.write_text(
@@ -32,11 +41,45 @@ def parallel_sum(stop: rust.u64) -> rust.u64:
 def normalize_active(
     rows: rust.Ref[rust.Vec[rust.String]],
 ) -> rust.Vec[rust.String]:
-    return rows.par_iter().filter(
+    active = rows.par_iter().filter(
         lambda row: row.contains("|active|")
-    ).map(
+    )
+    normalized = active.map(
         lambda row: row.to_lowercase()
-    ).collect_vec()
+    )
+    return normalized.collect_vec()
+
+@rust.fn
+def indexed_values(
+    values: rust.Ref[rust.Vec[rust.u64]],
+) -> rust.Vec[rust.Tuple[rust.usize, rust.u64]]:
+    indexed = values.par_iter().copied().enumerate()
+    return indexed.collect_vec()
+
+@rust.fn
+def first_large(
+    values: rust.Ref[rust.Vec[rust.u64]],
+) -> rust.Option[rust.u64]:
+    return values.par_iter().copied().find_first(lambda value: value > 2)
+
+@rust.fn
+def last_large(
+    values: rust.Ref[rust.Vec[rust.u64]],
+) -> rust.Option[rust.u64]:
+    return values.par_iter().copied().find_last(lambda value: value > 2)
+
+@rust.fn
+def any_large(
+    values: rust.Ref[rust.Vec[rust.u64]],
+) -> rust.Option[rust.u64]:
+    return values.par_iter().copied().find_any(lambda value: value > 2)
+
+@rust.fn
+def zipped_values(
+    left: rust.Ref[rust.Vec[rust.u64]],
+    right: rust.Ref[rust.Vec[rust.u64]],
+) -> rust.Vec[rust.Tuple[rust.u64, rust.u64]]:
+    return left.par_iter().copied().zip(right.par_iter().copied()).collect_vec()
 
 @rust.fn
 def parallel_reduce_total(
@@ -94,6 +137,11 @@ async def main():
     print(rows.to_python())
     numbers = rust.Vec[rust.u64]([1, 2, 3, 4])
     print(parallel_reduce_total(numbers))
+    print(indexed_values(numbers))
+    print(first_large(numbers), last_large(numbers))
+    print(any_large(numbers) in [3, 4])
+    other_numbers = rust.Vec[rust.u64]([10, 20, 30, 40])
+    print(zipped_values(numbers, other_numbers))
     domain_rows = rust.Vec[Row]([
         {"customer_id": 7, "status": "active"},
         {"customer_id": 8, "status": "inactive"},
@@ -131,5 +179,9 @@ asyncio.run(main())
         "['1|alice|active|', '3|carol|active|']",
         "['1|ALICE|active|', '2|BOB|INACTIVE|', '3|CAROL|active|']",
         "10",
+        "[(0, 1), (1, 2), (2, 3), (3, 4)]",
+        "3 4",
+        "True",
+        "[(1, 10), (2, 20), (3, 30), (4, 40)]",
         "[7, 9]",
     ]

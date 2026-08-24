@@ -5,9 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_async_native import ASYNC_SOURCE
 
 
+@capability_contract("futures.split-local-block-on")
 def test_native_async_helpers_compile_and_run_through_block_on(
     tmp_path: Path,
 ) -> None:

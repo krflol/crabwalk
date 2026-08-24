@@ -5,9 +5,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_web_server import WEB_SERVER_SOURCE
 
 
+@capability_contract("threadpool.loopback-http")
 def test_loopback_http_and_thread_pool_execute_natively(tmp_path: Path) -> None:
     source = tmp_path / "web_server.py"
     source.write_text(

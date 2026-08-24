@@ -26,6 +26,9 @@ print(nested_shape_total(0, 8))
 print(nested_shape_total(3, 5))
 print(tuple_rest(2, 9))
 print(tuple_loop_total())
+print(hygienic_tuple(7, "x"))
+print(hygienic_tuple(7, "y"))
+print(hygienic_field(9))
 """,
         encoding="utf-8",
     )
@@ -59,4 +62,7 @@ print(tuple_loop_total())
         "8",
         "11",
         "10",
+        "7",
+        "0",
+        "9",
     ]

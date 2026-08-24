@@ -34,7 +34,7 @@ def apply_twice(
 
 @rust.fn
 def adapted(value: rust.u64) -> rust.u64:
-    counter: Counter = make_counter(value)
+    counter = make_counter(value)
     current: rust.u64 = counter_value(counter)
     return apply_twice(current, lambda item: item + 1)
 """
@@ -52,6 +52,7 @@ def test_typed_crate_values_closures_and_effects_are_semantic(tmp_path: Path) ->
     first = function.body[0]
     assert isinstance(first, LetIR)
     assert isinstance(first.type_ref, ExternalType)
+    assert first.rust_annotation is None
     assert first.type_ref.render().endswith("::model::Counter")
     assert isinstance(first.value, CrateCallIR)
     assert first.value.adapter_name == "make_counter"

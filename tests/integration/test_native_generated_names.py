@@ -5,7 +5,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 
+
+@capability_contract("compiler.generated-identities")
 def test_colliding_source_names_execute_through_isolated_native_symbols(
     tmp_path: Path,
 ) -> None:

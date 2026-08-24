@@ -28,7 +28,7 @@ from .emission import EmissionNames, Writer as _Writer
 from .rust_emission import write_native_function as _write_native_function
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
-CODEGEN_SCHEMA_VERSION = 35
+CODEGEN_SCHEMA_VERSION = 36
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from crabwalk.compiler.codegen import generate_project
+from crabwalk.compiler.capabilities import capability_contract
 from crabwalk.compiler.frontend import analyze_path
 from crabwalk.compiler.ir import MethodCallIR, ReturnIR
 from crabwalk.compiler.types import IteratorExecution, IteratorType
@@ -137,6 +138,7 @@ def parallel_domains(
         ),
     ),
 )
+@capability_contract("iterator.copy-inline", "iterator.string-inline")
 def test_iterator_cross_product_has_typed_three_stage_chains(
     tmp_path: Path,
     name: str,

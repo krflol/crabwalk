@@ -5,9 +5,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_structured_boundaries import STRUCTURED_BOUNDARY_SOURCE
 
 
+@capability_contract(
+    "structured.vector-domain-input",
+    "structured.nested-domain-roundtrip",
+    "structured.owned-domain-return",
+)
 def test_structured_vectors_and_owned_domain_returns_run_natively(
     tmp_path: Path,
 ) -> None:
