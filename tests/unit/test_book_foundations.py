@@ -2,6 +2,7 @@ from pathlib import Path
 
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_path
+from crabwalk.compiler.ir import LetIR
 
 
 BOOK_FOUNDATIONS = """\
@@ -48,9 +49,17 @@ def test_book_foundation_types_and_bindings_lower_to_real_rust(
     generated = generate_project(ir, "_crabwalk_book_foundations")
 
     assert ir.schema_version == 21
+    first_value = ir.functions[0].body[1]
+    shadowed_value = ir.functions[0].body[2]
+    assert isinstance(first_value, LetIR)
+    assert isinstance(shadowed_value, LetIR)
+    assert first_value.rust_name != shadowed_value.rust_name
     assert "const THREE_HOURS_IN_SECONDS: u32" in generated.rust_source
-    assert "let value: u32 = 5u32;" in generated.rust_source
-    assert "let value: u32 = (value + 1u32);" in generated.rust_source
+    assert f"let {first_value.rust_name}: u32 = 5u32;" in generated.rust_source
+    assert (
+        f"let {shadowed_value.rust_name}: u32 = "
+        f"({first_value.rust_name} + 1u32);" in generated.rust_source
+    )
     assert "(u64, u64, u64)" in generated.rust_source
     assert "let (price, quantity, category)" in generated.rust_source
     assert "[u64; 5]" in generated.rust_source

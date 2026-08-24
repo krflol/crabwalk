@@ -26,14 +26,17 @@ from .ir import (
 from .naming import (
     PYO3_CARGO_ALIAS,
     cargo_dependency_key,
+    is_rust_2024_identifier,
     owned_class_names,
 )
+from .symbols import BindingIR, RustNamespace, SymbolId
 
 
 def validate_package_ir(ir: PackageIR) -> None:
     """Assert compiler invariants and reject unsafe cross-feature interactions."""
 
     validate_function_symbol_identity(ir.functions)
+    _validate_symbol_and_binding_identities(ir)
     _validate_trait_conformance(ir)
     _validate_emitted_identifiers(ir)
     functions = {function.rust_symbol: function for function in ir.functions}
@@ -251,10 +254,169 @@ def validate_function_symbol_identity(functions: tuple[FunctionIR, ...]) -> None
         )
 
 
+def _validate_symbol_and_binding_identities(ir: PackageIR) -> None:
+    """Check semantic identities before any backend constructs name-keyed maps."""
+
+    declarations: tuple[Any, ...] = (
+        *ir.structs,
+        *ir.enums,
+        *ir.traits,
+        *ir.functions,
+    )
+    symbols: dict[SymbolId, object] = {}
+    for declaration in declarations:
+        symbol_id = declaration.symbol_id
+        if symbol_id is None:
+            raise AssertionError(
+                f"{type(declaration).__name__} reached validation without SymbolId"
+            )
+        previous = symbols.get(symbol_id)
+        if previous is not None and previous is not declaration:
+            _identity_error(
+                declaration,
+                f"semantic symbol identity {symbol_id.value!r} is duplicated",
+            )
+        symbols[symbol_id] = declaration
+
+    for function in ir.functions:
+        _validate_binding_scope(function.qualified_name, _walk_bindings(function))
+        for parameter in function.parameters:
+            _require_binding_namespace(
+                parameter.binding, RustNamespace.VALUE, parameter
+            )
+        for type_parameter in function.type_parameters:
+            expected = (
+                RustNamespace.LIFETIME
+                if type_parameter.is_lifetime
+                else RustNamespace.TYPE
+            )
+            _require_binding_namespace(
+                type_parameter.binding,
+                expected,
+                type_parameter,
+            )
+    for struct in ir.structs:
+        _validate_binding_scope(
+            f"{struct.qualified_name} fields",
+            (field.binding for field in struct.fields),
+        )
+        for field in struct.fields:
+            _require_binding_namespace(field.binding, RustNamespace.MEMBER, field)
+    for enum in ir.enums:
+        _validate_binding_scope(
+            f"{enum.qualified_name} variants",
+            (variant.binding for variant in enum.variants),
+        )
+        for variant in enum.variants:
+            _require_binding_namespace(variant.binding, RustNamespace.MEMBER, variant)
+            _validate_binding_scope(
+                f"{enum.qualified_name}.{variant.name} fields",
+                (field.binding for field in variant.fields),
+            )
+            for field in variant.fields:
+                _require_binding_namespace(field.binding, RustNamespace.MEMBER, field)
+    for trait in ir.traits:
+        _validate_binding_scope(
+            f"{trait.qualified_name} methods",
+            (method.binding for method in trait.methods),
+        )
+        for method in trait.methods:
+            _require_binding_namespace(method.binding, RustNamespace.MEMBER, method)
+
+
+def _walk_bindings(value: object) -> Iterator[BindingIR | None]:
+    if isinstance(value, BindingIR):
+        yield value
+        return
+    if isinstance(value, tuple):
+        for item in value:
+            yield from _walk_bindings(item)
+        return
+    if not is_dataclass(value):
+        return
+    for field in fields(value):
+        if field.name == "span":
+            continue
+        yield from _walk_bindings(getattr(value, field.name))
+
+
+def _validate_binding_scope(
+    label: str,
+    candidates: Iterator[BindingIR | None],
+) -> None:
+    by_identifier: dict[int, BindingIR] = {}
+    by_namespace: dict[tuple[RustNamespace, str], BindingIR] = {}
+    for binding in candidates:
+        if binding is None:
+            raise AssertionError(f"{label} reached validation without BindingIR")
+        previous_identity = by_identifier.get(binding.identifier.value)
+        if previous_identity is not None:
+            if previous_identity != binding:
+                _identity_error(
+                    binding,
+                    (
+                        f"binding id {binding.identifier.value} identifies both "
+                        f"{previous_identity.source_name!r} and {binding.source_name!r}"
+                    ),
+                )
+            continue
+        by_identifier[binding.identifier.value] = binding
+        if not is_rust_2024_identifier(binding.rust_name):
+            _identity_error(
+                binding,
+                f"emitted {binding.namespace} name {binding.rust_name!r} is invalid",
+            )
+        key = (binding.namespace, binding.rust_name)
+        previous_name = by_namespace.get(key)
+        if previous_name is not None:
+            _identity_error(
+                binding,
+                (
+                    f"{previous_name.source_name!r} and {binding.source_name!r} "
+                    f"both emit {binding.rust_name!r} in the "
+                    f"{binding.namespace} namespace of {label}"
+                ),
+            )
+        by_namespace[key] = binding
+
+
+def _require_binding_namespace(
+    binding: BindingIR | None,
+    expected: RustNamespace,
+    owner: object,
+) -> None:
+    if binding is None:
+        raise AssertionError(
+            f"{type(owner).__name__} reached validation without BindingIR"
+        )
+    if binding.namespace != expected:
+        _identity_error(
+            owner,
+            (
+                f"{binding.source_name!r} emits in the {binding.namespace} namespace; "
+                f"expected {expected}"
+            ),
+        )
+
+
+def _identity_error(owner: object, detail: str) -> None:
+    raise CrabwalkCompilationError(
+        Diagnostic(
+            "CRAB209",
+            "Generated Rust identity collision",
+            detail,
+            getattr(owner, "span", None),
+            "Compiler semantic identities and emitted namespaces must be injective.",
+        )
+    )
+
+
 def _validate_emitted_identifiers(ir: PackageIR) -> None:
     tables: dict[str, list[tuple[str, object, str]]] = {
         "value": [],
         "type": [],
+        "macro": [],
+        "lifetime": [],
         "method glue": [],
         "cargo dependency": [],
         "crate binding": [],

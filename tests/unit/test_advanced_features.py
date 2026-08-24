@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from crabwalk.compiler.codegen import function_releases_gil, generate_project
@@ -147,14 +148,20 @@ def test_advanced_features_lower_to_auditable_rust(tmp_path: Path) -> None:
     assert "std::slice::from_raw_parts_mut" in rust_source
     assert '#[link_name = "abs"]' in rust_source
     assert "pub(super) fn c_abs(input: i32) -> i32;" in rust_source
-    assert "if __cw_value == i32::MIN" in rust_source
+    assert re.search(r"if __cw_tmp_\d+_[0-9a-f]+ == i32::MIN", rust_source)
     assert "C abs is undefined for i32::MIN" in rust_source
-    assert "static __cw_counter: std::sync::atomic::AtomicU64" in rust_source
+    assert re.search(
+        r"static __cw_tmp_\d+_[0-9a-f]+: std::sync::atomic::AtomicU64",
+        rust_source,
+    )
     assert "fetch_update" in rust_source
     assert "Ordering::Relaxed" in rust_source
-    assert "static mut __cw_counter" not in rust_source
-    assert "type __CwAlias = u64" in rust_source
-    assert "let __cw_operation: fn(u64) -> u64" in rust_source
+    assert "static mut " not in rust_source
+    assert re.search(r"type __CwTmp\d+_[0-9a-f]+ = u64", rust_source)
+    assert re.search(
+        r"let __cw_tmp_\d+_[0-9a-f]+: fn\(u64\) -> u64",
+        rust_source,
+    )
     assert "Box<dyn Fn(u64) -> u64>" in rust_source
     assert "Vec<Box<dyn Fn(u64) -> u64>>" in rust_source
     assert "continue;" in rust_source

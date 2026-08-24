@@ -398,8 +398,11 @@ def construct_rust_value(
                 registration.fingerprint,
             )
             native = registration.native_type(
-                *converted_values,
-                **converted_keywords,
+                *_ordered_domain_arguments(
+                    converted_values,
+                    converted_keywords,
+                    registration.fields,
+                )
             )
     except (OverflowError, TypeError, ValueError) as error:
         raise type(error)(f"cannot construct {rust_type!r}: {error}") from error
@@ -448,7 +451,13 @@ def _validated_owned_vector_input(
                 element_registration.fields,
                 registration.fingerprint,
             )
-            native = element_registration.native_type(*positional, **keywords)
+            native = element_registration.native_type(
+                *_ordered_domain_arguments(
+                    positional,
+                    keywords,
+                    element_registration.fields,
+                )
+            )
             converted_values.append(native)
             continue
         raise TypeError(
@@ -504,6 +513,17 @@ def _validated_domain_arguments(
     return converted_values, converted_keywords
 
 
+def _ordered_domain_arguments(
+    positional: tuple[object, ...],
+    keywords: dict[str, object],
+    fields: tuple[tuple[str, TypeRef], ...],
+) -> tuple[object, ...]:
+    """Order validated source arguments for compiler-private PyO3 callables."""
+
+    trailing_names = tuple(name for name, _ in fields[len(positional) :])
+    return (*positional, *(keywords[name] for name in trailing_names))
+
+
 def _compiled_domain_registration(
     fingerprint: str,
     type_ref: TypeRef,
@@ -548,7 +568,9 @@ def _validate_compiled_boundary_input(
             registration.fields,
             fingerprint,
         )
-        return registration.native_type(*positional, **keywords)
+        return registration.native_type(
+            *_ordered_domain_arguments(positional, keywords, registration.fields)
+        )
 
     raise TypeError(
         f"{context}: expected {type_ref.display()} handle or mapping, "
@@ -599,7 +621,13 @@ def construct_rust_variant(
             registration.fingerprint,
         )
         constructor = getattr(registration.native_type, variant)
-        native = constructor(*converted_values, **converted_keywords)
+        native = constructor(
+            *_ordered_domain_arguments(
+                converted_values,
+                converted_keywords,
+                variant_fields,
+            )
+        )
     except (AttributeError, OverflowError, TypeError, ValueError) as error:
         raise type(error)(
             f"cannot construct {rust_type!r}.{variant}: {error}"

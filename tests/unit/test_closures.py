@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from crabwalk.compiler.codegen import generate_project
@@ -31,10 +32,16 @@ def test_lambdas_and_iterator_adapters_lower_to_typed_rust(tmp_path: Path) -> No
     assert isinstance(returned, MethodCallIR)
     filtered = returned.receiver
     assert isinstance(filtered, MethodCallIR)
-    assert isinstance(filtered.arguments[0], ClosureIR)
-    assert filtered.arguments[0].borrowed_parameter is True
+    filter_closure = filtered.arguments[0]
+    assert isinstance(filter_closure, ClosureIR)
+    assert filter_closure.borrowed_parameter is True
+    assert filter_closure.rust_parameter is not None
     assert ".iter().copied()" in generated.rust_source
     assert ".map(|value| (value + offset))" in generated.rust_source
-    assert "let value = *__cw_item" in generated.rust_source
+    assert re.search(
+        rf"let {re.escape(filter_closure.rust_parameter)} = "
+        r"\*__cw_tmp_\d+_[0-9a-f]+",
+        generated.rust_source,
+    )
     assert ".collect::<Vec<_>>()" in generated.rust_source
     assert ".sum()" in generated.rust_source

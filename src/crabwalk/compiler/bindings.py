@@ -57,6 +57,24 @@ def assign_package_identities(package: PackageIR) -> PackageIR:
     )
 
 
+def assign_struct_identity(value: StructIR) -> StructIR:
+    """Assign one domain declaration before function/pattern lowering."""
+
+    return _bind_struct(value)
+
+
+def assign_enum_identity(value: EnumIR) -> EnumIR:
+    """Assign one enum and its variant/field member identities."""
+
+    return _bind_enum(value)
+
+
+def assign_trait_identity(value: TraitIR) -> TraitIR:
+    """Assign one trait and its emitted method identities."""
+
+    return _bind_trait(value)
+
+
 def _bind_fields(fields: tuple[StructFieldIR, ...]) -> tuple[StructFieldIR, ...]:
     gensym = Gensym()
     return tuple(

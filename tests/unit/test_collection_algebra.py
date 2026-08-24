@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from crabwalk.compiler.codegen import generate_project
@@ -94,8 +95,10 @@ def test_collection_and_error_algebra_lower_as_typed_compositions(
     assert ".keys().cloned().map(" in generated.rust_source
     assert ".collect::<std::collections::HashMap<_, _>>()" in generated.rust_source
     assert '.trim().split("|").filter(' in generated.rust_source
-    assert ".parse::<f64>().map_err(|error| error.to_string())" in (
-        generated.rust_source
+    assert re.search(
+        r"\.parse::<f64>\(\)\.map_err\("
+        r"\|(?P<error>__cw_tmp_\d+_[0-9a-f]+)\| (?P=error)\.to_string\(\)\)",
+        generated.rust_source,
     )
     assert '.join(String::from(",").as_str())' in generated.rust_source
     assert ".or_insert(0u64) += 2u64" in generated.rust_source

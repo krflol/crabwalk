@@ -26,8 +26,9 @@ All notable Crabwalk changes are recorded here.
   structured filter-group-emit workload, and runnable Rayon String ETL showcase
   provide application-level evidence.
 - Compiler responsibilities now have independently typed source, declaration,
-  ABI, ownership, semantic type, binding, capability, and Cargo-emission modules,
-  with a documented pass pipeline and extension invariants.
+  signature, expression/statement/pattern lowering, ABI, ownership, effect,
+  semantic type, binding, Rust-emission, capability, and Cargo-emission modules,
+  with pass-boundary tests and documented extension invariants.
 
 ### Changed
 
@@ -59,7 +60,10 @@ All notable Crabwalk changes are recorded here.
   per-scope gensym allocation. Semantic types are tagged variants for primitives,
   domains, external crate values, generics, lifetimes, ownership, containers, and
   iterator execution/item modes rather than one overloaded string record.
-- IR schema 21 and codegen schema 34 invalidate older development artifacts for
+- Domain fields, enum payload fields/variants, and trait members now carry their
+  own Rust member identities. Python-visible names remain stable through explicit
+  PyO3 names, including Rust 2024-reserved source spellings such as `gen`.
+- IR schema 21 and codegen schema 35 invalidate older development artifacts for
   the expanded type, closure, domain, and generated-Cargo contracts.
 
 ### Fixed

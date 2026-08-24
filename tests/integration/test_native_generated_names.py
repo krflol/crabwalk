@@ -95,3 +95,88 @@ print(identity(41))
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == ["41"]
+
+
+def test_python_attach_temporary_cannot_capture_a_user_py_binding(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "native_python_attach_names.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def echo(py: rust.u64) -> rust.u64:
+    print(py)
+    return py
+
+print(echo(42))
+""",
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(root / "src")
+    environment["CRABWALK_PROGRESS"] = "never"
+
+    result = subprocess.run(
+        [sys.executable, "-u", str(source)],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["42", "42"]
+
+
+def test_domain_members_keep_python_names_and_use_hygienic_rust_names(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "native_domain_member_names.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.struct
+class Record:
+    gen: rust.u64
+
+@rust.enum
+class State:
+    gen = rust.variant(rust.u64)
+
+@rust.fn
+def total(record: rust.Ref[Record], state: rust.Ref[State]) -> rust.u64:
+    match state:
+        case State.gen(value):
+            return record.gen + value
+
+record = Record(gen=40)
+state = State.gen(2)
+print(total(record, state))
+record.gen = 41
+print(record.gen)
+""",
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(root / "src")
+    environment["CRABWALK_PROGRESS"] = "never"
+
+    result = subprocess.run(
+        [sys.executable, "-u", str(source)],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["42", "41"]
