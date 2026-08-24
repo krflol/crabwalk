@@ -50,6 +50,7 @@ def compilation_inspection(result: CompilationResult) -> dict[str, object]:
         },
         "build_command": list(result.planned_command or ()),
         "build_inputs": result.build_inputs or {},
+        "cargo_policy": _cargo_policy(result),
         "crates": [
             {
                 "binding": crate.binding,
@@ -99,6 +100,17 @@ def compilation_inspection(result: CompilationResult) -> dict[str, object]:
             function_inspection(function) for function in result.ir.functions
         ],
     }
+
+
+def _cargo_policy(result: CompilationResult) -> dict[str, object]:
+    inputs = result.build_inputs or {}
+    policy = inputs.get("cargo_policy")
+    if isinstance(policy, dict):
+        return {
+            "locked": bool(policy.get("locked", False)),
+            "offline": bool(policy.get("offline", False)),
+        }
+    return {"locked": None, "offline": None}
 
 
 def function_inspection(function: FunctionIR) -> dict[str, object]:

@@ -1800,7 +1800,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                 )
             self._reject_moved_local_use(node.target)
             right = self._lower_expression(node.value, environment, target_type)
-            operator = _binary_operator(node.op, self.path)
+            operator = _binary_operator(node.op, self.path, expression=node)
             if operator in {"and", "or"}:
                 _unsupported(node, self.path)
             _require_numeric(target_type, self.path, node)
@@ -2316,7 +2316,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                 return UnaryIR(operator, operand, type_ref, span)  # type: ignore[arg-type]
 
         if isinstance(node, ast.BinOp):
-            operator = _binary_operator(node.op, self.path)
+            operator = _binary_operator(node.op, self.path, expression=node)
             type_hint = expected or _peek_expression_type(
                 node.right, environment, self.signatures
             )
@@ -6471,10 +6471,27 @@ def _peek_expression_type(
     return None
 
 
-def _binary_operator(node: ast.operator, path: Path) -> str:
+def _binary_operator(
+    node: ast.operator,
+    path: Path,
+    *,
+    expression: ast.AST | None = None,
+) -> str:
     operator = _binary_operator_decision(node)
     if operator is None:
-        _unsupported(node, path)
+        help_text = None
+        if isinstance(node, ast.FloorDiv):
+            help_text = (
+                "Use '/' for Rust typed division; with integer operands it "
+                "performs integer division. Verify the result because this "
+                "intentionally differs from Python '/'."
+            )
+        _unsupported(
+            expression or node,
+            path,
+            help_text,
+            construct_name=type(node).__name__,
+        )
     return operator
 
 

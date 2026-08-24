@@ -25,6 +25,7 @@ from crabwalk.compiler.frontend import (
     analyze_project_path,
     project_source_anchor,
 )
+from crabwalk.config import discover_project_config
 from crabwalk.diagnostics import (
     CrabwalkCompilationError,
     CrabwalkBorrowError,
@@ -889,6 +890,7 @@ class RustFunction:
             "gil_released": self._releases_gil,
             "async_eligible": self._releases_gil,
             "effects": self._effects,
+            "cargo_policy": _cargo_policy_metadata(self._compilation),
         }
 
 
@@ -1055,11 +1057,13 @@ def _compilation_for(path: Path, module_name: str) -> CompilationResult:
         # A source-only memo here would bypass those stronger checks on reload.
         result = _load_prebuilt_compilation(path, module_name)
         if result is None:
+            config = discover_project_config(path)
             result = default_service.compile_path(
                 path,
                 module_name=module_name,
                 mode="build",
                 load=True,
+                locked=config.source_locked if config is not None else False,
                 progress=progress.update,
             )
     except BaseException:
@@ -1076,6 +1080,22 @@ def _compilation_for(path: Path, module_name: str) -> CompilationResult:
         raise AssertionError("loaded compilation has no extension module")
     _register_owned_types(cached)
     return cached
+
+
+def _cargo_policy_metadata(compilation: CompilationResult) -> dict[str, object]:
+    inputs = compilation.build_inputs or {}
+    policy = inputs.get("cargo_policy")
+    if isinstance(policy, dict):
+        return {
+            "locked": bool(policy.get("locked", False)),
+            "offline": bool(policy.get("offline", False)),
+            "origin": "source",
+        }
+    return {
+        "locked": None,
+        "offline": None,
+        "origin": "prebuilt" if compilation.cache_status == "prebuilt" else "unknown",
+    }
 
 
 def _load_prebuilt_compilation(

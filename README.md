@@ -163,6 +163,7 @@ For bounded project discovery, a project may declare one or more regular package
 [tool.crabwalk]
 packages = ["src/my_package"]
 python-boundaries = "allow" # allow, warn, or deny
+source-locked = true # require Cargo --locked for decorator-driven source imports
 extra-files = ["native/schema.proto"]
 extra-env = ["MY_NATIVE_MODE"]
 wheel-include = ["templates/**/*.html"]

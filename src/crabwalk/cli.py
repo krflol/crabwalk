@@ -211,6 +211,12 @@ def _inspect(result: object, as_json: bool) -> None:
     print(f"fingerprint: {payload['fingerprint']}")
     cache = payload["cache"]
     print(f"cache: {cache['status']} ({cache['artifact']})")
+    cargo_policy = payload["cargo_policy"]
+    print(
+        "cargo policy: "
+        f"locked={str(cargo_policy['locked']).lower()}, "
+        f"offline={str(cargo_policy['offline']).lower()}"
+    )
     print(f"sources: {len(payload['source_files'])}")
     if payload["build_command"]:
         print(f"build command: {' '.join(payload['build_command'])}")

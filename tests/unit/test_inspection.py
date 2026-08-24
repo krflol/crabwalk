@@ -33,6 +33,7 @@ def boundary(name: rust.Str) -> rust.String:
     payload = compilation_inspection(result)
     assert payload["cache"]["status"] == "miss"  # type: ignore[index]
     assert payload["build_command"][0:2] == ["cargo", "build"]  # type: ignore[index]
+    assert payload["cargo_policy"] == {"locked": False, "offline": False}
     native, boundary = payload["functions"]  # type: ignore[misc]
     assert native["effects"] == [
         "NativeRust",

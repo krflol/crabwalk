@@ -109,11 +109,18 @@ packages = ["src/my_package"]
 extra-files = ["native/schema.proto", "native/templates"]
 extra-env = ["OPENSSL_DIR", "MY_NATIVE_MODE"]
 wheel-include = ["templates/**/*.html", "py.typed"]
+source-locked = true
 ```
 
 Paths are project-relative, must remain inside the configured project, and must
 exist. Environment values participate by SHA-256 only; raw values are not persisted
 to build-input inspection metadata.
+
+Decorator-driven source imports normally use the lock-maintaining Cargo policy,
+so they intentionally have a different fingerprint from a CLI build requested
+with `--locked`. Set `source-locked = true` to require locked source imports and
+reuse the corresponding complete fingerprint. `crabwalk inspect` and each compiled
+function's `__crabwalk__["cargo_policy"]` expose the effective locked/offline state.
 
 ## Building a user wheel
 

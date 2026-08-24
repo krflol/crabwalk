@@ -64,6 +64,34 @@ def bad(n: rust.u64) -> rust.u64:
     assert "List" in diagnostic.message
 
 
+def test_floor_division_diagnostic_points_to_expression_and_names_remedy(
+    tmp_path: Path,
+) -> None:
+    path = write_source(
+        tmp_path,
+        """\
+from crabwalk import rust
+
+@rust.fn
+def segments(duration: rust.u64, size: rust.u64) -> rust.u64:
+    return (duration + size - 1) // size
+""",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(path)
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB102"
+    assert diagnostic.span is not None
+    assert diagnostic.span.line == 5
+    assert diagnostic.span.column > 1
+    assert "FloorDiv" in diagnostic.message
+    assert diagnostic.help is not None
+    assert "Use '/' for Rust typed division" in diagnostic.help
+    assert "return (duration + size - 1) // size" in diagnostic.render()
+
+
 def test_requires_return_on_all_paths(tmp_path: Path) -> None:
     path = write_source(
         tmp_path,

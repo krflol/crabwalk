@@ -99,3 +99,30 @@ def test_config_declares_additional_cargo_file_and_environment_inputs(
     assert config.extra_files == (asset,)
     assert config.extra_env == ("APP_NATIVE_MODE",)
     assert config.wheel_include == ("templates/*.html",)
+
+
+def test_config_can_require_locked_decorator_source_builds(tmp_path: Path) -> None:
+    pyproject, _ = _project(tmp_path)
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8") + "source-locked = true\n",
+        encoding="utf-8",
+    )
+
+    config = discover_project_config(tmp_path)
+
+    assert config is not None
+    assert config.source_locked is True
+
+
+def test_config_rejects_non_boolean_source_locked_policy(tmp_path: Path) -> None:
+    pyproject, _ = _project(tmp_path)
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8") + 'source-locked = "yes"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        discover_project_config(tmp_path)
+
+    assert captured.value.diagnostics[0].code == "CRAB010"
+    assert "source-locked" in captured.value.diagnostics[0].message
