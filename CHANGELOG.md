@@ -4,6 +4,8 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-24
+
 ### Added
 
 - Sequential and Rayon iterators now share a semantic execution/item-mode model
@@ -35,8 +37,8 @@ All notable Crabwalk changes are recorded here.
 
 ### Changed
 
-- Post-release development builds now identify themselves as `1.0.2.dev0`,
-  keeping `main` distinct from the immutable 1.0.1 artifacts.
+- Development builds identified themselves as `1.0.2.dev0`, keeping the release
+  candidate distinct from the immutable 1.0.1 artifacts.
 - The typed quality boundary now includes the shared Python-wrapper namespace
   contract used by both frontend validation and runtime regression tests.
 - Opaque external crate calls now also carry `MayPanic` and conservatively keep
