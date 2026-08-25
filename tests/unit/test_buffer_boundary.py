@@ -54,9 +54,11 @@ def total(values: rust.Buffer[rust.f64]) -> rust.f64:
     assert codec.input_policy == InputPolicy.BUFFER
     assert codec.allocation == AllocationKind.BORROWED_BUFFER
     assert codec.ownership == OwnershipPolicy.SHARED_BORROW
-    assert "pyo3::buffer::PyBuffer<f64>" in generated.rust_source
+    assert "values: &Bound<'_, PyAny>" in generated.rust_source
+    assert "pyo3::buffer::PyUntypedBuffer::get(values)" in generated.rust_source
     assert "&'a [pyo3::buffer::ReadOnlyCell<T>]" in generated.rust_source
-    assert ".as_slice(" in generated.rust_source
+    assert ".item_count() == 0 { &[] } else" in generated.rust_source
+    assert ".as_typed::<f64>()?.as_slice(" in generated.rust_source
     assert ".readonly()" in generated.rust_source
     assert ".get(0usize)" in generated.rust_source
     assert ".detach(" not in generated.rust_source
@@ -80,13 +82,9 @@ def combined(
     generated = generate_project(analyze_path(source), "_crabwalk_buffer_atomic")
     rust_source = generated.rust_source
 
-    assert rust_source.index("samples.dimensions()") < rust_source.index(
-        "values.value.take()"
-    )
-    assert rust_source.index("samples.readonly()") < rust_source.index(
-        "values.value.take()"
-    )
-    assert rust_source.index("samples.is_c_contiguous()") < rust_source.index(
+    assert rust_source.index(".dimensions()") < rust_source.index("values.value.take()")
+    assert rust_source.index(".readonly()") < rust_source.index("values.value.take()")
+    assert rust_source.index(".is_c_contiguous()") < rust_source.index(
         "values.value.take()"
     )
 
@@ -119,7 +117,7 @@ def test_buffer_runtime_preflight_rejects_copy_or_aliasing_hazards() -> None:
 
 
 @pytest.mark.parametrize("element", sorted(BUFFER_ELEMENTS))
-def test_every_declared_buffer_element_generates_a_typed_pyo3_buffer(
+def test_every_declared_buffer_element_generates_a_typed_nonempty_check(
     tmp_path: Path,
     element: str,
 ) -> None:
@@ -136,7 +134,9 @@ def length(values: rust.Buffer[rust.{element}]) -> rust.usize:
 
     generated = generate_project(analyze_path(source), "_crabwalk_buffer_element")
 
-    assert f"pyo3::buffer::PyBuffer<{element}>" in generated.rust_source
+    assert "values: &Bound<'_, PyAny>" in generated.rust_source
+    assert f"std::mem::size_of::<{element}>()" in generated.rust_source
+    assert f".as_typed::<{element}>()?.as_slice(" in generated.rust_source
 
 
 @pytest.mark.parametrize(

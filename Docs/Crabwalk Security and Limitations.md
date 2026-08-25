@@ -144,6 +144,8 @@ index, dependency, and provenance policies.
 - `rust.Buffer[T]` is input-only and limited to read-only, one-dimensional,
   C-contiguous, native-endian primitive numeric storage. It retains the GIL and
   cannot be nested, retained, mutated, returned, or used directly with Rayon.
+  Zero-length exporters use a canonical empty Rust slice after format and shape
+  validation; pointer alignment remains mandatory for every non-empty buffer.
 - Owned/borrowed values cannot be returned or transferred through `async_call`.
 - Direct nested domain fields and enum payloads have fingerprint-bound Python
   constructors/getters and explicit deep-copy conversion. Container-wrapped nested

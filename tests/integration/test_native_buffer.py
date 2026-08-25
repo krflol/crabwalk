@@ -35,6 +35,46 @@ def byte_length(values: rust.Buffer[rust.u8]) -> rust.usize:
     return values.len()
 
 @rust.fn
+def i8_length(values: rust.Buffer[rust.i8]) -> rust.usize:
+    return values.len()
+
+@rust.fn
+def i16_length(values: rust.Buffer[rust.i16]) -> rust.usize:
+    return values.len()
+
+@rust.fn
+def i32_length(values: rust.Buffer[rust.i32]) -> rust.usize:
+    return values.len()
+
+@rust.fn
+def i64_length(values: rust.Buffer[rust.i64]) -> rust.usize:
+    return values.len()
+
+@rust.fn
+def u16_length(values: rust.Buffer[rust.u16]) -> rust.usize:
+    return values.len()
+
+@rust.fn
+def u32_length(values: rust.Buffer[rust.u32]) -> rust.usize:
+    return values.len()
+
+@rust.fn
+def u64_length(values: rust.Buffer[rust.u64]) -> rust.usize:
+    return values.len()
+
+@rust.fn
+def usize_length(values: rust.Buffer[rust.usize]) -> rust.usize:
+    return values.len()
+
+@rust.fn
+def f32_length(values: rust.Buffer[rust.f32]) -> rust.usize:
+    return values.len()
+
+@rust.fn
+def f64_length(values: rust.Buffer[rust.f64]) -> rust.usize:
+    return values.len()
+
+@rust.fn
 def consume_with_buffer(
     values: rust.Owned[rust.Vec[rust.u64]],
     durations: rust.Buffer[rust.f64],
@@ -50,6 +90,24 @@ print(json.dumps(track_plan.__crabwalk__["parameter_boundaries"]["durations"], s
 print(track_plan.__crabwalk__["gil_released"])
 print([str(value) for value in track_plan.__crabwalk__["effects"]])
 print(byte_length(b"crabwalk"))
+print((
+    i8_length(memoryview(array("b", ())).toreadonly()),
+    i16_length(memoryview(array("h", ())).toreadonly()),
+    i32_length(memoryview(array("i", ())).toreadonly()),
+    i64_length(memoryview(array("q", ())).toreadonly()),
+    byte_length(memoryview(array("B", ())).toreadonly()),
+    u16_length(memoryview(array("H", ())).toreadonly()),
+    u32_length(memoryview(array("I", ())).toreadonly()),
+    u64_length(memoryview(array("Q", ())).toreadonly()),
+    usize_length(memoryview(array("Q", ())).toreadonly()),
+    f32_length(memoryview(array("f", ())).toreadonly()),
+    f64_length(memoryview(array("d", ())).toreadonly()),
+))
+unaligned = memoryview(bytearray(9))[1:].cast("Q").toreadonly()
+try:
+    u64_length(unaligned)
+except BufferError as error:
+    print("insufficiently aligned" in str(error))
 owned = rust.Vec[rust.u64]([1, 2, 3])
 try:
     consume_with_buffer(owned, backing)
@@ -63,6 +121,9 @@ else:
     numpy_values = np.array([0.5, 1.0, 1.5], dtype=np.float64)
     numpy_values.flags.writeable = False
     print(track_plan(numpy_values))
+    numpy_empty = np.array([], dtype=np.float64)
+    numpy_empty.flags.writeable = False
+    print(track_plan(numpy_empty))
 """,
         encoding="utf-8",
     )
@@ -91,8 +152,11 @@ else:
     assert lines[3] == "False"
     assert "BorrowedBuffer" in lines[4]
     assert lines[5] == "8"
-    assert lines[6] == "True False [1, 2, 3]"
+    assert lines[6] == "(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)"
+    assert lines[7] == "True"
+    assert lines[8] == "True False [1, 2, 3]"
     if importlib.util.find_spec("numpy") is None:
-        assert lines[7] == "numpy-unavailable"
+        assert lines[9] == "numpy-unavailable"
     else:
-        assert lines[7] == "([0.0, 0.5, 1.5], 3.0)"
+        assert lines[9] == "([0.0, 0.5, 1.5], 3.0)"
+        assert lines[10] == "([], 0.0)"

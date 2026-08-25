@@ -28,7 +28,7 @@ from .emission import EmissionNames, Writer as _Writer
 from .rust_emission import write_native_function as _write_native_function
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
-CODEGEN_SCHEMA_VERSION = 38
+CODEGEN_SCHEMA_VERSION = 39
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
@@ -791,6 +791,14 @@ def _write_export_wrapper(
         if parameter.type_ref.ownership is not None
         or parameter.type_ref.underlying.rust_name == "Buffer"
     }
+    untyped_buffers = {
+        parameter.rust_name: emission_names.temporary(
+            f"untyped_buffer_{parameter.name}"
+        )
+        for parameter in function.parameters
+        if parameter.type_ref.ownership is None
+        and parameter.type_ref.rust_name == "Buffer"
+    }
     arguments = ", ".join(
         (
             extracted_arguments[parameter.rust_name]
@@ -819,13 +827,18 @@ def _write_export_wrapper(
     for parameter in function.parameters:
         _write_wrapper_ownership_preflight(writer, parameter)
     for parameter in function.parameters:
-        _write_wrapper_buffer_preflight(writer, parameter)
+        _write_wrapper_buffer_preflight(
+            writer,
+            parameter,
+            untyped_buffers.get(parameter.rust_name),
+        )
     for parameter in function.parameters:
         _write_wrapper_extraction(
             writer,
             parameter,
             extracted_arguments.get(parameter.rust_name),
             python_token,
+            untyped_buffers.get(parameter.rust_name),
         )
     if owned_return:
         native_call = f"__cw_native_{function.rust_symbol}({arguments})"
@@ -1520,8 +1533,7 @@ def _write_owned_vector_class(
 def _wrapper_parameter(parameter: ParameterIR) -> str:
     ownership = parameter.type_ref.ownership
     if ownership is None and parameter.type_ref.rust_name == "Buffer":
-        element = parameter.type_ref.arguments[0].render()
-        return f"{parameter.rust_name}: pyo3::buffer::PyBuffer<{element}>"
+        return f"{parameter.rust_name}: &Bound<'_, PyAny>"
     if ownership is None:
         return f"{parameter.rust_name}: {parameter.type_ref.render()}"
     vector = parameter.type_ref.underlying
@@ -1536,18 +1548,36 @@ def _write_wrapper_extraction(
     parameter: ParameterIR,
     extracted_name: str | None,
     python_token: str | None,
+    untyped_buffer_name: str | None,
 ) -> None:
     ownership = parameter.type_ref.ownership
     if ownership is None and parameter.type_ref.rust_name == "Buffer":
         assert extracted_name is not None
         assert python_token is not None
+        assert untyped_buffer_name is not None
         cells_name = f"{extracted_name}_cells"
         message_prefix = f"argument '{parameter.name}'"
+        element = parameter.type_ref.arguments[0].render()
         writer.line(
             (
-                f"let {cells_name} = {parameter.rust_name}.as_slice({python_token})"
+                "// A valid zero-length Python buffer may expose a null or "
+                "unaligned data pointer."
+            ),
+            parameter.span,
+            "buffer_boundary",
+        )
+        writer.line(
+            "// Use Rust's canonical aligned empty slice; non-empty buffers remain alignment-checked.",
+            parameter.span,
+            "buffer_boundary",
+        )
+        writer.line(
+            (
+                f"let {cells_name}: &[pyo3::buffer::ReadOnlyCell<{element}>] = "
+                f"if {untyped_buffer_name}.item_count() == 0 {{ &[] }} else {{ "
+                f"{untyped_buffer_name}.as_typed::<{element}>()?.as_slice({python_token})"
                 ".ok_or_else(|| pyo3::exceptions::PyBufferError::new_err("
-                f"{json.dumps(message_prefix + ' must be C-contiguous')}))?;"
+                f"{json.dumps(message_prefix + ' must be C-contiguous')}))? }};"
             ),
             parameter.span,
             "buffer_boundary",
@@ -1598,16 +1628,27 @@ def _write_wrapper_ownership_preflight(
 def _write_wrapper_buffer_preflight(
     writer: _Writer,
     parameter: ParameterIR,
+    untyped_buffer_name: str | None,
 ) -> None:
     if (
         parameter.type_ref.ownership is not None
         or parameter.type_ref.rust_name != "Buffer"
     ):
         return
+    assert untyped_buffer_name is not None
     message_prefix = f"argument '{parameter.name}'"
+    element = parameter.type_ref.arguments[0].render()
     writer.line(
         (
-            f"if {parameter.rust_name}.dimensions() != 1 {{ "
+            f"let {untyped_buffer_name} = "
+            f"pyo3::buffer::PyUntypedBuffer::get({parameter.rust_name})?;"
+        ),
+        parameter.span,
+        "buffer_preflight",
+    )
+    writer.line(
+        (
+            f"if {untyped_buffer_name}.dimensions() != 1 {{ "
             "return std::result::Result::Err("
             "pyo3::exceptions::PyBufferError::new_err("
             f"{json.dumps(message_prefix + ' must be one-dimensional')})); }}"
@@ -1617,7 +1658,7 @@ def _write_wrapper_buffer_preflight(
     )
     writer.line(
         (
-            f"if !{parameter.rust_name}.readonly() {{ "
+            f"if !{untyped_buffer_name}.readonly() {{ "
             "return std::result::Result::Err("
             "pyo3::exceptions::PyBufferError::new_err("
             f"{json.dumps(message_prefix + ' must be read-only')})); }}"
@@ -1627,10 +1668,22 @@ def _write_wrapper_buffer_preflight(
     )
     writer.line(
         (
-            f"if !{parameter.rust_name}.is_c_contiguous() {{ "
+            f"if !{untyped_buffer_name}.is_c_contiguous() {{ "
             "return std::result::Result::Err("
             "pyo3::exceptions::PyBufferError::new_err("
             f"{json.dumps(message_prefix + ' must be C-contiguous')})); }}"
+        ),
+        parameter.span,
+        "buffer_preflight",
+    )
+    writer.line(
+        (
+            f"if {untyped_buffer_name}.item_size() != std::mem::size_of::<{element}>() "
+            f"|| !<{element} as pyo3::buffer::Element>::is_compatible_format("
+            f"{untyped_buffer_name}.format()) {{ "
+            "return std::result::Result::Err("
+            "pyo3::exceptions::PyBufferError::new_err("
+            f"{json.dumps(message_prefix + ' has an incompatible element format')})); }}"
         ),
         parameter.span,
         "buffer_preflight",

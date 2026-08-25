@@ -33,7 +33,7 @@ xfail-only contract does not satisfy a maturity claim.
 | Sequential iterators | Compositional | owned/shared items; map/filter/filter_map/fold/reduce/collect and queries | Copy, String, &str, tuple, domain, one- and three-stage native pipelines<br>Contracts: `iterator.copy-inline`, `iterator.string-inline`, `iterator.string-split-local`, `iterator.opaque-shadow`, `iterator.borrowed-for-loop`, `iterator.borrowed-for-loop-native` | expression lambdas only; no retained iterator boundary |
 | Rayon iterators | Compositional | typed par_iter with borrowed items, adapters, collect, sum and reduce | u64, Vec<String>, and Vec<domain> multi-adapter native tests<br>Contracts: `rayon.string-split-local`, `rayon.domain-filter-map-collect`, `rayon.indexed-enumerate`, `rayon.indexed-zip`, `rayon.unindexed-order-rejected`, `rayon.explicit-find-semantics` | requires an explicit Rayon dependency; no arbitrary Rayon API reflection |
 | Structured native data | Compositional | recursive vectors, domain rows, nested domains, owned domain returns | Python mappings/handles through Vec<Row>, nested struct/enum round trips<br>Contracts: `structured.vector-domain-input`, `structured.nested-domain-roundtrip`, `structured.owned-domain-return` | allocating explicit input; direct recursive domain cycles are invalid Rust |
-| Read-only numeric buffer boundary | Bounded | call-scoped zero-copy input from one-dimensional, C-contiguous, native-endian Python buffers | native array/memoryview track-plan test and negative shape/format tests<br>Contracts: `buffer.readonly-numeric-native`, `buffer.invalid-input-rejected` | primitive numeric inputs only; GIL held; no writable, strided, retained, parallel, or output buffers |
+| Read-only numeric buffer boundary | Bounded | call-scoped zero-copy input from one-dimensional, C-contiguous, native-endian Python buffers | native array/memoryview track-plan test, zero-length exporters, and negative shape/format/alignment tests<br>Contracts: `buffer.readonly-numeric-native`, `buffer.invalid-input-rejected` | primitive numeric inputs only; GIL held; no writable, strided, retained, parallel, or output buffers |
 | String, HashMap, Option/Result | Compositional | parse-transform-group-iterate-return algebra with typed errors | native delimited parsing and structured filter-group-emit acceptance<br>Contracts: `collections.result-pattern-algebra`, `collections.hashmap-iteration`, `collections.hashmap-split-local`, `collections.hashable-map-return` | documented method table is finite, not the complete Rust standard library |
 | Typed crate adapters | Bounded | external types/functions, borrow signatures, closures, declared effects | real path-crate value and generic callback native test<br>Contracts: `crate.typed-value`, `crate.typed-callback` | no trait/builder manifest generation or automatic crate API discovery |
 | Traits, generics, operators | Bounded | generic helpers, shared no-argument traits, Add implementations | Rust Book and focused native conformance tests<br>Contracts: `traits.dynamic-dispatch`, `generics.concrete-export` | not a general Rust trait or operator declaration language |
@@ -102,7 +102,10 @@ print(total(memoryview(storage).toreadonly()))
 
 Supported elements are `i8/i16/i32/i64`, `u8/u16/u32/u64/usize`, and
 `f32/f64`. The exported value must implement Python's buffer protocol and expose
-the exact native format. Crabwalk holds the owner and the GIL for the complete
+the exact native format. Valid zero-length buffers are accepted even when their
+exporter has no aligned data pointer; Crabwalk substitutes Rust's canonical empty
+slice without exposing or dereferencing exporter storage. Non-empty storage still
+must be correctly aligned. Crabwalk holds the owner and the GIL for the complete
 call, exposes only copied element reads to generated Rust, and reports the boundary
 as `BorrowedBuffer` with `copies_elements=false`. Writable, strided,
 multidimensional, retained, nested, parallel, and output buffers are deliberately
