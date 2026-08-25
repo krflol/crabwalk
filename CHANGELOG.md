@@ -9,6 +9,13 @@ All notable Crabwalk changes are recorded here.
 - Post-release development builds identify themselves as `1.0.6.dev0`, keeping
   `main` distinct from the immutable 1.0.5 artifacts.
 
+### Fixed
+
+- Valid zero-length `rust.Buffer[T]` inputs no longer fail PyO3 pointer-alignment
+  validation. Generated wrappers validate the untyped buffer contract first and
+  use Rust's canonical empty slice when no elements exist, while preserving
+  alignment checks for every non-empty numeric buffer.
+
 ## [1.0.5] - 2026-08-25
 
 ### Added

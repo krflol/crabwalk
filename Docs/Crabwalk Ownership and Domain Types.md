@@ -79,7 +79,9 @@ the complete native call and reads through alias-aware cells; it does not cast t
 exporter to an immutable Rust slice and does not copy its elements. The GIL remains
 held, the view cannot escape the call, and `par_iter` is unavailable. Use
 `function.__crabwalk__["parameter_boundaries"]` or `crabwalk inspect` to verify
-the `BorrowedBuffer`/no-element-copy policy.
+the `BorrowedBuffer`/no-element-copy policy. Empty compatible exporters are valid:
+the wrapper represents them with Rust's canonical empty slice and never
+dereferences their data pointer.
 
 Creating an `array`, NumPy array, or other backing store may itself allocate. This
 boundary removes only the redundant Python-buffer-to-Rust-`Vec` construction. A
