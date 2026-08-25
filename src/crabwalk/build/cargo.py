@@ -18,6 +18,7 @@ class CargoOutcome:
     stdout: str
     stderr: str
     artifact: Path | None
+    artifact_fresh: bool | None = None
 
 
 class CargoBuildFailure(Exception):
@@ -159,7 +160,10 @@ class CargoBuilder:
                 process.stderr,
                 process.returncode,
             )
-        artifact = _find_artifact(messages, extension_name) if mode == "build" else None
+        artifact_event = (
+            _find_artifact_event(messages, extension_name) if mode == "build" else None
+        )
+        artifact = _artifact_path(artifact_event)
         if mode == "build" and artifact is None:
             raise CargoBuildFailure(
                 command,
@@ -168,7 +172,20 @@ class CargoBuilder:
                 "Cargo succeeded but did not report the generated cdylib artifact.",
                 process.returncode,
             )
-        return CargoOutcome(command, messages, process.stdout, process.stderr, artifact)
+        artifact_fresh = (
+            artifact_event.get("fresh")
+            if artifact_event is not None
+            and isinstance(artifact_event.get("fresh"), bool)
+            else None
+        )
+        return CargoOutcome(
+            command,
+            messages,
+            process.stdout,
+            process.stderr,
+            artifact,
+            artifact_fresh,
+        )
 
 
 def _parse_messages(output: str) -> list[dict[str, Any]]:
@@ -185,22 +202,30 @@ def _parse_messages(output: str) -> list[dict[str, Any]]:
     return messages
 
 
-def _find_artifact(
+def _find_artifact_event(
     messages: tuple[dict[str, Any], ...], extension_name: str
-) -> Path | None:
-    suffixes = {".dll", ".so", ".dylib"}
-    candidates: list[Path] = []
+) -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
     for event in messages:
         if event.get("reason") != "compiler-artifact":
             continue
         target = event.get("target")
         if not isinstance(target, dict) or target.get("name") != extension_name:
             continue
-        filenames = event.get("filenames")
-        if not isinstance(filenames, list):
-            continue
-        for filename in filenames:
-            path = Path(str(filename))
-            if path.suffix.lower() in suffixes:
-                candidates.append(path)
+        candidates.append(event)
+    return candidates[-1] if candidates else None
+
+
+def _artifact_path(event: dict[str, Any] | None) -> Path | None:
+    if event is None:
+        return None
+    suffixes = {".dll", ".so", ".dylib"}
+    candidates: list[Path] = []
+    filenames = event.get("filenames")
+    if not isinstance(filenames, list):
+        return None
+    for filename in filenames:
+        path = Path(str(filename))
+        if path.suffix.lower() in suffixes:
+            candidates.append(path)
     return candidates[-1] if candidates else None

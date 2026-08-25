@@ -9,6 +9,12 @@ All notable Crabwalk changes are recorded here.
 - Post-release development builds identify themselves as `1.0.5.dev0`, keeping
   `main` distinct from the immutable 1.0.4 artifacts.
 
+### Fixed
+
+- Verified cache entries remain authoritative when Cargo reports its target
+  artifact as fresh, avoiding false `CRAB306` failures from byte-different shared
+  Windows target copies while retaining the invariant for actual rebuilds.
+
 ## [1.0.4] - 2026-08-24
 
 ### Changed
