@@ -7,9 +7,9 @@ import struct as struct_module
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import cast
+from typing import Any, cast
 
-from crabwalk.compiler.abi import BoundaryPosition, boundary_shape
+from crabwalk.compiler.abi import BUFFER_ELEMENTS, BoundaryPosition, boundary_shape
 from crabwalk.compiler.ir import TypeRef
 
 
@@ -25,6 +25,7 @@ class InputPolicy(StrEnum):
     SEQUENCE = "Sequence"
     MAPPING = "Mapping"
     RUST_HANDLE = "RustHandle"
+    BUFFER = "Buffer"
     UNSUPPORTED = "Unsupported"
 
 
@@ -46,6 +47,7 @@ class AllocationKind(StrEnum):
     PYTHON_CONTAINER = "PythonContainer"
     NATIVE_CONTAINER = "NativeContainer"
     OWNED_HANDLE = "OwnedHandle"
+    BORROWED_BUFFER = "BorrowedBuffer"
 
 
 class OwnershipPolicy(StrEnum):
@@ -148,6 +150,17 @@ def boundary_codec(type_ref: TypeRef) -> BoundaryCodec:
             OutputPolicy.NONE,
             AllocationKind.NONE,
             OwnershipPolicy.COPY,
+        )
+    if type_ref.rust_name == "Buffer" and len(type_ref.arguments) == 1:
+        element = type_ref.arguments[0]
+        supported = element.rust_name in BUFFER_ELEMENTS and not element.arguments
+        return BoundaryCodec(
+            type_ref,
+            InputPolicy.BUFFER if supported else InputPolicy.UNSUPPORTED,
+            OutputPolicy.UNSUPPORTED,
+            AllocationKind.BORROWED_BUFFER,
+            OwnershipPolicy.SHARED_BORROW,
+            (boundary_codec(element),),
         )
     if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
         shape = boundary_shape(type_ref, position=BoundaryPosition.NESTED)
@@ -265,11 +278,90 @@ def validate_boundary_input(value: object, type_ref: TypeRef) -> object:
             converted_value = validate_boundary_input(item, value_codec.type_ref)
             converted_mapping[converted_key] = converted_value
         return converted_mapping
+    if codec.input_policy == InputPolicy.BUFFER:
+        _validate_readonly_buffer(value, codec.children[0].type_ref)
+        # Keep the original exporter/view intact.  The generated PyO3 wrapper
+        # acquires the authoritative buffer lease for the complete native call.
+        return value
     if codec.input_policy == InputPolicy.NONE:
         if value is not None:
             raise TypeError(f"expected None, found {type(value).__name__}")
         return None
     return validate_primitive(value, type_ref.rust_name)
+
+
+_BUFFER_ELEMENT_LAYOUT: dict[str, tuple[str, int]] = {
+    "i8": ("signed", 1),
+    "i16": ("signed", 2),
+    "i32": ("signed", 4),
+    "i64": ("signed", 8),
+    "u8": ("unsigned", 1),
+    "u16": ("unsigned", 2),
+    "u32": ("unsigned", 4),
+    "u64": ("unsigned", 8),
+    "usize": ("unsigned", struct_module.calcsize("P")),
+    "f32": ("float", 4),
+    "f64": ("float", 8),
+}
+_BUFFER_FORMAT_KINDS = {
+    "b": "signed",
+    "h": "signed",
+    "i": "signed",
+    "l": "signed",
+    "q": "signed",
+    "n": "signed",
+    "B": "unsigned",
+    "c": "unsigned",
+    "H": "unsigned",
+    "I": "unsigned",
+    "L": "unsigned",
+    "Q": "unsigned",
+    "N": "unsigned",
+    "f": "float",
+    "d": "float",
+}
+
+
+def _validate_readonly_buffer(value: object, element_type: TypeRef) -> None:
+    """Preflight the bounded buffer contract without copying any elements."""
+
+    try:
+        view = memoryview(cast(Any, value))
+    except TypeError as error:
+        raise TypeError(
+            "expected an object exporting the Python buffer protocol"
+        ) from error
+    try:
+        if view.ndim != 1:
+            raise ValueError(
+                f"expected a one-dimensional buffer, found {view.ndim} dimensions"
+            )
+        if not view.c_contiguous:
+            raise ValueError("expected a C-contiguous buffer")
+        if not view.readonly:
+            raise ValueError(
+                "expected a read-only buffer; use memoryview(value).toreadonly() "
+                "or mark the array non-writeable"
+            )
+        expected_kind, expected_size = _BUFFER_ELEMENT_LAYOUT[element_type.rust_name]
+        format_value = view.format or "B"
+        prefix = format_value[0] if format_value[:1] in "@=<>!" else ""
+        code = format_value[1:] if prefix else format_value
+        actual_kind = _BUFFER_FORMAT_KINDS.get(code)
+        if actual_kind != expected_kind or view.itemsize != expected_size:
+            raise TypeError(
+                f"buffer format {format_value!r} with item size {view.itemsize} "
+                f"is incompatible with {element_type.display()}"
+            )
+        if prefix in {"<", ">", "!"}:
+            import sys
+
+            expected_prefix = "<" if sys.byteorder == "little" else ">"
+            normalized_prefix = ">" if prefix == "!" else prefix
+            if normalized_prefix != expected_prefix:
+                raise TypeError(f"buffer format {format_value!r} is not native-endian")
+    finally:
+        view.release()
 
 
 def validate_primitive(value: object, rust_name: str) -> object:
@@ -318,7 +410,18 @@ def validate_primitive(value: object, rust_name: str) -> object:
 def normalize_boundary_output(value: object, type_ref: TypeRef) -> object:
     """Normalize PyO3 output to Crabwalk's documented Python representation."""
 
-    codec = boundary_codec(type_ref)
+    return _normalize_boundary_output(value, boundary_codec(type_ref))
+
+
+def _normalize_boundary_output(value: object, codec: BoundaryCodec) -> object:
+    """Normalize with one precomputed codec tree.
+
+    Recursive container outputs can contain hundreds of thousands of scalar
+    values. Rebuilding the same immutable child codec for every element made the
+    Python-side contract check dominate otherwise-small native kernels.
+    """
+
+    type_ref = codec.type_ref
     if codec.output_policy == OutputPolicy.UNSUPPORTED:
         raise TypeError(
             f"{type_ref.display()} has no lossless supported Python output representation"
@@ -326,18 +429,18 @@ def normalize_boundary_output(value: object, type_ref: TypeRef) -> object:
     if codec.output_policy == OutputPolicy.RESULT:
         # The generated ABI wrapper has already translated Err into
         # CrabwalkRustError, so only the successful child reaches Python.
-        return normalize_boundary_output(value, codec.children[0].type_ref)
+        return _normalize_boundary_output(value, codec.children[0])
     if codec.output_policy == OutputPolicy.NONE:
         return None
     if codec.output_policy == OutputPolicy.OPTION:
         if value is None:
             return None
-        return normalize_boundary_output(value, codec.children[0].type_ref)
+        return _normalize_boundary_output(value, codec.children[0])
     if codec.output_policy == OutputPolicy.TUPLE:
         if type(value) is not tuple or len(value) != len(codec.children):
             raise TypeError("native tuple output did not match its boundary codec")
         return tuple(
-            normalize_boundary_output(item, child.type_ref)
+            _normalize_boundary_output(item, child)
             for item, child in zip(value, codec.children)
         )
     if codec.output_policy == OutputPolicy.BYTES:
@@ -347,18 +450,22 @@ def normalize_boundary_output(value: object, type_ref: TypeRef) -> object:
     if codec.output_policy == OutputPolicy.LIST:
         if not isinstance(value, (list, tuple)):
             raise TypeError("native vector output did not produce a sequence")
-        return [
-            normalize_boundary_output(item, codec.children[0].type_ref)
-            for item in value
-        ]
+        child = codec.children[0]
+        if child.output_policy == OutputPolicy.SCALAR:
+            # PyO3 has already converted each value from one concrete Rust
+            # scalar type. Its Vec conversion also created the promised fresh
+            # Python list, so another element-by-element codec pass and list
+            # allocation would only duplicate trusted ABI work.
+            return value if type(value) is list else list(value)
+        return [_normalize_boundary_output(item, child) for item in value]
     if codec.output_policy == OutputPolicy.DICT:
         if not isinstance(value, Mapping):
             raise TypeError("native HashMap output did not produce a mapping")
         key_codec, value_codec = codec.children
         return {
-            normalize_boundary_output(
-                key, key_codec.type_ref
-            ): normalize_boundary_output(item, value_codec.type_ref)
+            _normalize_boundary_output(key, key_codec): _normalize_boundary_output(
+                item, value_codec
+            )
             for key, item in value.items()
         }
     if codec.output_policy == OutputPolicy.SCALAR:

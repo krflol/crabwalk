@@ -193,6 +193,7 @@ def direct_expression_effects(expression: ExpressionIR) -> frozenset[Effect]:
 EFFECT_ORDER = (
     Effect.NATIVE_RUST,
     Effect.CONVERSION_BOUNDARY,
+    Effect.BORROWED_BUFFER,
     Effect.OPAQUE_CRATE_CALL,
     Effect.PYTHON_RUNTIME,
     Effect.BLOCKING,
@@ -250,6 +251,11 @@ def direct_function_effects(function: FunctionIR) -> set[Effect]:
     effects = {Effect.NATIVE_RUST}
     if function.parameters or function.return_type != UNIT:
         effects.add(Effect.CONVERSION_BOUNDARY)
+    if any(
+        parameter.type_ref.underlying.rust_name == "Buffer"
+        for parameter in function.parameters
+    ):
+        effects.add(Effect.BORROWED_BUFFER)
     for statement in function.body:
         for expression in statement_expressions(statement):
             effects.update(direct_expression_effects(expression))

@@ -27,6 +27,13 @@ UTF-8 source
 
 `abi.py` owns the semantic question of which types may cross each supported
 boundary. `boundary.py` owns the matching Python input and output codec contract.
+The `Buffer[T]` codec is intentionally distinct from a container conversion: the
+ABI retains a PyO3 exporter lease and lowers an alias-aware read view, while the
+semantic type records the operations available inside the native call. It never
+pretends the anonymous Python-owned storage is a Rust `Vec<T>` or `&[T]`.
+The runtime builds each recursive output codec once. Scalar `Vec[T]` results reuse
+PyO3's newly allocated, statically typed Python list instead of revalidating and
+copying every element through a second Python loop.
 The build service fingerprints the IR schema, codegen schema, compiler input,
 dependency specification, lock, toolchain, environment, and declared extra inputs.
 

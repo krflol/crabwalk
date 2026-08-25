@@ -43,6 +43,9 @@ diagnostics without requiring a handwritten PyO3 project for every kernel.
   Rayon, `libm`, and other expressible Cargo APIs.
 - **Visible boundaries:** conversions, moves, shared borrows, mutable borrows,
   panic translation, and GIL behavior are explicit.
+- **Low-overhead numeric input:** `rust.Buffer[T]` can lease existing read-only,
+  contiguous `memoryview`, `array`, and compatible NumPy storage for one native
+  call without constructing a Rust-owned `Vec` or copying its elements.
 - **Less integration machinery:** Crabwalk generates Cargo and PyO3 projects,
   builds and caches extensions, and maps native errors back to Python source.
 - **An extraction path:** inspect generated Rust today and promote a mature kernel
@@ -88,7 +91,8 @@ precise wording for public claims.
 
 The current compiler surface includes:
 
-- checked Rust primitives, `String`, borrowed `Str`, `Vec`, `Option`, and `Result`;
+- checked Rust primitives, `String`, borrowed `Str`, read-only numeric `Buffer`,
+  `Vec`, `Option`, and `Result`;
 - locals, arithmetic, conditionals, loops, native calls, recursion, and semantic
   receiver/place capability checking;
 - one native extension per regular Python package, including imports/re-exports;
@@ -181,6 +185,7 @@ project copy, change into its root or pass an absolute source path beneath it.
 python examples/fibonacci/app.py
 python examples/core/app.py
 python examples/ownership/app.py
+python examples/buffer/app.py
 python examples/crates_regex/app.py
 python examples/parallel/app.py
 # From the examples directory:

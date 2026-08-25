@@ -14,6 +14,7 @@ from pathlib import Path
 FIXTURE = """\
 import json
 import time
+from array import array
 
 from crabwalk import rust
 
@@ -33,6 +34,21 @@ def sum_to(stop: rust.u64) -> rust.u64:
 @rust.fn
 def vector_len(values: rust.Ref[rust.Vec[rust.u64]]) -> rust.usize:
     return values.len()
+
+@rust.fn
+def buffer_len(values: rust.Buffer[rust.u64]) -> rust.usize:
+    return values.len()
+
+@rust.fn
+def buffer_track_plan(
+    durations: rust.Buffer[rust.f64],
+) -> rust.Tuple[rust.Vec[rust.f64], rust.f64]:
+    offsets: rust.Vec[rust.f64] = rust.Vec([])
+    elapsed: rust.f64 = 0.0
+    for duration in durations.iter():
+        offsets.push(elapsed)
+        elapsed += duration
+    return offsets, elapsed
 
 decorated = time.perf_counter()
 iterations = 20_000
@@ -56,8 +72,39 @@ roundtrip_started = time.perf_counter()
 roundtrip = rust.to_python(values)
 roundtrip_finished = time.perf_counter()
 
+buffer_storage = array("Q", range(100_000))
+buffer_view_started = time.perf_counter()
+buffer_view = memoryview(buffer_storage).toreadonly()
+buffer_view_finished = time.perf_counter()
+buffer_iterations = 2_000
+buffer_call_started = time.perf_counter()
+for _ in range(buffer_iterations):
+    buffer_length = buffer_len(buffer_view)
+buffer_call_finished = time.perf_counter()
+
+track_durations = array("d", [0.25 + (value % 7) * 0.125 for value in range(10_000)])
+track_view = memoryview(track_durations).toreadonly()
+track_rounds = 20
+
+track_native_started = time.perf_counter()
+for _ in range(track_rounds):
+    native_offsets, native_total = buffer_track_plan(track_view)
+track_native_finished = time.perf_counter()
+
+track_python_started = time.perf_counter()
+for _ in range(track_rounds):
+    python_offsets = []
+    python_total = 0.0
+    for duration in track_durations:
+        python_offsets.append(python_total)
+        python_total += duration
+track_python_finished = time.perf_counter()
+
 assert native_result == python_result
 assert roundtrip[-1] == 99_999
+assert buffer_length == 100_000
+assert native_offsets == python_offsets
+assert native_total == python_total
 print(json.dumps({
     "decorator_seconds": decorated - started,
     "call_nanoseconds": (call_finished - call_started) * 1e9 / iterations,
@@ -65,6 +112,16 @@ print(json.dumps({
     "python_work_seconds": python_finished - python_started,
     "vec_from_python_seconds": vector_finished - vector_started,
     "vec_to_python_seconds": roundtrip_finished - roundtrip_started,
+    "buffer_view_seconds": buffer_view_finished - buffer_view_started,
+    "buffer_call_nanoseconds": (
+        (buffer_call_finished - buffer_call_started) * 1e9 / buffer_iterations
+    ),
+    "track_plan_buffer_microseconds": (
+        (track_native_finished - track_native_started) * 1e6 / track_rounds
+    ),
+    "track_plan_python_microseconds": (
+        (track_python_finished - track_python_started) * 1e6 / track_rounds
+    ),
     "cache_hit": identity.__crabwalk__["cache_hit"],
 }))
 """

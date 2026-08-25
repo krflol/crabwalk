@@ -54,6 +54,7 @@ _PRIMITIVE_NAMES = frozenset(
 )
 _CONTAINER_ARITY: dict[str, int] = {
     "Arc": 1,
+    "Buffer": 1,
     "Box": 1,
     "Closure": 2,
     "Future": 1,
@@ -210,6 +211,8 @@ class TypeRef(metaclass=_TypeRefMeta):
             "TcpStream": "std::net::TcpStream",
             "ThreadPool": "__CwThreadPool",
         }
+        if self.rust_name == "Buffer":
+            return f"__CwBuffer<'_, {self.arguments[0].render()}>"
         if self.rust_name in concrete_paths:
             return concrete_paths[self.rust_name]
         standard_paths = {

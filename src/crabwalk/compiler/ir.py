@@ -28,6 +28,7 @@ class Effect(StrEnum):
 
     NATIVE_RUST = "NativeRust"
     CONVERSION_BOUNDARY = "ConversionBoundary"
+    BORROWED_BUFFER = "BorrowedBuffer"
     OPAQUE_CRATE_CALL = "OpaqueCrateCall"
     PYTHON_RUNTIME = "PythonRuntime"
     BLOCKING = "Blocking"

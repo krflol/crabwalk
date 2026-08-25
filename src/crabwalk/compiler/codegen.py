@@ -28,7 +28,7 @@ from .emission import EmissionNames, Writer as _Writer
 from .rust_emission import write_native_function as _write_native_function
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
-CODEGEN_SCHEMA_VERSION = 37
+CODEGEN_SCHEMA_VERSION = 38
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
@@ -86,6 +86,13 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
     writer.line()
     _write_panic_boundary(writer)
     writer.line()
+    if any(
+        parameter.type_ref.underlying.rust_name == "Buffer"
+        for function in ir.functions
+        for parameter in function.parameters
+    ):
+        _write_buffer_support(writer)
+        writer.line()
     _write_thread_pool(writer)
     writer.line()
 
@@ -766,8 +773,15 @@ def _write_export_wrapper(
         _wrapper_parameter(parameter) for parameter in function.parameters
     ]
     releases_gil = function_releases_gil(function)
-    python_token = emission_names.temporary("python_token") if releases_gil else None
-    if releases_gil:
+    has_buffer = any(
+        parameter.type_ref.underlying.rust_name == "Buffer"
+        for parameter in function.parameters
+    )
+    needs_python_token = releases_gil or has_buffer
+    python_token = (
+        emission_names.temporary("python_token") if needs_python_token else None
+    )
+    if needs_python_token:
         assert python_token is not None
         wrapper_parameters.insert(0, f"{python_token}: Python<'_>")
     parameters = ", ".join(wrapper_parameters)
@@ -775,11 +789,12 @@ def _write_export_wrapper(
         parameter.rust_name: emission_names.temporary(f"argument_{parameter.name}")
         for parameter in function.parameters
         if parameter.type_ref.ownership is not None
+        or parameter.type_ref.underlying.rust_name == "Buffer"
     }
     arguments = ", ".join(
         (
             extracted_arguments[parameter.rust_name]
-            if parameter.type_ref.ownership is not None
+            if parameter.rust_name in extracted_arguments
             else parameter.rust_name
         )
         for parameter in function.parameters
@@ -804,10 +819,13 @@ def _write_export_wrapper(
     for parameter in function.parameters:
         _write_wrapper_ownership_preflight(writer, parameter)
     for parameter in function.parameters:
+        _write_wrapper_buffer_preflight(writer, parameter)
+    for parameter in function.parameters:
         _write_wrapper_extraction(
             writer,
             parameter,
             extracted_arguments.get(parameter.rust_name),
+            python_token,
         )
     if owned_return:
         native_call = f"__cw_native_{function.rust_symbol}({arguments})"
@@ -884,6 +902,31 @@ def _write_native_exceptions(writer: _Writer) -> None:
             f"__crabwalk_module, {rust_name}, "
             f"{PYO3_CARGO_ALIAS}::exceptions::PyRuntimeError);"
         )
+
+
+def _write_buffer_support(writer: _Writer) -> None:
+    """Emit a safe, call-scoped view over PyO3's alias-aware buffer cells."""
+
+    writer.line("#[derive(Clone, Copy)]")
+    writer.line(
+        "struct __CwBuffer<'a, T: pyo3::buffer::Element> { "
+        "values: &'a [pyo3::buffer::ReadOnlyCell<T>] }"
+    )
+    writer.line("impl<'a, T: pyo3::buffer::Element> __CwBuffer<'a, T> {")
+    writer.enter()
+    writer.line(
+        "fn new(values: &'a [pyo3::buffer::ReadOnlyCell<T>]) -> Self { "
+        "Self { values } }"
+    )
+    writer.line("fn len(&self) -> usize { self.values.len() }")
+    writer.line("fn is_empty(&self) -> bool { self.values.is_empty() }")
+    writer.line("fn get(&self, index: usize) -> T { self.values[index].get() }")
+    writer.line(
+        "fn iter(&self) -> impl Iterator<Item = T> + '_ { "
+        "self.values.iter().map(pyo3::buffer::ReadOnlyCell::get) }"
+    )
+    writer.leave()
+    writer.line("}")
 
 
 def _native_move_error(parameter: str, message: str = "value was moved") -> str:
@@ -1292,6 +1335,7 @@ def function_releases_gil(function: FunctionIR) -> bool:
 
     effects = set(function.effects)
     if effects & {
+        Effect.BORROWED_BUFFER,
         Effect.OPAQUE_CRATE_CALL,
         Effect.PYTHON_RUNTIME,
         Effect.GLOBAL_MUTATION,
@@ -1475,6 +1519,9 @@ def _write_owned_vector_class(
 
 def _wrapper_parameter(parameter: ParameterIR) -> str:
     ownership = parameter.type_ref.ownership
+    if ownership is None and parameter.type_ref.rust_name == "Buffer":
+        element = parameter.type_ref.arguments[0].render()
+        return f"{parameter.rust_name}: pyo3::buffer::PyBuffer<{element}>"
     if ownership is None:
         return f"{parameter.rust_name}: {parameter.type_ref.render()}"
     vector = parameter.type_ref.underlying
@@ -1488,8 +1535,29 @@ def _write_wrapper_extraction(
     writer: _Writer,
     parameter: ParameterIR,
     extracted_name: str | None,
+    python_token: str | None,
 ) -> None:
     ownership = parameter.type_ref.ownership
+    if ownership is None and parameter.type_ref.rust_name == "Buffer":
+        assert extracted_name is not None
+        assert python_token is not None
+        cells_name = f"{extracted_name}_cells"
+        message_prefix = f"argument '{parameter.name}'"
+        writer.line(
+            (
+                f"let {cells_name} = {parameter.rust_name}.as_slice({python_token})"
+                ".ok_or_else(|| pyo3::exceptions::PyBufferError::new_err("
+                f"{json.dumps(message_prefix + ' must be C-contiguous')}))?;"
+            ),
+            parameter.span,
+            "buffer_boundary",
+        )
+        writer.line(
+            f"let {extracted_name} = __CwBuffer::new({cells_name});",
+            parameter.span,
+            "buffer_boundary",
+        )
+        return
     if ownership is None:
         assert extracted_name is None
         return
@@ -1524,4 +1592,46 @@ def _write_wrapper_ownership_preflight(
         ),
         parameter.span,
         "ownership_preflight",
+    )
+
+
+def _write_wrapper_buffer_preflight(
+    writer: _Writer,
+    parameter: ParameterIR,
+) -> None:
+    if (
+        parameter.type_ref.ownership is not None
+        or parameter.type_ref.rust_name != "Buffer"
+    ):
+        return
+    message_prefix = f"argument '{parameter.name}'"
+    writer.line(
+        (
+            f"if {parameter.rust_name}.dimensions() != 1 {{ "
+            "return std::result::Result::Err("
+            "pyo3::exceptions::PyBufferError::new_err("
+            f"{json.dumps(message_prefix + ' must be one-dimensional')})); }}"
+        ),
+        parameter.span,
+        "buffer_preflight",
+    )
+    writer.line(
+        (
+            f"if !{parameter.rust_name}.readonly() {{ "
+            "return std::result::Result::Err("
+            "pyo3::exceptions::PyBufferError::new_err("
+            f"{json.dumps(message_prefix + ' must be read-only')})); }}"
+        ),
+        parameter.span,
+        "buffer_preflight",
+    )
+    writer.line(
+        (
+            f"if !{parameter.rust_name}.is_c_contiguous() {{ "
+            "return std::result::Result::Err("
+            "pyo3::exceptions::PyBufferError::new_err("
+            f"{json.dumps(message_prefix + ' must be C-contiguous')})); }}"
+        ),
+        parameter.span,
+        "buffer_preflight",
     )

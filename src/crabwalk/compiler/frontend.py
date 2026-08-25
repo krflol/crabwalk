@@ -194,6 +194,7 @@ _PRIMITIVES.update(
 )
 _GENERIC_ARITY = {
     "Arc": 1,
+    "Buffer": 1,
     "Box": 1,
     "Mutex": 1,
     "Rc": 1,
@@ -363,7 +364,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     source_graph = single_file_source_graph(source_path)
     return assign_package_identities(
         PackageIR(
-            schema_version=22,
+            schema_version=23,
             module_name=identity,
             source_path=str(source_path),
             source_hash=source_graph.compiler_input_hash,
@@ -1009,7 +1010,7 @@ def _analyze_regular_package(
         source_paths.append(str(module.path))
     return assign_package_identities(
         PackageIR(
-            schema_version=22,
+            schema_version=23,
             module_name=package_name,
             source_path=str(package_root / "__init__.py"),
             source_hash=source_graph.compiler_input_hash,
@@ -2253,7 +2254,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     USIZE,
                     SourceSpan.from_ast(self.path, node.slice),
                 )
-            elif receiver_type.rust_name in {"Array", "Vec"}:
+            elif receiver_type.rust_name in {"Array", "Vec", "Buffer"}:
                 result_type = receiver_type.arguments[0]
                 index = self._lower_expression(node.slice, environment, USIZE)
             else:
@@ -3660,7 +3661,31 @@ class _FunctionLowerer(PatternLoweringMixin):
             )
 
         receiver_type = semantic_receiver
-        if receiver_type.rust_name == "Vec":
+        if receiver_type.rust_name == "Buffer":
+            element_type = receiver_type.arguments[0]
+            if method == "len" and not node.args:
+                arguments = ()
+                result = USIZE
+            elif method == "is_empty" and not node.args:
+                arguments = ()
+                result = BOOL
+            elif method == "iter" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    element_type,
+                    IteratorItemMode.OWNED,
+                )
+            else:
+                _unsupported(
+                    node,
+                    self.path,
+                    (
+                        f"Buffer.{method} is unsupported; read-only buffers expose "
+                        "len(), is_empty(), indexing, and copied iter()."
+                    ),
+                )
+        elif receiver_type.rust_name == "Vec":
             element_type = receiver_type.arguments[0]
             if method == "push" and len(node.args) == 1:
                 arguments = (
@@ -5311,6 +5336,25 @@ def _analyze_signature(
                 path,
                 argument.annotation or argument,
             )
+        elif (
+            parameter.type_ref.rust_name == "Buffer"
+            and not _python_parameter_boundary_supported(parameter.type_ref)
+        ):
+            _fail(
+                "CRAB228",
+                "Unsupported borrowed buffer element type",
+                (
+                    f"{parameter.type_ref.display()} is outside the read-only buffer "
+                    "boundary. Buffer elements must be flat PyO3-compatible numeric "
+                    "primitives."
+                ),
+                path,
+                argument.annotation or argument,
+                (
+                    "Use i8/i16/i32/i64, u8/u16/u32/u64/usize, f32, or f64. "
+                    "Buffers are top-level exported inputs only."
+                ),
+            )
         elif not _python_parameter_boundary_supported(parameter.type_ref):
             _fail(
                 "CRAB201",
@@ -5432,6 +5476,15 @@ def _analyze_signature(
             path,
             node.returns or node,
             "Return rust.String instead.",
+        )
+    if exported and return_type.underlying.rust_name == "Buffer":
+        _fail(
+            "CRAB228",
+            "Borrowed buffer return is unsupported",
+            "rust.Buffer[T] is a call-scoped Python input view and cannot be returned.",
+            path,
+            node.returns or node,
+            "Return a scalar, rust.Vec[T], or rust.Owned[rust.Vec[T]].",
         )
     if (
         exported

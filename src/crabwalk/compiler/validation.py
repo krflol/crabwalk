@@ -18,11 +18,13 @@ from .ir import (
     FunctionPointerTwiceIR,
     FunctionIR,
     MethodCallIR,
+    NameIR,
     PackageIR,
     PythonPrintIR,
     StringLiteralIR,
     TraitCallIR,
 )
+from .types import IteratorExecution, IteratorType
 from .naming import (
     PYO3_CARGO_ALIAS,
     cargo_dependency_key,
@@ -50,6 +52,30 @@ def validate_package_ir(ir: PackageIR) -> None:
             for expression in expressions
             if (closure := _worker_closure(expression)) is not None
         }
+        for expression in expressions:
+            closure = _worker_closure(expression)
+            closures = (() if closure is None else (closure,)) + _parallel_closures(
+                expression
+            )
+            for threaded_closure in closures:
+                buffer_offender = _buffer_capture_offender(threaded_closure)
+                if buffer_offender is None:
+                    continue
+                raise CrabwalkCompilationError(
+                    Diagnostic(
+                        "CRAB229",
+                        "Borrowed Python buffer cannot enter a native worker",
+                        (
+                            f"{function.qualified_name} captures a call-scoped "
+                            "rust.Buffer value in a thread or Rayon closure."
+                        ),
+                        buffer_offender.span,
+                        (
+                            "Read the buffer on the attached calling thread, or copy "
+                            "explicitly into a Rust-owned Vec before parallel work."
+                        ),
+                    )
+                )
         for expression in expressions:
             closure = _worker_closure(expression)
             if closure is None:
@@ -495,6 +521,7 @@ def _validate_emitted_identifiers(ir: PackageIR) -> None:
         "__cw_panic_message",
     }
     reserved_types = {
+        "__CwBuffer",
         "__CwThreadPool",
         "__CwWorker",
         "__CwNoopWake",
@@ -615,6 +642,31 @@ def _worker_closure(expression: object) -> ClosureIR | None:
     ):
         return expression.arguments[0]
     return None
+
+
+def _parallel_closures(expression: object) -> tuple[ClosureIR, ...]:
+    if not isinstance(expression, MethodCallIR):
+        return ()
+    iterator = expression.receiver.type_ref
+    if not isinstance(iterator, IteratorType) or (
+        iterator.execution != IteratorExecution.PARALLEL
+    ):
+        return ()
+    return tuple(
+        argument for argument in expression.arguments if isinstance(argument, ClosureIR)
+    )
+
+
+def _buffer_capture_offender(closure: ClosureIR) -> NameIR | None:
+    return next(
+        (
+            expression
+            for expression in _walk_ir(closure.body)
+            if isinstance(expression, NameIR)
+            and expression.type_ref.underlying.rust_name == "Buffer"
+        ),
+        None,
+    )
 
 
 def _python_runtime_offender(

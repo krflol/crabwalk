@@ -150,6 +150,24 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
+        "buffer-boundary",
+        "Read-only numeric buffer boundary",
+        Maturity.BOUNDED,
+        (
+            "call-scoped zero-copy input from one-dimensional, C-contiguous, "
+            "native-endian Python buffers"
+        ),
+        "native array/memoryview track-plan test and negative shape/format tests",
+        (
+            "primitive numeric inputs only; GIL held; no writable, strided, "
+            "retained, parallel, or output buffers"
+        ),
+        (
+            "buffer.readonly-numeric-native",
+            "buffer.invalid-input-rejected",
+        ),
+    ),
+    Capability(
         "collections",
         "String, HashMap, Option/Result",
         Maturity.COMPOSITIONAL,
