@@ -121,6 +121,11 @@ the project and contain `__init__.py`. A project-directory command resolves the
 package only when exactly one entry is configured; otherwise select a package or
 source file explicitly, optionally with `--project`.
 
+`--project` selects configuration and containment policy; it does not change the
+base directory of the positional source argument. Relative source paths resolve
+from the current working directory. When checking an out-of-tree project copy,
+change into that project root or pass an absolute source path beneath it.
+
 `source-locked = true` makes decorator-driven source imports compile with Cargo's
 locked policy. Without it, source imports use the normal lock-maintaining policy
 and intentionally do not reuse a CLI artifact built with `--locked`. Function

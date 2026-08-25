@@ -8,6 +8,16 @@ All notable Crabwalk changes are recorded here.
 
 - Post-release development builds identify themselves as `1.0.4.dev0`, keeping
   `main` distinct from the immutable 1.0.3 artifacts.
+- Prebuilt-wheel manifest schema 4 records effective Cargo policy and the complete
+  dependency-lock identity for installed-runtime provenance.
+
+### Fixed
+
+- Python-visible structs now construct Python tuples dynamically, removing PyO3's
+  nominal Rust tuple-arity limit and retaining struct/field source mappings.
+- Installed prebuilt functions preserve locked/offline Cargo policy with
+  `origin: "prebuilt"` and expose the dependency-lock hash instead of reporting
+  incomplete provenance.
 
 ## [1.0.3] - 2026-08-24
 

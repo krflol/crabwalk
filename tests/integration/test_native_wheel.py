@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -117,6 +118,9 @@ def test_installed_wheel_uses_embedded_extension_without_rust(
         assert "wheel_pkg/_crabwalk_prebuilt.json" in names
         assert any(name.startswith("wheel_pkg/_crabwalk_native/") for name in names)
         assert not any("/.crabwalk/" in name for name in names)
+        manifest = json.loads(archive.read("wheel_pkg/_crabwalk_prebuilt.json"))
+        assert manifest["cargo_policy"] == {"locked": False, "offline": False}
+        assert len(manifest["dependency_lock_hash"]) == 64
 
     runtime_dist = tmp_path / "runtime-dist"
     runtime_built = subprocess.run(
@@ -181,6 +185,7 @@ def test_installed_wheel_uses_embedded_extension_without_rust(
     run_environment = _without_rust_toolchain(os.environ.copy())
     run_environment.pop("PYTHONPATH", None)
     script = """\
+import json
 import pathlib
 import shutil
 from wheel_pkg import Point, contains_number, double
@@ -191,6 +196,8 @@ print(point.to_python())
 print(contains_number("room 7"), contains_number("none"))
 print(shutil.which("cargo"), shutil.which("rustc"))
 print(double.__crabwalk__["cache_hit"])
+print(json.dumps(double.__crabwalk__["cargo_policy"], sort_keys=True))
+print(double.__crabwalk__["dependency_lock_hash"])
 print(double.__crabwalk__["artifact"])
 print((pathlib.Path.cwd() / ".crabwalk").exists())
 """
@@ -212,10 +219,16 @@ print((pathlib.Path.cwd() / ".crabwalk").exists())
         "None None",
     ]
     assert output[4] == "True"
-    artifact = Path(output[5])
+    assert json.loads(output[5]) == {
+        "locked": False,
+        "offline": False,
+        "origin": "prebuilt",
+    }
+    assert output[6] == manifest["dependency_lock_hash"]
+    artifact = Path(output[7])
     assert artifact.is_file()
     assert artifact.parent.name == "_crabwalk_native"
-    assert output[6] == "False"
+    assert output[8] == "False"
     assert not (artifact.parent.parent / ".crabwalk").exists()
 
     installed_package = artifact.parent.parent

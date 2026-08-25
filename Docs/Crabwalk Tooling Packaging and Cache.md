@@ -139,7 +139,8 @@ ABI/platform. It:
    package data, while rejecting symlinks and common secret/private-key names;
 3. embeds the extension beneath `_crabwalk_native/`;
 4. embeds `_crabwalk_prebuilt.json` with source/artifact hashes, exact Crabwalk
-   version, and runtime ABI version;
+   version, runtime ABI version, effective Cargo locked/offline policy, and the
+   dependency-lock SHA-256;
 5. writes deterministic wheel metadata and a hashed `RECORD`;
 6. declares the exact `crabwalk-lang` runtime version as a dependency.
 
@@ -153,6 +154,11 @@ every shipped `.py`/`.pyi` file, then checks the manifest schema, runtime ABI,
 exact Crabwalk version, contained artifact path, binary hash, and extension name.
 Any mismatch raises `CRAB405`; it never silently invokes Cargo from an installed
 wheel.
+
+The installed function's `__crabwalk__["cargo_policy"]` retains those immutable
+build facts with `origin: "prebuilt"`, and
+`__crabwalk__["dependency_lock_hash"]` exposes the lock identity; locked wheels
+therefore remain auditable without Cargo or the original build directory.
 
 Wheels are interpreter-specific (`cpXY-cpXY-platform`), not `abi3`. Build one per
 supported CPython/platform combination. This is a focused mixed-wheel command

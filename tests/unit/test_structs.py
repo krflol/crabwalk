@@ -58,3 +58,19 @@ def test_structs_lower_to_real_rust_and_move_aware_wrapper(tmp_path: Path) -> No
     assert f"value: Option<{user.symbol}>" in generated.rust_source
     assert '#[getter("id")]' in generated.rust_source
     assert "fn get_id(&self)" in generated.rust_source
+    assert (
+        "fn to_python(&self, py: Python<'_>) -> "
+        "PyResult<Py<pyo3::types::PyTuple>>" in generated.rust_source
+    )
+    assert "Vec<Py<PyAny>> = vec![" in generated.rust_source
+    assert "pyo3::types::PyTuple::new(py," in generated.rust_source
+    assert ")?.unbind()" in generated.rust_source
+    assert any(
+        entry["kind"] == "struct_to_python" and entry["source"]["line"] == 4  # type: ignore[index]
+        for entry in generated.source_map["entries"]  # type: ignore[union-attr]
+    )
+    assert {
+        entry["source"]["line"]  # type: ignore[index]
+        for entry in generated.source_map["entries"]  # type: ignore[union-attr]
+        if entry["kind"] == "struct_field_to_python"
+    } == {5, 6}

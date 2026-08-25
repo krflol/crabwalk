@@ -120,3 +120,47 @@ def test_struct_derive_fields_serde_and_move_state_are_native(tmp_path: Path) ->
         "True True",
         "CrabwalkMoveError True",
     ]
+
+
+def test_wide_struct_converts_without_pyo3_tuple_arity_limit(tmp_path: Path) -> None:
+    package = tmp_path / "wide_pkg"
+    package.mkdir()
+    fields = "\n".join(f"    value_{index}: rust.String" for index in range(15))
+    arguments = ", ".join(f'value_{index}="{index}"' for index in range(15))
+    (package / "__init__.py").write_text(
+        f"""\
+from crabwalk import rust
+
+@rust.struct
+class WideRow:
+{fields}
+
+@rust.fn
+def first_length(row: rust.Ref[WideRow]) -> rust.usize:
+    return row.value_0.len()
+
+row = WideRow({arguments})
+print(first_length(row))
+print(row.to_python())
+""",
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join((str(root / "src"), str(tmp_path)))
+
+    result = subprocess.run(
+        [sys.executable, "-u", "-c", "import wide_pkg"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "1",
+        str({f"value_{index}": str(index) for index in range(15)}),
+    ]

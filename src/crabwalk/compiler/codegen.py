@@ -28,7 +28,7 @@ from .emission import EmissionNames, Writer as _Writer
 from .rust_emission import write_native_function as _write_native_function
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
-CODEGEN_SCHEMA_VERSION = 36
+CODEGEN_SCHEMA_VERSION = 37
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
@@ -66,7 +66,7 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
         cargo_key = cargo_dependency_key(dependency.package, dependency.binding)
         writer.line(f"extern crate {cargo_key} as {dependency.binding};")
     writer.line(f"use {PYO3_CARGO_ALIAS}::prelude::*;")
-    if any(_enum_has_heterogeneous_fields(value) for value in ir.enums):
+    if ir.structs or any(_enum_has_heterogeneous_fields(value) for value in ir.enums):
         writer.line(f"use {PYO3_CARGO_ALIAS}::IntoPyObjectExt;")
     for dependency in sorted(ir.crates, key=lambda value: value.binding):
         if dependency.package == "rayon":
@@ -699,44 +699,38 @@ def _write_owned_struct_class(
         writer.leave()
         writer.line("}")
     writer.line()
-    tuple_types = ", ".join(
-        (
-            f"Py<{domain_class(field)}>"
-            if domain_class(field) is not None
-            else field.type_ref.render()
-        )
-        for field in struct.fields
-    )
-    if len(struct.fields) == 1:
-        tuple_types += ","
-    python_parameter = (
-        ", py: Python<'_>"
-        if any(domain_class(field) for field in struct.fields)
-        else ""
-    )
     writer.line(
-        f"fn to_python(&self{python_parameter}) -> PyResult<({tuple_types})> {{"
+        "fn to_python(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyTuple>> {",
+        struct.span,
+        "struct_to_python",
     )
     writer.enter()
     to_python_names = EmissionNames.reserving("self", "py")
     stored_value = to_python_names.temporary("stored_value")
-    tuple_values = ", ".join(
-        (
-            f"Py::new(py, {domain_class(field)} {{ value: "
-            f"std::option::Option::Some({stored_value}.{field.rust_name}.clone()) }})?"
-            if domain_class(field) is not None
-            else f"{stored_value}.{field.rust_name}.clone()"
-        )
-        for field in struct.fields
-    )
-    if len(struct.fields) == 1:
-        tuple_values += ","
+    items = to_python_names.temporary("python_items")
     writer.line(f"let {stored_value} = self.value.as_ref().ok_or_else(|| {{")
     writer.enter()
     writer.line(_native_move_error(""))
     writer.leave()
     writer.line("})?;")
-    writer.line(f"std::result::Result::Ok(({tuple_values}))")
+    writer.line(f"let {items}: Vec<Py<PyAny>> = vec![")
+    writer.enter()
+    for field in struct.fields:
+        nested_class = domain_class(field)
+        if nested_class is not None:
+            converted = (
+                f"Py::new(py, {nested_class} {{ value: "
+                f"std::option::Option::Some("
+                f"{stored_value}.{field.rust_name}.clone()) }})?.into_any(),"
+            )
+        else:
+            converted = f"{stored_value}.{field.rust_name}.clone().into_py_any(py)?,"
+        writer.line(converted, field.span, "struct_field_to_python")
+    writer.leave()
+    writer.line("];")
+    writer.line(
+        f"std::result::Result::Ok(pyo3::types::PyTuple::new(py, {items})?.unbind())"
+    )
     writer.leave()
     writer.line("}")
     writer.line()
