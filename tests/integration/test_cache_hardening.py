@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 from crabwalk.build.cache import prune_artifact_cache
@@ -144,6 +145,37 @@ source-locked = true
         "cache_hit": True,
         "value": 42,
     }
+
+    distribution = tmp_path / "dist"
+    wheeled = subprocess.run(
+        [
+            *cli,
+            "wheel",
+            str(package),
+            "--output-dir",
+            str(distribution),
+            "--name",
+            "locked-demo",
+            "--version",
+            "1.0.0",
+            "--locked",
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    assert wheeled.returncode == 0, wheeled.stderr
+    wheel = Path(wheeled.stdout.strip())
+    with zipfile.ZipFile(wheel) as archive:
+        manifest = json.loads(archive.read("repro_pkg/_crabwalk_prebuilt.json"))
+    assert manifest["cargo_policy"] == {"locked": True, "offline": False}
+    assert (
+        manifest["dependency_lock_hash"]
+        == locked["build_inputs"]["dependency_lock_hash"]
+    )
 
 
 @capability_contract("cache.corruption-repair")

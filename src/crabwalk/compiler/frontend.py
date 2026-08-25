@@ -4925,10 +4925,14 @@ def _analyze_struct(
             _fail(
                 "CRAB159",
                 "Unsupported Python-visible struct field type",
-                "Struct fields support primitives, String, Vec/Option of supported "
-                "boundary values, and directly nested domain types.",
+                "Struct fields support primitives, String, Vec/Option whose leaves "
+                "are boundary primitives, and directly nested domain types. "
+                "Vec/Option of domain types are not supported.",
                 path,
                 child.annotation,
+                "Use a direct nested domain field, a top-level Vec[Domain] boundary, "
+                "or parallel primitive vectors with an application-validated length "
+                "invariant.",
             )
         fields.append(
             StructFieldIR(

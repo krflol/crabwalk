@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import NoReturn
 
 from crabwalk._version import (
+    PREBUILT_MANIFEST_SCHEMA_VERSION,
     RUNTIME_ABI_VERSION,
     RUNTIME_DISTRIBUTION,
     __version__,
@@ -218,8 +219,25 @@ def _prebuilt_manifest(
     artifact = compilation.artifact
     if artifact is None:
         raise AssertionError("wheel compilation has no artifact")
+    build_inputs = compilation.build_inputs or {}
+    cargo_policy = build_inputs.get("cargo_policy")
+    dependency_lock_hash = build_inputs.get("dependency_lock_hash")
+    if not (
+        isinstance(cargo_policy, dict)
+        and isinstance(cargo_policy.get("locked"), bool)
+        and isinstance(cargo_policy.get("offline"), bool)
+        and isinstance(dependency_lock_hash, str)
+        and len(dependency_lock_hash) == 64
+        and all(character in "0123456789abcdef" for character in dependency_lock_hash)
+    ):
+        _fail(
+            "CRAB508",
+            "Wheel build provenance is incomplete",
+            "The compilation result does not contain a Cargo policy and dependency-lock hash.",
+            "Build the wheel through Crabwalk's CompilationService.",
+        )
     value = {
-        "schema_version": 3,
+        "schema_version": PREBUILT_MANIFEST_SCHEMA_VERSION,
         "crabwalk_version": __version__,
         "runtime_abi_version": RUNTIME_ABI_VERSION,
         "module_name": compilation.ir.module_name,
@@ -230,6 +248,11 @@ def _prebuilt_manifest(
         "extension_name": compilation.extension_name,
         "artifact": str(artifact_relative),
         "artifact_sha256": sha256_file(artifact),
+        "cargo_policy": {
+            "locked": cargo_policy["locked"],
+            "offline": cargo_policy["offline"],
+        },
+        "dependency_lock_hash": dependency_lock_hash,
     }
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
 

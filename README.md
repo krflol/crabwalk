@@ -171,7 +171,9 @@ wheel-include = ["templates/**/*.html"]
 
 When exactly one package is configured, the project directory itself can be passed
 to build/inspection commands. `--project PYPROJECT_OR_DIRECTORY` selects an
-explicit configuration for a source path.
+explicit configuration for a source path. It does not rebase that positional source:
+relative source paths resolve from the current working directory. For an out-of-tree
+project copy, change into its root or pass an absolute source path beneath it.
 
 ## Examples
 

@@ -44,6 +44,13 @@ types/ranges before native construction. `Vec[u8]` is byte-oriented: constructio
 accepts a checked byte sequence and `to_python()` returns Python `bytes`. Other
 supported vectors return a newly allocated Python list.
 
+Construction is an explicit, allocating boundary proportional to the complete
+input shape; a native function's warm execution timing does not include that cost
+unless the application measures construction and the call together. For repeated
+read-only work, construct one `Ref`-compatible handle on its owner thread and reuse
+it when the application can define safe invalidation. Small or one-shot inputs may
+remain faster in ordinary Python even when the native kernel itself is faster.
+
 Owned wrapper identity belongs to a compiled module/fingerprint, not merely a Rust
 type spelling. When exactly one compatible wrapper is loaded, inferred construction
 may use it. If multiple compilations expose the same type, construction raises a
@@ -97,10 +104,13 @@ class User:
     name: rust.String
 ```
 
-Supported fields are primitives, `String`, and recursively supported `Vec` or
-`Option` values. `Str` fields and ownership annotations are rejected because the
-required retained lifetime cannot be expressed. A generated struct marker creates
-a Rust-backed object:
+Supported fields are primitives, `String`, recursively supported `Vec` or `Option`
+values whose leaves are boundary primitives, and directly nested domain values.
+Container-wrapped domain fields such as `Vec[Term]` and `Option[Term]` are not yet
+supported; use a direct nested domain, a top-level structured vector boundary, or
+parallel primitive vectors with an application-validated invariant. `Str` fields
+and ownership annotations are rejected because the required retained lifetime
+cannot be expressed. A generated struct marker creates a Rust-backed object:
 
 ```python
 user = User(id=42, name="Alice")

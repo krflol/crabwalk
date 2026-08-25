@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import tomllib
@@ -11,9 +12,14 @@ import pytest
 
 from crabwalk.compiler.frontend import analyze_project_path
 from crabwalk.diagnostics import CrabwalkCompilationError
-from crabwalk.runtime import _load_prebuilt_compilation
+from crabwalk.runtime import (
+    _cargo_policy_metadata,
+    _dependency_lock_hash_metadata,
+    _load_prebuilt_compilation,
+)
 from crabwalk.service import CompilationResult
 from crabwalk import RUNTIME_ABI_VERSION, RUNTIME_DISTRIBUTION, __version__
+from crabwalk._version import PREBUILT_MANIFEST_SCHEMA_VERSION
 from crabwalk.wheel import _package_entries, build_wheel
 
 
@@ -61,6 +67,10 @@ def double(value: rust.u64) -> rust.u64:
         cache_hit=False,
         module=None,
         command=("cargo", "build"),
+        build_inputs={
+            "cargo_policy": {"locked": False, "offline": False},
+            "dependency_lock_hash": "c" * 64,
+        },
     )
     service = _FakeService(compilation)
 
@@ -101,6 +111,9 @@ def double(value: rust.u64) -> rust.u64:
         assert manifest["extension_name"] == compilation.extension_name
         assert manifest["runtime_abi_version"] == RUNTIME_ABI_VERSION
         assert manifest["crabwalk_version"] == __version__
+        assert manifest["schema_version"] == PREBUILT_MANIFEST_SCHEMA_VERSION
+        assert manifest["cargo_policy"] == {"locked": False, "offline": False}
+        assert manifest["dependency_lock_hash"] == "c" * 64
 
         metadata = archive.read("sample_project-1.2.3.dist-info/METADATA").decode(
             "utf-8"
@@ -175,7 +188,7 @@ def value() -> rust.u64:
     (package / "_crabwalk_prebuilt.json").write_text(
         json.dumps(
             {
-                "schema_version": 3,
+                "schema_version": PREBUILT_MANIFEST_SCHEMA_VERSION,
                 "crabwalk_version": __version__,
                 "runtime_abi_version": RUNTIME_ABI_VERSION + 1,
                 "module_name": "abi_pkg",
@@ -185,6 +198,8 @@ def value() -> rust.u64:
                 "extension_name": "_crabwalk_abi",
                 "artifact": "_crabwalk_native/missing.pyd",
                 "artifact_sha256": "b" * 64,
+                "cargo_policy": {"locked": True, "offline": False},
+                "dependency_lock_hash": "c" * 64,
             }
         ),
         encoding="utf-8",
@@ -195,3 +210,61 @@ def value() -> rust.u64:
 
     assert captured.value.diagnostics[0].code == "CRAB405"
     assert "runtime ABI" in captured.value.diagnostics[0].message
+
+
+def test_prebuilt_manifest_restores_locked_cargo_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "locked_pkg"
+    native = package / "_crabwalk_native"
+    native.mkdir(parents=True)
+    source = package / "__init__.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def value() -> rust.u64:
+    return 1
+""",
+        encoding="utf-8",
+    )
+    artifact = native / "locked.pyd"
+    artifact.write_bytes(b"verified-native-placeholder")
+    ir = analyze_project_path(package, "locked_pkg")
+    lock_hash = "d" * 64
+    (package / "_crabwalk_prebuilt.json").write_text(
+        json.dumps(
+            {
+                "schema_version": PREBUILT_MANIFEST_SCHEMA_VERSION,
+                "crabwalk_version": __version__,
+                "runtime_abi_version": RUNTIME_ABI_VERSION,
+                "module_name": "locked_pkg",
+                "compiler_input_hash": ir.compiler_input_hash,
+                "wheel_source_integrity_hash": ir.wheel_source_integrity_hash,
+                "fingerprint": "a" * 64,
+                "extension_name": "_crabwalk_locked",
+                "artifact": "_crabwalk_native/locked.pyd",
+                "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "cargo_policy": {"locked": True, "offline": False},
+                "dependency_lock_hash": lock_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("crabwalk.runtime.load_extension", lambda *_args: object())
+
+    result = _load_prebuilt_compilation(source, "locked_pkg")
+
+    assert result is not None
+    assert result.build_inputs == {
+        "cargo_policy": {"locked": True, "offline": False},
+        "dependency_lock_hash": lock_hash,
+    }
+    assert _cargo_policy_metadata(result) == {
+        "locked": True,
+        "offline": False,
+        "origin": "prebuilt",
+    }
+    assert _dependency_lock_hash_metadata(result) == lock_hash

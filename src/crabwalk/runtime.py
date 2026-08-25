@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from crabwalk._version import RUNTIME_ABI_VERSION, __version__
+from crabwalk._version import (
+    PREBUILT_MANIFEST_SCHEMA_VERSION,
+    RUNTIME_ABI_VERSION,
+    __version__,
+)
 from crabwalk.boundary import (
     normalize_boundary_output,
     validate_boundary_input,
@@ -891,6 +895,7 @@ class RustFunction:
             "async_eligible": self._releases_gil,
             "effects": self._effects,
             "cargo_policy": _cargo_policy_metadata(self._compilation),
+            "dependency_lock_hash": _dependency_lock_hash_metadata(self._compilation),
         }
 
 
@@ -1089,13 +1094,21 @@ def _cargo_policy_metadata(compilation: CompilationResult) -> dict[str, object]:
         return {
             "locked": bool(policy.get("locked", False)),
             "offline": bool(policy.get("offline", False)),
-            "origin": "source",
+            "origin": (
+                "prebuilt" if compilation.cache_status == "prebuilt" else "source"
+            ),
         }
     return {
         "locked": None,
         "offline": None,
         "origin": "prebuilt" if compilation.cache_status == "prebuilt" else "unknown",
     }
+
+
+def _dependency_lock_hash_metadata(compilation: CompilationResult) -> str | None:
+    inputs = compilation.build_inputs or {}
+    value = inputs.get("dependency_lock_hash")
+    return value if isinstance(value, str) else None
 
 
 def _load_prebuilt_compilation(
@@ -1124,10 +1137,24 @@ def _load_prebuilt_compilation(
         "wheel_source_integrity_hash": str,
         "crabwalk_version": str,
         "runtime_abi_version": int,
+        "cargo_policy": dict,
+        "dependency_lock_hash": str,
     }
-    if manifest.get("schema_version") != 3 or any(
-        not isinstance(manifest.get(name), expected_type)
-        for name, expected_type in expected_fields.items()
+    cargo_policy = manifest.get("cargo_policy")
+    dependency_lock_hash = manifest.get("dependency_lock_hash")
+    if (
+        manifest.get("schema_version") != PREBUILT_MANIFEST_SCHEMA_VERSION
+        or any(
+            not isinstance(manifest.get(name), expected_type)
+            for name, expected_type in expected_fields.items()
+        )
+        or not isinstance(cargo_policy, dict)
+        or not isinstance(cargo_policy.get("locked"), bool)
+        or not isinstance(cargo_policy.get("offline"), bool)
+        or len(dependency_lock_hash) != 64
+        or any(
+            character not in "0123456789abcdef" for character in dependency_lock_hash
+        )
     ):
         _invalid_prebuilt(ir, "The embedded manifest has an unsupported schema.")
     if manifest["runtime_abi_version"] != RUNTIME_ABI_VERSION:
@@ -1192,6 +1219,13 @@ def _load_prebuilt_compilation(
         command=None,
         cache_status="prebuilt",
         cached_artifact=artifact,
+        build_inputs={
+            "cargo_policy": {
+                "locked": cargo_policy["locked"],
+                "offline": cargo_policy["offline"],
+            },
+            "dependency_lock_hash": dependency_lock_hash,
+        },
     )
 
 
