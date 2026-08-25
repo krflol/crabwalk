@@ -4,6 +4,8 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-08-25
+
 ### Added
 
 - `rust.Buffer[T]` provides a bounded, read-only, one-dimensional,
@@ -18,9 +20,6 @@ All notable Crabwalk changes are recorded here.
   instead of rebuilding the boundary codec and allocating another list once per
   element. This removes the prior Python-side output-normalization bottleneck
   from bulk numeric kernels.
-- Post-release development builds identify themselves as `1.0.5.dev0`, keeping
-  `main` distinct from the immutable 1.0.4 artifacts.
-
 ### Fixed
 
 - Verified cache entries remain authoritative when Cargo reports its target
