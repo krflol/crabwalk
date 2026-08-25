@@ -200,6 +200,15 @@ def _input_conversion(type_ref: TypeRef) -> dict[str, str]:
             "cost": "no deep copy",
             "detail": "exclusive borrow of a Rust-owned handle",
         }
+    if type_ref.rust_name == "Buffer":
+        return {
+            "kind": "call-scoped Python buffer borrow",
+            "cost": "constant-time lease; no element copy",
+            "detail": (
+                "read-only, one-dimensional, C-contiguous native-endian "
+                f"{type_ref.arguments[0].render()} buffer; GIL held"
+            ),
+        }
     if type_ref.is_integer:
         return {
             "kind": "checked conversion",

@@ -39,11 +39,13 @@ jobs:
       - name: Parse, format, and lint a generated Rust project
         shell: bash
         run: |
-          generated="$(crabwalk expand examples/the_rust_book/__init__.py)"
-          manifest="$(dirname "$(dirname "$generated")")/Cargo.toml"
-          cargo fmt --manifest-path "$manifest"
-          cargo fmt --manifest-path "$manifest" -- --check
-          cargo clippy --quiet --manifest-path "$manifest" --release -- -A warnings -D clippy::correctness
+          for source in examples/the_rust_book/__init__.py examples/buffer/app.py; do
+            generated="$(crabwalk expand "$source")"
+            manifest="$(dirname "$(dirname "$generated")")/Cargo.toml"
+            cargo fmt --manifest-path "$manifest"
+            cargo fmt --manifest-path "$manifest" -- --check
+            cargo clippy --quiet --manifest-path "$manifest" --release -- -A warnings -D clippy::correctness
+          done
 
   native-matrix:
     strategy:

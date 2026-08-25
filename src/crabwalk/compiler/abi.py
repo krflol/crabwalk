@@ -34,6 +34,25 @@ OWNED_VECTOR_ELEMENTS = frozenset(
     }
 )
 
+# PyO3's typed buffer API implements ``Element`` for these Crabwalk numeric
+# types.  Deliberately exclude i128/u128, bool, char, and domain/container
+# values: the first buffer milestone is a flat native-endian numeric view.
+BUFFER_ELEMENTS = frozenset(
+    {
+        "i8",
+        "i16",
+        "i32",
+        "i64",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "usize",
+        "f32",
+        "f64",
+    }
+)
+
 
 class BoundaryPosition(StrEnum):
     TOP_LEVEL = "top_level"
@@ -47,6 +66,7 @@ class PythonKind(StrEnum):
     TUPLE = "tuple"
     LIST = "list"
     BYTES = "bytes"
+    BUFFER = "buffer"
     DICT = "dict"
     CONTROL = "control"
     UNSUPPORTED = "unsupported"
@@ -95,6 +115,22 @@ def boundary_shape(
         return BoundaryShape(True, False, PythonKind.SCALAR, True, True, False)
     if type_ref.arguments == () and type_ref.rust_name == "Unit":
         return BoundaryShape(True, True, PythonKind.NONE, True, True, True)
+
+    if type_ref.rust_name == "Buffer" and len(type_ref.arguments) == 1:
+        element = type_ref.arguments[0]
+        supported = (
+            position == BoundaryPosition.TOP_LEVEL
+            and element.rust_name in BUFFER_ELEMENTS
+            and not element.arguments
+        )
+        return BoundaryShape(
+            supported,
+            False,
+            PythonKind.BUFFER if supported else PythonKind.UNSUPPORTED,
+            False,
+            supported,
+            False,
+        )
 
     if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
         child = boundary_shape(
@@ -248,17 +284,33 @@ def owned_vector_element_supported(
     return False
 
 
-def python_parameter_boundary_supported(type_ref: TypeRef) -> bool:
+def python_parameter_boundary_supported(
+    type_ref: TypeRef,
+    *,
+    position: BoundaryPosition = BoundaryPosition.TOP_LEVEL,
+) -> bool:
+    if type_ref.rust_name == "Buffer" and len(type_ref.arguments) == 1:
+        element = type_ref.arguments[0]
+        return (
+            position == BoundaryPosition.TOP_LEVEL
+            and element.rust_name in BUFFER_ELEMENTS
+            and not element.arguments
+        )
     if type_ref.rust_name in {*OWNED_VECTOR_ELEMENTS, "Str"}:
         return not type_ref.arguments
     if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
         child = type_ref.arguments[0]
         return _lossless_option_child(child) and python_parameter_boundary_supported(
-            child
+            child,
+            position=BoundaryPosition.NESTED,
         )
     if type_ref.rust_name == "Tuple" and type_ref.arguments:
         return all(
-            python_parameter_boundary_supported(value) for value in type_ref.arguments
+            python_parameter_boundary_supported(
+                value,
+                position=BoundaryPosition.NESTED,
+            )
+            for value in type_ref.arguments
         )
     return False
 

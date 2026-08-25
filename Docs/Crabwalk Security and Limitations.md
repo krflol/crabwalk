@@ -52,7 +52,16 @@ general raw-Rust or arbitrary-FFI escape hatch. PyO3 wrappers:
 - enforce Rust-backed move and borrow state before taking native references;
 - derive GIL policy from both ABI-safe primitive signatures and typed effects;
 - keep/reacquire the GIL for Python runtime, global mutation, unsafe-memory, and
-  unsafe-FFI effects.
+  unsafe-FFI effects;
+- keep the GIL and the exporter lease alive for every `BorrowedBuffer` call.
+
+`rust.Buffer[T]` never turns Python-owned storage into `&[T]`. The generated
+wrapper retains PyO3's `PyBuffer<T>` lease and exposes its
+`ReadOnlyCell<T>` elements through copied reads, preserving the fact that external
+aliases may exist. Runtime and generated preflights require a read-only,
+one-dimensional, C-contiguous, native-endian numeric exporter before any owned
+argument is moved. Buffer views cannot escape the call or enter spawned/Rayon
+closures.
 
 Typed effects propagate across ordinary calls, methods, traits, operators, and
 function-pointer targets. Pre-codegen placement validation rejects Python runtime
@@ -132,6 +141,9 @@ index, dependency, and provenance policies.
   general FFI declarations. Methods, generics, object-safe traits, focused Add/UFCS,
   and narrow unsafe intrinsics are supported as documented.
 - No implicit complex/container graph conversion.
+- `rust.Buffer[T]` is input-only and limited to read-only, one-dimensional,
+  C-contiguous, native-endian primitive numeric storage. It retains the GIL and
+  cannot be nested, retained, mutated, returned, or used directly with Rayon.
 - Owned/borrowed values cannot be returned or transferred through `async_call`.
 - Direct nested domain fields and enum payloads have fingerprint-bound Python
   constructors/getters and explicit deep-copy conversion. Container-wrapped nested

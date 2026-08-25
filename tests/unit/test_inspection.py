@@ -59,3 +59,38 @@ def boundary(name: rust.Str) -> rust.String:
     assert "// Python ABI wrapper" in shown
     assert f"fn __cw_native_{result.ir.functions[0].rust_symbol}" in shown
     assert f"fn {result.ir.functions[0].rust_symbol}" in shown
+
+
+def test_inspection_reports_zero_copy_buffer_lease(tmp_path: Path) -> None:
+    source = tmp_path / "inspect_buffer.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def total(values: rust.Buffer[rust.f64]) -> rust.f64:
+    return values.iter().sum()
+""",
+        encoding="utf-8",
+    )
+
+    payload = compilation_inspection(
+        default_service.compile_path(source, mode="expand")
+    )
+    function = payload["functions"][0]  # type: ignore[index]
+    conversion = function["parameters"][0]["conversion"]
+
+    assert function["effects"] == [
+        "NativeRust",
+        "ConversionBoundary",
+        "BorrowedBuffer",
+    ]
+    assert function["gil"] == "held for ABI conversion or borrowed input lifetime"
+    assert conversion == {
+        "kind": "call-scoped Python buffer borrow",
+        "cost": "constant-time lease; no element copy",
+        "detail": (
+            "read-only, one-dimensional, C-contiguous native-endian f64 buffer; "
+            "GIL held"
+        ),
+    }

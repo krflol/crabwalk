@@ -121,6 +121,7 @@ CRABWALK_BUILTIN_TYPE_NAMES = frozenset(
         "char",
         "String",
         "Str",
+        "Buffer",
         "Vec",
         "HashMap",
         "Box",

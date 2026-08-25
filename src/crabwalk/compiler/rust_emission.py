@@ -471,6 +471,11 @@ def _render_expression(
             expression.index, IntLiteralIR
         ):
             rendered = f"{receiver}.{expression.index.value}"
+        elif expression.receiver.type_ref.rust_name == "Buffer":
+            rendered = (
+                f"{receiver}.get("
+                f"{_render_expression(expression.index, boundary_names, emission_names)})"
+            )
         else:
             rendered = f"{receiver}[{_render_expression(expression.index, boundary_names, emission_names)}]"
         return rendered if _is_copy_type(expression.type_ref) else f"{rendered}.clone()"

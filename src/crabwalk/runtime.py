@@ -15,6 +15,8 @@ from crabwalk._version import (
     __version__,
 )
 from crabwalk.boundary import (
+    AllocationKind,
+    boundary_codec,
     normalize_boundary_output,
     validate_boundary_input,
     validate_primitive,
@@ -880,6 +882,10 @@ class RustFunction:
 
     @property
     def __crabwalk__(self) -> dict[str, object]:
+        parameter_boundaries = {
+            parameter.name: _boundary_metadata(parameter.type_ref)
+            for parameter in self._parameters
+        }
         return {
             "fingerprint": self._compilation.fingerprint,
             "extension_name": self._compilation.extension_name,
@@ -894,9 +900,26 @@ class RustFunction:
             "gil_released": self._releases_gil,
             "async_eligible": self._releases_gil,
             "effects": self._effects,
+            "parameter_boundaries": parameter_boundaries,
             "cargo_policy": _cargo_policy_metadata(self._compilation),
             "dependency_lock_hash": _dependency_lock_hash_metadata(self._compilation),
         }
+
+
+def _boundary_metadata(type_ref: TypeRef) -> dict[str, object]:
+    codec = boundary_codec(type_ref)
+    borrowed_buffer = codec.allocation == AllocationKind.BORROWED_BUFFER
+    return {
+        "rust_type": type_ref.display(),
+        "input_policy": codec.input_policy.value,
+        "allocation": codec.allocation.value,
+        "ownership": codec.ownership.value,
+        "borrowed": borrowed_buffer,
+        "copies_elements": not borrowed_buffer
+        and codec.allocation
+        in {AllocationKind.NATIVE_CONTAINER, AllocationKind.PYTHON_CONTAINER},
+        "lifetime": "native call" if borrowed_buffer else None,
+    }
 
 
 async def call_rust_async(

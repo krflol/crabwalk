@@ -4,8 +4,20 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- `rust.Buffer[T]` provides a bounded, read-only, one-dimensional,
+  C-contiguous, native-endian numeric input boundary for `memoryview`, `array`,
+  and compatible NumPy storage. Generated wrappers retain a PyO3 buffer lease and
+  read through alias-aware cells without constructing a Rust `Vec` or copying
+  elements; inspection and runtime metadata expose the borrow/copy policy.
+
 ### Changed
 
+- Scalar `Vec[T]` outputs reuse the fresh, typed Python list produced by PyO3
+  instead of rebuilding the boundary codec and allocating another list once per
+  element. This removes the prior Python-side output-normalization bottleneck
+  from bulk numeric kernels.
 - Post-release development builds identify themselves as `1.0.5.dev0`, keeping
   `main` distinct from the immutable 1.0.4 artifacts.
 

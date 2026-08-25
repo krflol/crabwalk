@@ -244,6 +244,7 @@ char = RustType("char")
 String = RustType("String")
 Str = RustType("Str")
 Vec = RustGeneric("Vec", 1)
+Buffer = RustGeneric("Buffer", 1)
 HashMap = RustGeneric("HashMap", 2)
 Box = RustGeneric("Box", 1)
 Rc = RustGeneric("Rc", 1)
@@ -668,6 +669,7 @@ __all__ = [
     "Array",
     "Arc",
     "Borrow",
+    "Buffer",
     "Box",
     "Clone",
     "Copy",

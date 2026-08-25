@@ -51,6 +51,41 @@ read-only work, construct one `Ref`-compatible handle on its owner thread and re
 it when the application can define safe invalidation. Small or one-shot inputs may
 remain faster in ordinary Python even when the native kernel itself is faster.
 
+## Borrowing existing numeric buffers
+
+When the application already owns compatible numeric buffer storage, a bounded
+`rust.Buffer[T]` parameter avoids the allocating `rust.from_python(..., Vec[T])`
+step:
+
+```python
+from array import array
+from crabwalk import rust
+
+@rust.fn
+def total(values: rust.Buffer[rust.f64]) -> rust.f64:
+    result: rust.f64 = 0.0
+    for value in values.iter():
+        result += value
+    return result
+
+durations = array("d", [1.25, 2.5, 3.75])
+view = memoryview(durations).toreadonly()
+print(total(view))
+```
+
+This is a read-only, one-dimensional, C-contiguous, native-endian, primitive
+numeric input boundary. The generated wrapper keeps PyO3's buffer lease alive for
+the complete native call and reads through alias-aware cells; it does not cast the
+exporter to an immutable Rust slice and does not copy its elements. The GIL remains
+held, the view cannot escape the call, and `par_iter` is unavailable. Use
+`function.__crabwalk__["parameter_boundaries"]` or `crabwalk inspect` to verify
+the `BorrowedBuffer`/no-element-copy policy.
+
+Creating an `array`, NumPy array, or other backing store may itself allocate. This
+boundary removes only the redundant Python-buffer-to-Rust-`Vec` construction. A
+small kernel that returns a large Python container can still be dominated by call
+and output conversion costs; benchmark the full production path.
+
 Owned wrapper identity belongs to a compiled module/fingerprint, not merely a Rust
 type spelling. When exactly one compatible wrapper is loaded, inferred construction
 may use it. If multiple compilations expose the same type, construction raises a

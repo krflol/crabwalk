@@ -33,6 +33,7 @@ xfail-only contract does not satisfy a maturity claim.
 | Sequential iterators | Compositional | owned/shared items; map/filter/filter_map/fold/reduce/collect and queries | Copy, String, &str, tuple, domain, one- and three-stage native pipelines<br>Contracts: `iterator.copy-inline`, `iterator.string-inline`, `iterator.string-split-local`, `iterator.opaque-shadow`, `iterator.borrowed-for-loop`, `iterator.borrowed-for-loop-native` | expression lambdas only; no retained iterator boundary |
 | Rayon iterators | Compositional | typed par_iter with borrowed items, adapters, collect, sum and reduce | u64, Vec<String>, and Vec<domain> multi-adapter native tests<br>Contracts: `rayon.string-split-local`, `rayon.domain-filter-map-collect`, `rayon.indexed-enumerate`, `rayon.indexed-zip`, `rayon.unindexed-order-rejected`, `rayon.explicit-find-semantics` | requires an explicit Rayon dependency; no arbitrary Rayon API reflection |
 | Structured native data | Compositional | recursive vectors, domain rows, nested domains, owned domain returns | Python mappings/handles through Vec<Row>, nested struct/enum round trips<br>Contracts: `structured.vector-domain-input`, `structured.nested-domain-roundtrip`, `structured.owned-domain-return` | allocating explicit input; direct recursive domain cycles are invalid Rust |
+| Read-only numeric buffer boundary | Bounded | call-scoped zero-copy input from one-dimensional, C-contiguous, native-endian Python buffers | native array/memoryview track-plan test and negative shape/format tests<br>Contracts: `buffer.readonly-numeric-native`, `buffer.invalid-input-rejected` | primitive numeric inputs only; GIL held; no writable, strided, retained, parallel, or output buffers |
 | String, HashMap, Option/Result | Compositional | parse-transform-group-iterate-return algebra with typed errors | native delimited parsing and structured filter-group-emit acceptance<br>Contracts: `collections.result-pattern-algebra`, `collections.hashmap-iteration`, `collections.hashmap-split-local`, `collections.hashable-map-return` | documented method table is finite, not the complete Rust standard library |
 | Typed crate adapters | Bounded | external types/functions, borrow signatures, closures, declared effects | real path-crate value and generic callback native test<br>Contracts: `crate.typed-value`, `crate.typed-callback` | no trait/builder manifest generation or automatic crate API discovery |
 | Traits, generics, operators | Bounded | generic helpers, shared no-argument traits, Add implementations | Rust Book and focused native conformance tests<br>Contracts: `traits.dynamic-dispatch`, `generics.concrete-export` | not a general Rust trait or operator declaration language |
@@ -67,6 +68,7 @@ xfail-only contract does not satisfy a maturity claim.
 | `rust.bool` | `bool` | exact Python `bool` only |
 | `rust.String` | `String` | allocating UTF-8 copy |
 | `rust.Str` | `&str` | call-scoped Python string borrow; cannot be returned |
+| `rust.Buffer[T]` | call-scoped alias-aware numeric view | top-level input only; borrows a read-only, one-dimensional, C-contiguous, native-endian Python buffer without copying elements |
 | `rust.Option[T]` | `Option<T>` | `None` or the supported conversion for `T`; `T` must not itself normalize to `None` |
 | `rust.Result[T, E]` | `Result<T, E>` | top-level exported return control type only; `Ok` converts `T`; `Err` raises `CrabwalkRustError` |
 | `rust.Tuple[T, ...]` | fixed Rust tuple | recursively checked Python tuple when every element is boundary-safe |
@@ -79,6 +81,34 @@ new Python list at the explicit output boundary, except `Vec[u8]`, which is the
 deliberate byte-oriented boundary and converts to Python `bytes`. The same rule
 applies to `rust.to_python()` and Python-visible domain fields or enum payloads.
 Generated domain parameters likewise require `Owned`, `Ref`, or `Mut`.
+
+`Buffer[T]` is the bounded alternative when compatible numeric storage already
+exists in Python and the function only needs to read it:
+
+```python
+from array import array
+from crabwalk import rust
+
+@rust.fn
+def total(values: rust.Buffer[rust.f64]) -> rust.f64:
+    result: rust.f64 = 0.0
+    for value in values.iter():
+        result += value
+    return result
+
+storage = array("d", [1.5, 2.0, 3.25])
+print(total(memoryview(storage).toreadonly()))
+```
+
+Supported elements are `i8/i16/i32/i64`, `u8/u16/u32/u64/usize`, and
+`f32/f64`. The exported value must implement Python's buffer protocol and expose
+the exact native format. Crabwalk holds the owner and the GIL for the complete
+call, exposes only copied element reads to generated Rust, and reports the boundary
+as `BorrowedBuffer` with `copies_elements=false`. Writable, strided,
+multidimensional, retained, nested, parallel, and output buffers are deliberately
+outside this milestone. A read-only view is constant-time; producing the backing
+array in the first place may still allocate and copy, so measure that application
+lifecycle separately.
 
 Boundary composition must be lossless. `Option[Option[T]]` and `Option[Unit]` are
 rejected because both `None` and `Some(None)`/`Some(())` would become Python
@@ -140,6 +170,7 @@ raised as `CrabwalkPanicError`; it never unwinds into Python.
 
 | Receiver | Methods |
 |---|---|
+| `Buffer[numeric T]` | read-only `len`, `is_empty`, indexing, and copied `iter`; top-level exported input only |
 | `Vec[T]` | `push`, `pop`, `len`, `is_empty`, `iter`, `iter_ref`; typed `par_iter` with declared Rayon; numeric teaching intrinsic `split_at_mut_sum` |
 | typed iterator | `map`, `filter`, `filter_map`, `copied`, `cloned`, `collect_vec`, `collect_map`, `sum`, `count`, `any`, `all`, sequential `find`, parallel `find_any`/`find_first`/`find_last`, `fold`, `reduce`, `enumerate`, `zip`; item ownership, execution, and Rayon indexed capability remain explicit |
 | `String`, `Str` | `len`, `is_empty`, `lines`, `as_str`, `to_lowercase`, `contains`, `starts_with`, `ends_with`, `push_str`, `replace`, `find`, `trim`, `trim_start`, `trim_end`, `split`, `split_once`, `split_whitespace`, `strip_prefix`, `strip_suffix`, `chars`, `bytes`, typed numeric `parse`, and `join` |

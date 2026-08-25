@@ -33,7 +33,7 @@ def test_vec_u8_has_one_deliberate_bytes_codec() -> None:
     assert normalize_boundary_output([0, 255], type_ref) == b"\x00\xff"
 
 
-def test_other_vectors_normalize_to_new_python_lists() -> None:
+def test_other_vectors_reuse_pyo3_lists_or_normalize_other_sequences() -> None:
     type_ref = TypeRef("Vec", (TypeRef("u64"),))
 
     codec = boundary_codec(type_ref)
@@ -43,6 +43,11 @@ def test_other_vectors_normalize_to_new_python_lists() -> None:
     converted = normalize_boundary_output(source, type_ref)
     assert converted == [1, 2, 3]
     assert converted is not source
+
+    # PyO3 already allocated and typed this list while converting Vec<u64>.
+    # The runtime does not duplicate that trusted native-boundary work.
+    native_list = [1, 2, 3]
+    assert normalize_boundary_output(native_list, type_ref) is native_list
 
 
 @pytest.mark.parametrize("value", [True, False])
