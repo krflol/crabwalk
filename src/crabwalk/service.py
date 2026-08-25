@@ -359,6 +359,7 @@ class CompilationService:
                         outcome.artifact,
                         cache,
                         cache_hit=cache_hit,
+                        cargo_artifact_fresh=outcome.artifact_fresh,
                         state_root=state_root,
                         fingerprint=fingerprint,
                         extension_name=extension_name,
@@ -429,6 +430,7 @@ def _publish_cargo_artifact(
     cache: ArtifactCacheInfo,
     *,
     cache_hit: bool,
+    cargo_artifact_fresh: bool | None,
     state_root: Path,
     fingerprint: str,
     extension_name: str,
@@ -442,21 +444,29 @@ def _publish_cargo_artifact(
     outcome_hash = sha256_file(outcome_artifact)
     current_hash = sha256_file(artifact) if artifact.is_file() else None
     if cache_hit and current_hash != outcome_hash:
-        raise CrabwalkCompilationError(
-            Diagnostic(
-                "CRAB306",
-                "Cargo output changed outside the fingerprint model",
-                (
-                    "Cargo produced different native bytes while all declared "
-                    "Crabwalk build inputs were unchanged."
-                ),
-                _primary_span(ir),
-                (
-                    "Declare build-script inputs with [tool.crabwalk] "
-                    "extra-files/extra-env, then rebuild."
-                ),
+        if cargo_artifact_fresh is True:
+            # Cargo did not rebuild this unit. A shared target directory may
+            # contain a byte-different copy (notably after another MSVC link),
+            # but the Crabwalk entry was independently verified against its
+            # manifest. Keep the verified entry authoritative.
+            assert current_hash is not None
+            outcome_hash = current_hash
+        else:
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB306",
+                    "Cargo output changed outside the fingerprint model",
+                    (
+                        "Cargo rebuilt different native bytes while all declared "
+                        "Crabwalk build inputs were unchanged."
+                    ),
+                    _primary_span(ir),
+                    (
+                        "Declare build-script inputs with [tool.crabwalk] "
+                        "extra-files/extra-env, then rebuild."
+                    ),
+                )
             )
-        )
     if current_hash != outcome_hash:
         if cache_load_lease_active(state_root, fingerprint):
             raise CrabwalkCompilationError(

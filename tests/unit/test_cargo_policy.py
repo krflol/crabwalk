@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import os
 import time
@@ -12,6 +13,40 @@ from crabwalk.build.cargo import CargoBuilder, CargoOutcome
 from crabwalk.build.cache import prune_artifact_cache
 from crabwalk.diagnostics import CrabwalkCompilationError
 from crabwalk.service import CompilationService
+
+
+def test_cargo_builder_records_the_reported_artifact_freshness(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    artifact = tmp_path / "fresh.dll"
+    artifact.write_bytes(b"native")
+    message = json.dumps(
+        {
+            "reason": "compiler-artifact",
+            "target": {"name": "_crabwalk_test"},
+            "filenames": [str(artifact)],
+            "fresh": True,
+        }
+    )
+
+    def fake_run(
+        command: tuple[str, ...],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 0, message, "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)  # type: ignore[attr-defined]
+
+    outcome = CargoBuilder().run(
+        tmp_path,
+        tmp_path / "target",
+        "_crabwalk_test",
+        "build",
+    )
+
+    assert outcome.artifact == artifact
+    assert outcome.artifact_fresh is True
 
 
 def test_cargo_builder_overrides_abort_profile_for_panic_boundary(
@@ -425,4 +460,60 @@ def identity(value: rust.u64) -> rust.u64:
         service.compile_path(source)
 
     assert captured.value.diagnostics[0].code == "CRAB306"
+    assert cargo.run_count == 2
+
+
+class _FreshChangingArtifactCargo(_ChangingArtifactCargo):
+    def run(
+        self,
+        project_dir: Path,
+        target_dir: Path,
+        extension_name: str,
+        mode: str,
+        *,
+        locked: bool = False,
+        offline: bool = False,
+    ) -> CargoOutcome:
+        outcome = super().run(
+            project_dir,
+            target_dir,
+            extension_name,
+            mode,
+            locked=locked,
+            offline=offline,
+        )
+        return CargoOutcome(
+            outcome.command,
+            outcome.messages,
+            outcome.stdout,
+            outcome.stderr,
+            outcome.artifact,
+            artifact_fresh=True,
+        )
+
+
+def test_verified_cache_wins_when_cargo_reports_a_fresh_target_copy(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "fresh_target.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def identity(value: rust.u64) -> rust.u64:
+    return value
+""",
+        encoding="utf-8",
+    )
+    cargo = _FreshChangingArtifactCargo()
+    service = CompilationService(cargo)
+
+    first = service.compile_path(source)
+    second = service.compile_path(source)
+
+    assert first.artifact is not None
+    assert second.artifact == first.artifact
+    assert second.cache_hit is True
+    assert first.artifact.read_bytes() == b"native-1"
     assert cargo.run_count == 2

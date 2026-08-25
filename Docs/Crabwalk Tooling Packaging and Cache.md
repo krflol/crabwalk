@@ -69,10 +69,12 @@ Every external artifact hit still invokes Cargo, allowing its dependency,
 build-script, and incremental rules to validate inputs. Crabwalk's
 cache identity remains content-addressed over the documented/default inputs plus
 explicit `extra-files` and `extra-env`; arbitrary undeclared build-script inputs are
-outside that contract. If Cargo produces different native bytes under an unchanged
-fingerprint, Crabwalk raises `CRAB306` instead of silently changing a
-content-addressed entry. If a corrupt entry needs replacement while another process
-has it mapped, `CRAB307` defers recovery until that process exits.
+outside that contract. On a verified cache hit, a Cargo artifact explicitly reported
+as fresh does not replace the independently verified cache entry. If Cargo actually
+rebuilds and produces different native bytes under an unchanged fingerprint,
+Crabwalk raises `CRAB306` instead of silently changing a content-addressed entry. If
+a corrupt entry needs replacement while another process has it mapped, `CRAB307`
+defers recovery until that process exits.
 
 ## Cache cleanup
 
