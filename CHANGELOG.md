@@ -4,10 +4,10 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-08-24
+
 ### Changed
 
-- Post-release development builds identify themselves as `1.0.4.dev0`, keeping
-  `main` distinct from the immutable 1.0.3 artifacts.
 - Prebuilt-wheel manifest schema 4 records effective Cargo policy and the complete
   dependency-lock identity for installed-runtime provenance.
 
