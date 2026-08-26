@@ -24,6 +24,12 @@ All notable Crabwalk changes are recorded here.
   validation. Generated wrappers validate the untyped buffer contract first and
   use Rust's canonical empty slice when no elements exist, while preserving
   alignment checks for every non-empty numeric buffer.
+- Independently generated modules now receive distinct Cargo package identities,
+  preventing shared-target unit collisions and spurious `CRAB306` byte-change
+  failures observed on Windows when modules were loaded in opposite orders.
+- Feature branches now run the pull-request matrix once instead of launching an
+  identical branch-push matrix whose duplicate check could block a green PR; direct
+  `main` pushes and reusable release calls remain covered.
 
 ## [1.0.5] - 2026-08-25
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,11 +12,16 @@ from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key
 PYO3_VERSION = "0.29.2"
 
 
-def render_cargo_toml(ir: PackageIR, extension_name: str) -> str:
+def render_cargo_toml(
+    ir: PackageIR,
+    extension_name: str,
+    cargo_package_identity: str | None = None,
+) -> str:
     dependencies = _cargo_dependencies(ir)
+    package_name = _generated_package_name(cargo_package_identity or ir.module_name)
     return (
         "[package]\n"
-        'name = "crabwalk-generated-module"\n'
+        f'name = "{package_name}"\n'
         'version = "0.0.0"\n'
         'edition = "2024"\n'
         "publish = false\n\n"
@@ -32,6 +38,23 @@ def render_cargo_toml(ir: PackageIR, extension_name: str) -> str:
         "overflow-checks = true\n"
         'panic = "unwind"\n'
     )
+
+
+def _generated_package_name(compilation_unit: str) -> str:
+    """Give every generated workspace a distinct Cargo package identity.
+
+    Multiple standalone Crabwalk modules can intentionally share one project
+    target directory. Cargo keys build-script and unit state partly by package
+    identity, so a constant package name allowed one module to spuriously relink
+    another on MSVC. The project-relative compilation-unit path is stable across
+    dependency-lock bootstrap, fingerprint replanning, and normal builds while
+    distinguishing unrelated single-file modules that are both named ``app``.
+    Hashing it keeps the local package name short and Cargo-safe without creating
+    a lock/fingerprint cycle.
+    """
+
+    digest = hashlib.sha256(compilation_unit.encode("utf-8")).hexdigest()[:24]
+    return f"crabwalk-generated-{digest}"
 
 
 def render_build_rs(extension_name: str) -> str:

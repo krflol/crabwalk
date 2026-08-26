@@ -193,6 +193,7 @@ class CompilationService:
             else _find_project_root(canonical_source_path)
         )
         dependency_lock = _dependency_lock_path(root, canonical_source_path)
+        cargo_package_identity = _cargo_package_identity(root, canonical_source_path)
         state_root = root / ".crabwalk"
         if locked and not dependency_lock.is_file():
             raise CrabwalkCompilationError(
@@ -211,6 +212,7 @@ class CompilationService:
                 dependency_lock,
                 state_root,
                 offline=offline,
+                cargo_package_identity=cargo_package_identity,
             )
         dependency_lock_hash = (
             sha256_file(dependency_lock) if dependency_lock.is_file() else None
@@ -228,7 +230,11 @@ class CompilationService:
             extra_env=config.extra_env if config is not None else (),
         )
         extension_name = _extension_name(ir.module_name, fingerprint)
-        generated = generate_project(ir, extension_name)
+        generated = generate_project(
+            ir,
+            extension_name,
+            cargo_package_identity=cargo_package_identity,
+        )
         generated_dir = (
             state_root / "generated" / _safe_component(ir.module_name) / fingerprint
         )
@@ -402,6 +408,7 @@ class CompilationService:
         state_root: Path,
         *,
         offline: bool,
+        cargo_package_identity: str,
     ) -> None:
         manifest_key = _dependency_manifest_key(ir)
         bootstrap_dir = (
@@ -414,7 +421,11 @@ class CompilationService:
         with FileLock(lock_path):
             if destination.is_file():
                 return
-            generated = generate_project(ir, "_crabwalk_lock_bootstrap")
+            generated = generate_project(
+                ir,
+                "_crabwalk_lock_bootstrap",
+                cargo_package_identity=cargo_package_identity,
+            )
             write_text(bootstrap_dir / "Cargo.toml", generated.cargo_toml)
             write_text(bootstrap_dir / "build.rs", generated.build_rs)
             write_text(bootstrap_dir / "src" / "lib.rs", generated.rust_source)
@@ -560,6 +571,16 @@ def _dependency_lock_path(root: Path, source_path: Path) -> Path:
     except ValueError:
         relative = Path(source_path.name)
     return root / "crabwalk-locks" / relative.parent / f"{relative.stem}.Cargo.lock"
+
+
+def _cargo_package_identity(root: Path, source_path: Path) -> str:
+    """Return one checkout-independent identity for a generated Cargo package."""
+
+    try:
+        relative = source_path.relative_to(root)
+    except ValueError:
+        relative = Path(source_path.name)
+    return relative.as_posix()
 
 
 def _dependency_unit_lock(state_root: Path, dependency_lock: Path) -> Path:

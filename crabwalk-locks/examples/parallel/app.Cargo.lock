@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "crabwalk-generated-module"
+name = "crabwalk-generated-0c3df68ea7301f9358b8db13"
 version = "0.0.0"
 dependencies = [
  "pyo3",

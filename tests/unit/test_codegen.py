@@ -10,9 +10,18 @@ from .test_frontend import FIBONACCI, write_source
 def test_codegen_is_deterministic_and_native_recursion_is_direct(
     tmp_path: Path,
 ) -> None:
-    ir = analyze_path(write_source(tmp_path, FIBONACCI), "demo")
-    first = generate_project(ir, "_crabwalk_demo_abc")
-    second = generate_project(ir, "_crabwalk_demo_abc")
+    source = write_source(tmp_path, FIBONACCI)
+    ir = analyze_path(source, "demo")
+    first = generate_project(
+        ir,
+        "_crabwalk_demo_abc",
+        cargo_package_identity="src/demo.py",
+    )
+    second = generate_project(
+        ir,
+        "_crabwalk_demo_abc",
+        cargo_package_identity="src/demo.py",
+    )
 
     assert first == second
     symbol = ir.functions[0].rust_symbol
@@ -20,6 +29,29 @@ def test_codegen_is_deterministic_and_native_recursion_is_direct(
     assert f"__cw_native_{symbol}((n - 1u64))" in first.rust_source
     assert "#[pyfunction]" in first.rust_source
     assert '#[pymodule(name = "_crabwalk_demo_abc")]' in first.rust_source
+    package_name = re.search(r'^name = "([^"]+)"$', first.cargo_toml, re.MULTILINE)
+    assert package_name is not None
+    assert re.fullmatch(r"crabwalk-generated-[0-9a-f]{24}", package_name.group(1))
+    same_module = generate_project(
+        ir,
+        "_crabwalk_demo_def",
+        cargo_package_identity="src/demo.py",
+    )
+    same_package_name = re.search(
+        r'^name = "([^"]+)"$', same_module.cargo_toml, re.MULTILINE
+    )
+    assert same_package_name is not None
+    assert same_package_name.group(1) == package_name.group(1)
+    other = generate_project(
+        ir,
+        "_crabwalk_other_def",
+        cargo_package_identity="other/demo.py",
+    )
+    other_package_name = re.search(
+        r'^name = "([^"]+)"$', other.cargo_toml, re.MULTILINE
+    )
+    assert other_package_name is not None
+    assert other_package_name.group(1) != package_name.group(1)
     assert 'features = ["extension-module"]' in first.cargo_toml
     assert 'pyo3-build-config = { version = "=0.29.2" }' in first.cargo_toml
     assert "// Crabwalk extension unit: _crabwalk_demo_abc" in first.build_rs
