@@ -118,6 +118,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "iterator.opaque-shadow",
             "iterator.borrowed-for-loop",
             "iterator.borrowed-for-loop-native",
+            "iterator.vec-consuming",
         ),
     ),
     Capability(
@@ -182,6 +183,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "collections.hashmap-iteration",
             "collections.hashmap-split-local",
             "collections.hashable-map-return",
+            "collections.hashmap-borrowed-string-key",
         ),
     ),
     Capability(

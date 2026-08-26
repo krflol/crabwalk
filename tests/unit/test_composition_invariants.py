@@ -216,6 +216,14 @@ def invalid() -> rust.usize:
     return values.len()
 """,
         """\
+@rust.fn
+def invalid() -> rust.usize:
+    values: rust.Vec[rust.String] = rust.Vec(["value"])
+    items = values.into_iter()
+    rust.println(items.count())
+    return values.len()
+""",
+        """\
 @rust.async_fn
 async def helper(value: rust.u64) -> rust.u64:
     return value
@@ -263,6 +271,27 @@ def valid() -> rust.bool:
     )
 
     assert len(analyze_path(source).functions) == 1
+
+
+def test_shared_vec_cannot_create_a_consuming_iterator(tmp_path: Path) -> None:
+    source = tmp_path / "shared_vec_into_iter.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def invalid(values: rust.Ref[rust.Vec[rust.String]]) -> rust.usize:
+    return values.into_iter().count()
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CrabwalkCompilationError) as captured:
+        analyze_path(source)
+
+    diagnostic = captured.value.diagnostics[0]
+    assert diagnostic.code == "CRAB208"
+    assert "requires owned access" in diagnostic.message
 
 
 @capability_contract("iterator.borrowed-for-loop")

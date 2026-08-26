@@ -64,6 +64,32 @@ def test_codegen_is_deterministic_and_native_recursion_is_direct(
     assert first.source_map["entries"]
 
 
+def test_function_docstring_is_metadata_not_a_native_statement(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "documented.py"
+    source.write_text(
+        '''\
+from crabwalk import rust
+
+@rust.fn
+def increment(value: rust.u64) -> rust.u64:
+    """Metadata-only Python docstring."""
+    rust.String("Intentional native string expression.")
+    return value + 1
+''',
+        encoding="utf-8",
+    )
+
+    ir = analyze_path(source)
+    generated = generate_project(ir, "_crabwalk_documented")
+
+    assert "Metadata-only Python docstring." not in generated.rust_source
+    assert 'String::from("Intentional native string expression.")' in (
+        generated.rust_source
+    )
+
+
 def test_python_boundary_result_is_unwrapped_outside_panic_closure(
     tmp_path: Path,
 ) -> None:

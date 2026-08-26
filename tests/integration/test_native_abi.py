@@ -22,6 +22,7 @@ def divide(value: rust.u64, divisor: rust.u64) -> rust.u64:
 
 @rust.fn
 def add_one(value: rust.u64) -> rust.u64:
+    \"\"\"Add one natively.\"\"\"
     return value + 1
 
 @rust.fn
@@ -53,6 +54,7 @@ for operation in (lambda: divide(1, 0), lambda: add_one((1 << 64) - 1)):
         print(type(error).__name__, bool(str(error)))
 
 print(divide(12, 3))
+print(add_one.__doc__)
 print(invert(True), signed_byte(-128), single_precision(2), optional_byte(None), optional_byte(7))
 for function, value in (
     (invert, 1),
@@ -106,6 +108,7 @@ print(after - before > 1000)
         "CrabwalkPanicError True",
         "CrabwalkPanicError True",
         "4",
+        "Add one natively.",
         "False -128 2.0 None 7",
         "TypeError True",
         "TypeError True",

@@ -53,6 +53,7 @@ from .ir import (
     PatternWildcardIR,
     PythonPrintIR,
     ReturnIR,
+    STR,
     StatementIR,
     StringLiteralIR,
     StructConstructorIR,
@@ -834,14 +835,22 @@ def _render_expression(
                 )
         if expression.receiver.type_ref.rust_name == "HashMap":
             if expression.method in {"contains_key", "remove", "get", "get_mut"}:
-                return (
-                    f"{rendered_receiver}.{expression.method}(&{rendered_arguments[0]})"
+                lookup = (
+                    rendered_arguments[0]
+                    if expression.arguments[0].type_ref == STR
+                    else f"&{rendered_arguments[0]}"
                 )
+                return f"{rendered_receiver}.{expression.method}({lookup})"
             if expression.method == "iter_ref":
                 return f"{rendered_receiver}.iter()"
             if expression.method == "get_or":
+                lookup = (
+                    rendered_arguments[0]
+                    if expression.arguments[0].type_ref == STR
+                    else f"&{rendered_arguments[0]}"
+                )
                 return (
-                    f"{rendered_receiver}.get(&{rendered_arguments[0]})"
+                    f"{rendered_receiver}.get({lookup})"
                     f".cloned().unwrap_or({rendered_arguments[1]})"
                 )
             if expression.method == "entry_or_insert":

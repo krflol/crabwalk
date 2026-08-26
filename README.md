@@ -138,7 +138,7 @@ crabwalk check PATH [--locked] [--offline]
 crabwalk build PATH [--locked] [--offline]
 crabwalk inspect PATH [--json]
 crabwalk show PATH SYMBOL
-crabwalk wheel PACKAGE --name DIST --version VERSION
+crabwalk wheel PACKAGE [--project PROJECT] --name DIST --version VERSION
 crabwalk cache status PATH [--json]
 crabwalk cache prune [PROJECT] [--dry-run]
 ```
@@ -176,10 +176,11 @@ wheel-include = ["templates/**/*.html"]
 ```
 
 When exactly one package is configured, the project directory itself can be passed
-to build/inspection commands. `--project PYPROJECT_OR_DIRECTORY` selects an
-explicit configuration for a source path. It does not rebase that positional source:
-relative source paths resolve from the current working directory. For an out-of-tree
-project copy, change into its root or pass an absolute source path beneath it.
+to build, inspection, and wheel commands. `--project PYPROJECT_OR_DIRECTORY`
+selects an explicit configuration for a source path. It does not rebase that
+positional source: relative source paths resolve from the current working directory.
+For an out-of-tree project copy, change into its root or pass an absolute source
+path beneath it.
 
 ## Examples
 

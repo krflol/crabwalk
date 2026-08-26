@@ -119,7 +119,8 @@ Valid boundary policies are `allow`, `warn`, and `deny`. Unknown configuration
 keys are errors rather than silently ignored. Configured paths must remain inside
 the project and contain `__init__.py`. A project-directory command resolves the
 package only when exactly one entry is configured; otherwise select a package or
-source file explicitly, optionally with `--project`.
+source file explicitly, optionally with `--project`. The same project selection is
+available to `crabwalk wheel`.
 
 `--project` selects configuration and containment policy; it does not change the
 base directory of the positional source argument. Relative source paths resolve

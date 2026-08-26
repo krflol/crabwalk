@@ -59,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     wheel_command.add_argument("--output-dir", type=Path, default=Path("dist"))
     wheel_command.add_argument("--name")
     wheel_command.add_argument("--version", default="0.0.0")
+    wheel_command.add_argument("--project", type=Path)
     wheel_command.add_argument("--locked", action="store_true")
     wheel_command.add_argument("--offline", action="store_true")
     cache_command = commands.add_parser("cache", help="inspect or prune artifact cache")
@@ -95,6 +96,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.output_dir,
                 distribution_name=arguments.name,
                 version=arguments.version,
+                project=arguments.project,
                 locked=arguments.locked,
                 offline=arguments.offline,
             )

@@ -58,6 +58,7 @@ from .lowering.expressions import (
 )
 from .lowering.patterns import PatternLoweringMixin
 from .lowering.statements import block_returns as _block_returns
+from .lowering.statements import executable_function_body as _executable_function_body
 from .ir import (
     BOOL,
     CHAR,
@@ -1366,7 +1367,10 @@ class _FunctionLowerer(PatternLoweringMixin):
             name: LocalState(type_ref, _local_storage_for_type(type_ref))
             for name, type_ref in environment.items()
         }
-        body = self._lower_block(self.node.body, environment)
+        body = self._lower_block(
+            _executable_function_body(self.node.body),
+            environment,
+        )
         if self.signature.return_type != UNIT and not _block_returns(body):
             _fail(
                 "CRAB109",
@@ -3723,6 +3727,16 @@ class _FunctionLowerer(PatternLoweringMixin):
                     element_type,
                     IteratorItemMode.SHARED_REF,
                 )
+            elif method == "into_iter" and not node.args:
+                arguments = ()
+                result = IteratorType(
+                    IteratorExecution.SEQUENTIAL,
+                    element_type,
+                    IteratorItemMode.OWNED,
+                )
+            elif method == "reserve" and len(node.args) == 1:
+                arguments = (self._lower_expression(node.args[0], environment, USIZE),)
+                result = UNIT
             elif method == "split_at_mut_sum" and len(node.args) == 1:
                 if (
                     not element_type.is_numeric
@@ -3946,7 +3960,9 @@ class _FunctionLowerer(PatternLoweringMixin):
                 result = TypeRef("Option", (value_type,))
             elif method in {"contains_key", "remove"} and len(node.args) == 1:
                 arguments = (
-                    self._lower_expression(node.args[0], environment, key_type),
+                    self._lower_hashmap_lookup_argument(
+                        node.args[0], environment, key_type
+                    ),
                 )
                 result = (
                     BOOL
@@ -3954,14 +3970,23 @@ class _FunctionLowerer(PatternLoweringMixin):
                     else TypeRef("Option", (value_type,))
                 )
             elif method in {"get_or", "entry_or_insert"} and len(node.args) == 2:
+                key = (
+                    self._lower_hashmap_lookup_argument(
+                        node.args[0], environment, key_type
+                    )
+                    if method == "get_or"
+                    else self._lower_expression(node.args[0], environment, key_type)
+                )
                 arguments = (
-                    self._lower_expression(node.args[0], environment, key_type),
+                    key,
                     self._lower_expression(node.args[1], environment, value_type),
                 )
                 result = value_type
             elif method in {"get", "get_mut"} and len(node.args) == 1:
                 arguments = (
-                    self._lower_expression(node.args[0], environment, key_type),
+                    self._lower_hashmap_lookup_argument(
+                        node.args[0], environment, key_type
+                    ),
                 )
                 result = TypeRef(
                     "Option",
@@ -4629,6 +4654,21 @@ class _FunctionLowerer(PatternLoweringMixin):
             (),
             required,
         )
+
+    def _lower_hashmap_lookup_argument(
+        self,
+        node: ast.expr,
+        environment: dict[str, TypeRef],
+        key_type: TypeRef,
+    ) -> ExpressionIR:
+        """Accept Rust's allocation-free ``String: Borrow<str>`` lookup form."""
+
+        if key_type != STRING:
+            return self._lower_expression(node, environment, key_type)
+        argument = self._lower_expression(node, environment)
+        if argument.type_ref not in {STRING, STR}:
+            _require_type(argument.type_ref, key_type, self.path, node)
+        return argument
 
     def _lower_closure(
         self,

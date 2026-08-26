@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+import ast
+
 from ..ir import IfIR, MatchIR, PatternMatchIR, ReturnIR, StatementIR
+
+
+def executable_function_body(statements: list[ast.stmt]) -> list[ast.stmt]:
+    """Return function statements after Python's metadata-only docstring."""
+
+    if (
+        statements
+        and isinstance(statements[0], ast.Expr)
+        and isinstance(statements[0].value, ast.Constant)
+        and isinstance(statements[0].value.value, str)
+    ):
+        return statements[1:]
+    return statements
 
 
 def block_returns(statements: tuple[StatementIR, ...]) -> bool:

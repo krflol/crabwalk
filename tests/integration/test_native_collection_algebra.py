@@ -14,6 +14,8 @@ from tests.unit.test_collection_algebra import COLLECTION_ALGEBRA_SOURCE
     "collections.hashmap-iteration",
     "collections.hashmap-split-local",
     "collections.hashable-map-return",
+    "collections.hashmap-borrowed-string-key",
+    "iterator.vec-consuming",
 )
 def test_collections_results_and_string_etl_run_natively(tmp_path: Path) -> None:
     source = tmp_path / "collection_algebra.py"
@@ -31,6 +33,10 @@ print(join_fields())
 print(tuple_keyed())
 print(map_loop_total())
 print(sorted(split_map_keys()))
+print(borrowed_string_key_lookup())
+owned_strings = rust.Vec[rust.String](["ALPHA", "Beta"])
+print(consume_owned_strings(owned_strings), owned_strings.moved)
+print(reserve_values())
 """,
         encoding="utf-8",
     )
@@ -62,4 +68,7 @@ print(sorted(split_map_keys()))
         "{('key', b'\\x01\\x02'): 3}",
         "8",
         "['active', 'inactive']",
+        "(True, True, 11)",
+        "['alpha', 'beta'] True",
+        "1",
     ]

@@ -48,13 +48,19 @@ def build_wheel(
     *,
     distribution_name: str | None = None,
     version: str = "0.0.0",
+    project: str | Path | None = None,
     locked: bool = False,
     offline: bool = False,
     service: CompilationService | None = None,
 ) -> WheelResult:
     """Compile a regular Python package and place its native artifact in a wheel."""
 
-    package_root = _regular_package_root(Path(package).resolve())
+    requested_path = Path(package).resolve()
+    config = discover_project_config(requested_path, project)
+    source_path = (
+        config.resolve_entry(requested_path) if config is not None else requested_path
+    )
+    package_root = _regular_package_root(source_path)
     name = distribution_name or package_root.name
     _validate_metadata(name, version)
     if sys.implementation.name != "cpython":
@@ -72,6 +78,7 @@ def build_wheel(
         load=False,
         locked=locked,
         offline=offline,
+        project=project,
     )
     artifact = compilation.artifact
     if artifact is None or not artifact.is_file():
@@ -91,7 +98,6 @@ def build_wheel(
     destination = output_root / wheel_name
     temporary = output_root / f".{wheel_name}.{os.getpid()}.tmp"
 
-    config = discover_project_config(package_root)
     wheel_include = config.wheel_include if config is not None else ()
     entries = _package_entries(package_root, wheel_include)
     package_prefix = PurePosixPath(package_root.name)

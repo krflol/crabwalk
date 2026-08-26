@@ -73,7 +73,12 @@ def receiver_access_for_ownership(ownership: str | None) -> ReceiverAccess:
 
 def builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
     receiver = type_ref.underlying.rust_name
-    if receiver == "Vec" and method in {"push", "pop", "split_at_mut_sum"}:
+    if receiver == "Vec" and method in {
+        "push",
+        "pop",
+        "reserve",
+        "split_at_mut_sum",
+    }:
         return "mutable"
     if receiver == "HashMap" and method in {
         "insert",
@@ -131,6 +136,6 @@ def builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
         "err",
     }:
         return "owned"
-    if receiver == "HashMap" and method == "into_iter":
+    if receiver in {"HashMap", "Vec"} and method == "into_iter":
         return "owned"
     return "shared"
