@@ -33,7 +33,7 @@ def compilation_inspection(result: CompilationResult) -> dict[str, object]:
         suffix,
     )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "module": result.ir.module_name,
         "source_hash": result.ir.source_hash,
         "compiler_input_hash": result.ir.compiler_input_hash,
@@ -253,13 +253,29 @@ def _input_conversion(type_ref: TypeRef) -> dict[str, str]:
     }
 
 
-def _return_conversion(type_ref: TypeRef) -> dict[str, str]:
+def _return_conversion(type_ref: TypeRef) -> dict[str, object]:
     if type_ref == UNIT:
-        return {"kind": "unit", "cost": "constant", "detail": "Rust () to None"}
+        return {
+            "kind": "unit",
+            "cost": "constant",
+            "complexity": "constant",
+            "detail": "Rust () to None",
+        }
+    if type_ref.ownership == "Owned":
+        return {
+            "kind": "owned handle",
+            "cost": "constant; no deep copy",
+            "complexity": "constant",
+            "detail": (
+                f"Rust-owned {type_ref.underlying.display()} returned as a "
+                "move-aware Python handle"
+            ),
+        }
     if type_ref.rust_name == "String":
         return {
             "kind": "allocating conversion",
             "cost": "linear in UTF-8 length",
+            "complexity": "linear-bytes",
             "detail": "Rust String copied into Python str",
         }
     if type_ref.rust_name == "Option":
@@ -267,22 +283,116 @@ def _return_conversion(type_ref: TypeRef) -> dict[str, str]:
         return {
             "kind": "optional conversion",
             "cost": nested["cost"],
+            "complexity": nested["complexity"],
             "detail": f"None or {nested['detail']}",
+            "children": [_return_child("value", type_ref.arguments[0], nested)],
         }
     if type_ref.rust_name == "Result":
         nested = _return_conversion(type_ref.arguments[0])
         return {
             "kind": "result conversion",
             "cost": nested["cost"],
+            "complexity": nested["complexity"],
             "detail": (
                 f"Ok uses {nested['detail']}; Err becomes CrabwalkRustError "
                 f"labelled {type_ref.arguments[1].display()}"
             ),
+            "children": [_return_child("ok", type_ref.arguments[0], nested)],
+        }
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        children = [
+            _return_child(str(index), child)
+            for index, child in enumerate(type_ref.arguments)
+        ]
+        constant = all(child["complexity"] == "constant" for child in children)
+        return {
+            "kind": "composite conversion",
+            "cost": (
+                "constant in fixed tuple arity"
+                if constant
+                else "cardinality-dependent; sum of child conversion costs"
+            ),
+            "complexity": "constant" if constant else "composite",
+            "detail": (
+                f"Rust {type_ref.render()} materialized as a Python tuple; "
+                "see children for each item cost"
+            ),
+            "children": children,
+        }
+    if type_ref.rust_name in {"Vec", "Array"} and type_ref.arguments:
+        element = type_ref.arguments[0]
+        nested = _return_conversion(element)
+        byte_vector = type_ref.rust_name == "Vec" and element.rust_name == "u8"
+        if byte_vector:
+            python_container = "bytes"
+            cost = "linear in byte length"
+            complexity = "linear-bytes"
+        elif type_ref.rust_name == "Vec":
+            python_container = "list"
+            cost = "linear in element count plus child conversion"
+            complexity = "linear-elements"
+        else:
+            python_container = "list"
+            constant = nested["complexity"] == "constant"
+            cost = (
+                "constant in fixed array length"
+                if constant
+                else "sum of child conversion costs across fixed array length"
+            )
+            complexity = "constant" if constant else "composite"
+        return {
+            "kind": "sequence conversion",
+            "cost": cost,
+            "complexity": complexity,
+            "detail": (
+                f"Rust {type_ref.render()} materialized as Python "
+                f"{python_container}; see child element cost"
+            ),
+            "children": [_return_child("element", element, nested)],
+        }
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        key, value = type_ref.arguments
+        return {
+            "kind": "mapping conversion",
+            "cost": "linear in entry count plus key/value conversion",
+            "complexity": "linear-elements",
+            "detail": (
+                f"Rust {type_ref.render()} materialized as a Python dict; "
+                "see child key and value costs"
+            ),
+            "children": [
+                _return_child("key", key),
+                _return_child("value", value),
+            ],
+        }
+    if (
+        type_ref.is_integer
+        or type_ref.is_float
+        or type_ref.rust_name in {"bool", "char"}
+    ):
+        return {
+            "kind": "exact conversion",
+            "cost": "constant",
+            "complexity": "constant",
+            "detail": f"Rust {type_ref.render()} to Python scalar",
         }
     return {
-        "kind": "exact conversion",
-        "cost": "constant",
-        "detail": f"Rust {type_ref.render()} to Python scalar",
+        "kind": "ABI conversion",
+        "cost": "type-dependent",
+        "complexity": "type-dependent",
+        "detail": f"Rust {type_ref.render()} to its declared Python representation",
+    }
+
+
+def _return_child(
+    role: str,
+    type_ref: TypeRef,
+    conversion: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "role": role,
+        "rust_type": type_ref.render(),
+        **(conversion if conversion is not None else _return_conversion(type_ref)),
     }
 
 

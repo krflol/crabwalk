@@ -8,6 +8,15 @@ All notable Crabwalk changes are recorded here.
 
 - Post-release development builds identify themselves as `1.0.6.dev0`, keeping
   `main` distinct from the immutable 1.0.5 artifacts.
+- Inspection schema 3 reports recursive, cardinality-aware return conversion costs
+  for strings and Python containers instead of labelling composite vector/map
+  returns as constant-cost scalars.
+- One package initialization now shares a single implicit-build progress lifecycle
+  and loaded compilation across all of its runtime decorators; reloads still
+  recompute the complete build fingerprint.
+- Typed crate-adapter guidance now covers contract-specific numeric formatting,
+  including the distinction between Rust display text and JavaScript-compatible
+  floating-point rendering.
 
 ### Fixed
 

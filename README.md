@@ -158,7 +158,9 @@ Cargo update. Pass `--locked` when the lock must remain byte-for-byte unchanged.
 When a `.py` file triggers an implicit first build, Crabwalk reports analysis,
 dependency, cache, Cargo, and extension-loading phases on stderr. Interactive
 terminals get an animated elapsed-time meter; redirected output gets plain log
-lines. Set `CRABWALK_PROGRESS=never` to silence it (for example in CI), or
+lines. A package import reports one lifecycle for its compilation unit; later
+decorators bind symbols from that already-loaded result without replaying the
+meter. Set `CRABWALK_PROGRESS=never` to silence it (for example in CI), or
 `CRABWALK_PROGRESS=always` to force progress output.
 
 For bounded project discovery, a project may declare one or more regular packages:
