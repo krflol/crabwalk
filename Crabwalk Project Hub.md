@@ -5,7 +5,7 @@ aliases:
 type: project
 project: Crabwalk
 status: active
-phase: 1.0.6 release
+phase: 1.0.7 development
 created: 2026-08-21
 updated: 2026-08-26
 tags:
@@ -18,7 +18,7 @@ tags:
 > [!abstract] Current outcome
 > Crabwalk is a published Apache-2.0 compiler/runtime that lowers an explicit,
 > source-spanned Python subset into inspectable Rust and CPython extensions.
-> Version 1.0.6 is the current immutable release candidate.
+> Version 1.0.6 is published; `main` now identifies as 1.0.7.dev0.
 
 ## Sources of truth
 
