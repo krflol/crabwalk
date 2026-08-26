@@ -4,10 +4,10 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-08-26
+
 ### Changed
 
-- Post-release development builds identify themselves as `1.0.6.dev0`, keeping
-  `main` distinct from the immutable 1.0.5 artifacts.
 - Inspection schema 3 reports recursive, cardinality-aware return conversion costs
   for strings and Python containers instead of labelling composite vector/map
   returns as constant-cost scalars.
