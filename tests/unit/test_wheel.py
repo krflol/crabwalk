@@ -53,6 +53,14 @@ def double(value: rust.u64) -> rust.u64:
     ignored.mkdir()
     (ignored / "private.bin").write_bytes(b"not wheel content")
     (package / "undeclared.html").write_text("not package data", encoding="utf-8")
+    project = tmp_path / "pyproject.toml"
+    project.write_text(
+        """\
+[tool.crabwalk]
+packages = ["sample_pkg"]
+""",
+        encoding="utf-8",
+    )
 
     artifact = tmp_path / "_crabwalk_sample_deadbeef.pyd"
     artifact.write_bytes(b"native-extension-placeholder")
@@ -75,10 +83,11 @@ def double(value: rust.u64) -> rust.u64:
     service = _FakeService(compilation)
 
     result = build_wheel(
-        package,
+        tmp_path,
         tmp_path / "dist",
         distribution_name="sample-project",
         version="1.2.3",
+        project=project,
         service=service,  # type: ignore[arg-type]
     )
 
@@ -91,6 +100,7 @@ def double(value: rust.u64) -> rust.u64:
                 "load": False,
                 "locked": False,
                 "offline": False,
+                "project": project,
             },
         )
     ]

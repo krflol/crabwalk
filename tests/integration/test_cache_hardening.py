@@ -151,7 +151,9 @@ source-locked = true
         [
             *cli,
             "wheel",
-            str(package),
+            str(tmp_path),
+            "--project",
+            str(tmp_path),
             "--output-dir",
             str(distribution),
             "--name",

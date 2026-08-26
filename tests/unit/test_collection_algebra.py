@@ -109,6 +109,32 @@ def split_map_keys() -> rust.Vec[rust.String]:
     borrowed = values.keys()
     owned = borrowed.cloned()
     return owned.collect_vec()
+
+@rust.fn
+def borrowed_string_key_lookup() -> rust.Tuple[rust.bool, rust.bool, rust.u64]:
+    keys: rust.Vec[rust.String] = rust.Vec(["active", "missing"])
+    values: rust.HashMap[rust.String, rust.u64] = rust.HashMap()
+    values.insert("active", 7)
+    return (
+        values.contains_key(keys[0].as_str()),
+        values.contains_key("active"),
+        values.get_or(keys[1].as_str(), 11),
+    )
+
+@rust.fn
+def consume_owned_strings(
+    values: rust.Owned[rust.Vec[rust.String]],
+) -> rust.Vec[rust.String]:
+    return values.into_iter().map(
+        lambda value: value.to_lowercase()
+    ).collect_vec()
+
+@rust.fn
+def reserve_values() -> rust.usize:
+    values: rust.Vec[rust.u64] = rust.Vec([])
+    values.reserve(4)
+    values.push(1)
+    return values.len()
 """
 
 
@@ -135,3 +161,10 @@ def test_collection_and_error_algebra_lower_as_typed_compositions(
     assert '.join(String::from(",").as_str())' in generated.rust_source
     assert ".or_insert(0u64) += 2u64" in generated.rust_source
     assert ".or_insert(0.0f64) += 12.5f64" in generated.rust_source
+    assert ".contains_key(keys[0usize].as_str())" in generated.rust_source
+    assert '.contains_key(&String::from("active"))' in generated.rust_source
+    assert (
+        ".get(keys[1usize].as_str()).cloned().unwrap_or(11u64)" in generated.rust_source
+    )
+    assert ".into_iter().map(" in generated.rust_source
+    assert ".reserve(4usize)" in generated.rust_source

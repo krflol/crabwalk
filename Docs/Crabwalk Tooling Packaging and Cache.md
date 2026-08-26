@@ -142,13 +142,18 @@ function's `__crabwalk__["cargo_policy"]` expose the effective locked/offline st
 
 ```powershell
 crabwalk wheel src\my_package `
+  --project . `
   --name my-distribution `
   --version 1.2.3 `
   --output-dir dist
 ```
 
 The current command targets a regular top-level package and the running CPython
-ABI/platform. It:
+ABI/platform. `--project` accepts either a project directory or its
+`pyproject.toml`; when that configuration declares exactly one package, the project
+path itself may be used as the positional input. As with neighboring commands,
+`--project` selects configuration and containment policy without rebasing a relative
+positional path. The command:
 
 1. statically analyzes and compiles the complete package;
 2. copies `.py`, `.pyi`, and `py.typed` plus explicitly configured `wheel-include`

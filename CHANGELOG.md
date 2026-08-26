@@ -4,10 +4,21 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-08-26
+
 ### Changed
 
-- Post-release development builds identify themselves as `1.0.7.dev0`, keeping
-  `main` distinct from the immutable 1.0.6 artifacts.
+- `crabwalk wheel` now accepts `--project`, honors the selected configuration and
+  package containment policy, and can resolve a single configured package from the
+  project directory just like neighboring build and inspection commands.
+- `Vec[T]` now exposes consuming `into_iter()` and mutable `reserve()`, while
+  `HashMap[String, V]` lookup operations accept borrowed `Str` keys and emit
+  allocation-free `Borrow<str>` lookups.
+
+### Fixed
+
+- Leading function docstrings remain Python wrapper metadata without becoming
+  executable `String::from(...)` statements in generated native Rust bodies.
 
 ## [1.0.6] - 2026-08-26
 
