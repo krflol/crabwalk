@@ -88,6 +88,7 @@ def test_regular_python_package_compiles_as_one_native_extension(
     root = Path(__file__).resolve().parents[2]
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join((str(root / "src"), str(tmp_path)))
+    environment["CRABWALK_PROGRESS"] = "always"
 
     command = [sys.executable, "-u", "-m", "native_pkg.app"]
     first = subprocess.run(
@@ -110,6 +111,8 @@ def test_regular_python_package_compiles_as_one_native_extension(
         "True",
         "False",
     ]
+    assert first.stderr.count("Analyzing Python source") == 1
+    assert first.stderr.count("Crabwalk ready: native_pkg") == 1
 
     second = subprocess.run(
         command,
@@ -122,6 +125,8 @@ def test_regular_python_package_compiles_as_one_native_extension(
     )
     assert second.returncode == 0, second.stderr
     assert second.stdout.splitlines()[-1] == "True"
+    assert second.stderr.count("Analyzing Python source") == 1
+    assert second.stderr.count("Crabwalk ready: native_pkg") == 1
 
 
 def test_bad_crate_api_maps_rustc_error_to_python_call(tmp_path: Path) -> None:

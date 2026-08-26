@@ -28,7 +28,7 @@ from .emission import EmissionNames, Writer as _Writer
 from .rust_emission import write_native_function as _write_native_function
 from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
 
-CODEGEN_SCHEMA_VERSION = 39
+CODEGEN_SCHEMA_VERSION = 40
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
@@ -47,7 +47,12 @@ class GeneratedProject:
     ir_json: str
 
 
-def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
+def generate_project(
+    ir: PackageIR,
+    extension_name: str,
+    *,
+    cargo_package_identity: str | None = None,
+) -> GeneratedProject:
     from .validation import validate_package_ir
 
     validate_package_ir(ir)
@@ -167,7 +172,11 @@ def generate_project(ir: PackageIR, extension_name: str) -> GeneratedProject:
         "entries": writer.mappings,
     }
     return GeneratedProject(
-        cargo_toml=render_cargo_toml(ir, extension_name),
+        cargo_toml=render_cargo_toml(
+            ir,
+            extension_name,
+            cargo_package_identity,
+        ),
         build_rs=render_build_rs(extension_name),
         rust_source=writer.render(),
         source_map=source_map,

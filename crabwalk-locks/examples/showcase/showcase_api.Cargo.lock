@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "crabwalk-generated-module"
+name = "crabwalk-generated-5269d5aa657b7a96e405017b"
 version = "0.0.0"
 dependencies = [
  "libm",

@@ -29,6 +29,20 @@ Rust/Cargo/source-map files, and optionally invokes Cargo.
 | `cache status PATH` | hit/miss/corruption status and expected artifact |
 | `cache prune` | scoped age/size cleanup with dry-run support |
 
+Inspection schema 3 describes return conversion recursively. Fixed-width scalars
+remain constant-cost, while `String`, `Vec`, `Array`, `HashMap`, tuples, options,
+and results expose a machine-readable `complexity` plus child conversion records.
+Container costs are cardinality-dependent where Python must materialize elements;
+a composite return is never described as a scalar merely because PyO3 performs the
+conversion in one wrapper call.
+
+The first runtime decorator reached during a package import performs the complete
+analysis, fingerprint, Cargo validation, and extension load. Remaining exported
+function, struct, and enum decorators in that same initialization bind symbols
+from the validated result and share one progress lifecycle. A repeated binding,
+such as `importlib.reload`, ends that binding session and re-enters the full service
+so non-source build inputs are not hidden by a weaker memo.
+
 `--locked` requires persisted dependency lock state and rejects any Cargo lock
 change. `--offline` passes Cargo's offline policy and is fingerprinted. Every
 compilation unit has a persisted generated dependency lock, even when mandatory

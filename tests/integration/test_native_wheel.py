@@ -184,6 +184,7 @@ def test_installed_wheel_uses_embedded_extension_without_rust(
 
     run_environment = _without_rust_toolchain(os.environ.copy())
     run_environment.pop("PYTHONPATH", None)
+    run_environment["CRABWALK_PROGRESS"] = "always"
     script = """\
 import json
 import pathlib
@@ -211,6 +212,8 @@ print((pathlib.Path.cwd() / ".crabwalk").exists())
         check=False,
     )
     assert executed.returncode == 0, executed.stderr
+    assert executed.stderr.count("Analyzing Python source") == 1
+    assert executed.stderr.count("Crabwalk ready: wheel_pkg") == 1
     output = executed.stdout.splitlines()
     assert output[:4] == [
         "42",

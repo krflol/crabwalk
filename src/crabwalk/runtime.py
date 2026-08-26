@@ -30,6 +30,7 @@ from crabwalk.compiler.naming import owned_class_names
 from crabwalk.compiler.frontend import (
     analyze_project_path,
     project_source_anchor,
+    project_source_identity,
 )
 from crabwalk.config import discover_project_config
 from crabwalk.diagnostics import (
@@ -53,6 +54,29 @@ from crabwalk.native_exceptions import (
 _compile_lock = threading.RLock()
 _results: dict[tuple[str, str], CompilationResult] = {}
 _owned_registry_lock = threading.RLock()
+
+_DecoratorBindingKey = tuple[str, str, str]
+
+
+@dataclass(slots=True)
+class _DecoratorBindingSession:
+    """One already-validated compilation while its Python bindings execute.
+
+    Static analysis compiles every exported declaration in a package at the first
+    runtime decorator. Later decorators in that same package initialization only
+    need to bind symbols from that loaded extension. Keeping this session separate
+    from the general artifact memo is important: once a binding repeats (a reload),
+    Crabwalk re-enters ``CompilationService`` so toolchain, Cargo, lock, environment,
+    and dependency inputs are fingerprinted again.
+    """
+
+    result: CompilationResult
+    expected: frozenset[_DecoratorBindingKey]
+    seen: set[_DecoratorBindingKey]
+    validated_modules: set[str]
+
+
+_binding_sessions: dict[str, _DecoratorBindingSession] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -963,7 +987,11 @@ def compile_function(function: Callable[..., object]) -> RustFunction:
         )
     path = Path(source).resolve()
     with _compile_lock:
-        cached = _compilation_for(path, function.__module__)
+        cached = _compilation_for(
+            path,
+            function.__module__,
+            ("function", function.__module__, function.__name__),
+        )
         module = cached.module
         if module is None:
             raise AssertionError("loaded compilation has no extension module")
@@ -1003,7 +1031,11 @@ def compile_struct(original: type[object]) -> object:
         )
     path = Path(source).resolve()
     with _compile_lock:
-        cached = _compilation_for(path, original.__module__)
+        cached = _compilation_for(
+            path,
+            original.__module__,
+            ("struct", original.__module__, original.__name__),
+        )
         if cached.module is None:
             raise AssertionError("loaded struct compilation has no extension module")
         try:
@@ -1045,7 +1077,11 @@ def compile_enum(original: type[object]) -> object:
         )
     path = Path(source).resolve()
     with _compile_lock:
-        cached = _compilation_for(path, original.__module__)
+        cached = _compilation_for(
+            path,
+            original.__module__,
+            ("enum", original.__module__, original.__name__),
+        )
         if cached.module is None:
             raise AssertionError("loaded enum compilation has no extension module")
         try:
@@ -1072,10 +1108,37 @@ def compile_enum(original: type[object]) -> object:
     )
 
 
-def _compilation_for(path: Path, module_name: str) -> CompilationResult:
+def _compilation_for(
+    path: Path,
+    module_name: str,
+    binding_key: _DecoratorBindingKey,
+) -> CompilationResult:
     """Resolve one loaded compilation for all decorators in a source package."""
 
     anchor = project_source_anchor(path)
+    session_key = str(anchor)
+    session = _binding_sessions.get(session_key)
+    if session is not None:
+        reusable = binding_key in session.expected and binding_key not in session.seen
+        if reusable and module_name not in session.validated_modules:
+            # A package may import compiler-visible submodules lazily. Validate the
+            # package source identity once when each such module first binds so an
+            # edit made after the initial package import cannot select stale native
+            # symbols. Repeated bindings in one module do not rehash the package.
+            reusable = (
+                project_source_identity(path) == session.result.ir.compiler_input_hash
+            )
+            if reusable:
+                session.validated_modules.add(module_name)
+        if reusable:
+            session.seen.add(binding_key)
+            if session.seen == session.expected:
+                _binding_sessions.pop(session_key, None)
+            return session.result
+        # A repeated binding is the start of a reload. Unknown or source-divergent
+        # bindings likewise require a new complete build plan.
+        _binding_sessions.pop(session_key, None)
+
     label = anchor.parent.name if anchor.name == "__init__.py" else anchor.stem
     progress = ImplicitBuildProgress(label)
     progress.start()
@@ -1107,7 +1170,34 @@ def _compilation_for(path: Path, module_name: str) -> CompilationResult:
     if cached.module is None:
         raise AssertionError("loaded compilation has no extension module")
     _register_owned_types(cached)
+    expected = _runtime_decorator_bindings(cached)
+    if binding_key in expected and len(expected) > 1:
+        session = _DecoratorBindingSession(
+            cached,
+            expected,
+            {binding_key},
+            {module_name},
+        )
+        if session.seen != session.expected:
+            _binding_sessions[session_key] = session
     return cached
+
+
+def _runtime_decorator_bindings(
+    compilation: CompilationResult,
+) -> frozenset[_DecoratorBindingKey]:
+    """Return declarations whose Python decorators bind the loaded extension."""
+
+    ir = compilation.ir
+    return frozenset(
+        [
+            ("function", function.module_name, function.name)
+            for function in ir.functions
+            if function.exported
+        ]
+        + [("struct", struct.module_name, struct.name) for struct in ir.structs]
+        + [("enum", enum.module_name, enum.name) for enum in ir.enums]
+    )
 
 
 def _cargo_policy_metadata(compilation: CompilationResult) -> dict[str, object]:

@@ -327,6 +327,27 @@ non-empty explicit list can use `Pure`, `PythonRuntime`, `Blocking`, `ThreadSpaw
 alone. These declarations are trusted adapter contracts, not inferred audits of a
 third-party crate implementation.
 
+Numeric-to-string formatting is not currently a built-in Crabwalk standard-method
+surface. Use a typed adapter when rendering semantics are part of the data contract:
+
+```python
+formatting = rust.crate("formatting-adapter", path="./formatting-adapter")
+
+@rust.extern(formatting, path="format_u64", effects=[rust.Pure])
+def format_u64(value: rust.u64) -> rust.String:
+    ...
+
+@rust.extern(formatting, path="format_js_f64", effects=[rust.Pure])
+def format_js_f64(value: rust.f64) -> rust.String:
+    ...
+```
+
+The local Rust adapter should pin and test the intended formatter. In particular,
+Rust `Display`/`to_string()` is not a promise of JavaScript-compatible floating-
+point rendering; use a crate with that explicit contract when byte-for-byte JSON or
+JavaScript output matters. Keeping the adapter typed gives Crabwalk the signature
+and effects without claiming automatic reflection over arbitrary crate APIs.
+
 ## Python and native effects
 
 Every `FunctionIR` stores one or more typed effects:
