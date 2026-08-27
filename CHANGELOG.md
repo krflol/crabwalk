@@ -8,6 +8,9 @@ All notable Crabwalk changes are recorded here.
 
 - Post-release development builds identify themselves as `1.0.8.dev0`, keeping
   `main` distinct from the immutable 1.0.7 artifacts.
+- Fingerprint documentation now makes the conservative whole-`pyproject.toml`
+  configuration hash explicit, including invalidation from Python-only metadata
+  and comment changes.
 
 ## [1.0.7] - 2026-08-26
 
