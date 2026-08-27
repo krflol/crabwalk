@@ -58,6 +58,8 @@ plans fails as `CRAB308` instead of recursing indefinitely.
 The cache key includes:
 
 - reachable native compiler-input hash and module identity;
+- the exact bytes of the discovered `pyproject.toml` whenever it contains a
+  `[tool.crabwalk]` table;
 - Crabwalk implementation, IR, codegen, and fingerprint schema versions;
 - CPython implementation/version/extension ABI;
 - project-resolved rustc/Cargo executable and toolchain-selector state;
@@ -70,6 +72,15 @@ The cache key includes:
 - hashed build-affecting environment variables, including target, flags, wrappers,
   linker/compiler choices, SDK deployment settings, and `PATH`;
 - declared `[tool.crabwalk].extra-files` trees and `extra-env` values.
+
+Project-configuration hashing is intentionally conservative in the current 1.x
+contract. Crabwalk hashes the complete `pyproject.toml`, not only the
+`[tool.crabwalk]` table. Changing Python-only dependencies, packaging metadata,
+or even comments therefore selects a new native fingerprint and cache namespace,
+even when the reachable compiler-input hash and generated Rust are unchanged.
+This is cache invalidation, not evidence that compilation occurred; build,
+initialization, and cache-validation time should still be reported separately.
+Native-relevant project-metadata scoping is not currently supported.
 
 Raw environment values are not written to inspect metadata. Cache manifests bind
 the fingerprint, extension initialization name, exact filename, and SHA-256 of the
