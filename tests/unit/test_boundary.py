@@ -18,6 +18,27 @@ from crabwalk.compiler.abi import (
     python_return_boundary_supported,
 )
 from crabwalk.compiler.ir import TypeRef
+from crabwalk.runtime import _boundary_metadata
+
+
+def test_str_codec_reports_the_generated_call_scoped_borrow() -> None:
+    type_ref = TypeRef("Str")
+
+    codec = boundary_codec(type_ref)
+
+    assert codec.input_policy == InputPolicy.STRING
+    assert codec.output_policy == OutputPolicy.UNSUPPORTED
+    assert codec.allocation == AllocationKind.BORROWED
+    assert codec.ownership == OwnershipPolicy.BORROW
+    assert _boundary_metadata(type_ref) == {
+        "rust_type": "rust.Str",
+        "input_policy": "String",
+        "allocation": "Borrowed",
+        "ownership": "Borrow",
+        "borrowed": True,
+        "copies_elements": False,
+        "lifetime": "native call",
+    }
 
 
 def test_vec_u8_has_one_deliberate_bytes_codec() -> None:

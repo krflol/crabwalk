@@ -47,6 +47,7 @@ class AllocationKind(StrEnum):
     PYTHON_CONTAINER = "PythonContainer"
     NATIVE_CONTAINER = "NativeContainer"
     OWNED_HANDLE = "OwnedHandle"
+    BORROWED = "Borrowed"
     BORROWED_BUFFER = "BorrowedBuffer"
 
 
@@ -54,6 +55,7 @@ class OwnershipPolicy(StrEnum):
     COPY = "Copy"
     CLONE = "Clone"
     MOVE = "Move"
+    BORROW = "Borrow"
     SHARED_BORROW = "SharedBorrow"
     MUTABLE_BORROW = "MutableBorrow"
 
@@ -127,13 +129,21 @@ def boundary_codec(type_ref: TypeRef) -> BoundaryCodec:
             AllocationKind.NONE,
             OwnershipPolicy.COPY,
         )
-    if type_ref.rust_name in {"String", "Str"}:
+    if type_ref.rust_name == "String":
         return BoundaryCodec(
             type_ref,
             InputPolicy.STRING,
             OutputPolicy.SCALAR,
             AllocationKind.NATIVE_CONTAINER,
             OwnershipPolicy.CLONE,
+        )
+    if type_ref.rust_name == "Str":
+        return BoundaryCodec(
+            type_ref,
+            InputPolicy.STRING,
+            OutputPolicy.UNSUPPORTED,
+            AllocationKind.BORROWED,
+            OwnershipPolicy.BORROW,
         )
     if type_ref.rust_name == "char":
         return BoundaryCodec(

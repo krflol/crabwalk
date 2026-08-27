@@ -155,6 +155,28 @@ and the invariants required when extending the compiled language.
 Normal builds may maintain a copied dependency lock and persist an intentional
 Cargo update. Pass `--locked` when the lock must remain byte-for-byte unchanged.
 
+Applications that accept editable source can compile and bind exported functions
+without importing or executing that Python module:
+
+```python
+from crabwalk import compile_source
+
+compiled = compile_source(
+    editor_text,
+    filename="recipe.py",
+    progress=show_compile_phase,
+)
+transform = compiled.function("transform")
+```
+
+`compile_source` stores a content-addressed UTF-8 snapshot for diagnostics and
+Cargo source maps, then binds `RustFunction` objects directly from the static IR
+and loaded extension. Top-level Python statements in the authored source are not
+executed. This is not a sandbox for Cargo dependencies, build scripts, proc macros,
+or linkers; apply an application-specific source/effect/crate policy before building
+untrusted input. Cancellation is cooperative between phases and cannot preempt an
+already-running Cargo process.
+
 When a `.py` file triggers an implicit first build, Crabwalk reports analysis,
 dependency, cache, Cargo, and extension-loading phases on stderr. Interactive
 terminals get an animated elapsed-time meter; redirected output gets plain log

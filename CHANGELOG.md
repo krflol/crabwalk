@@ -4,10 +4,22 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- `crabwalk.compile_source()` now compiles content-addressed source text and binds
+  exported native functions directly from static IR without importing or executing
+  the authored Python module. It exposes structured inspection, phase progress, and
+  cooperative cancellation for embedding hosts.
+
 ### Changed
 
 - Post-release development builds identify themselves as `1.0.9.dev0`, keeping
   `main` distinct from the immutable 1.0.8 artifacts.
+
+### Fixed
+
+- `rust.Str` runtime inspection now reports the generated call-scoped `&str`
+  borrow instead of incorrectly claiming a cloned native container and element copy.
 
 ## [1.0.8] - 2026-08-27
 
