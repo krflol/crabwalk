@@ -4,6 +4,8 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-08-29
+
 ### Added
 
 - `crabwalk.compile_source()` now compiles content-addressed source text and binds
@@ -13,8 +15,6 @@ All notable Crabwalk changes are recorded here.
 
 ### Changed
 
-- Post-release development builds identify themselves as `1.0.9.dev0`, keeping
-  `main` distinct from the immutable 1.0.8 artifacts.
 - The Rust Book package now exercises the compositional language surface through
   inherent methods, owned domain factories, Option/Result patterns and adapters,
   String/HashMap pipelines, structured `Vec<Shoe>` ownership, and typed sequential
