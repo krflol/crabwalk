@@ -331,5 +331,6 @@ def python_mapping_key_supported(type_ref: TypeRef) -> bool:
 
 def rust_error_display_supported(type_ref: TypeRef) -> bool:
     return (
-        type_ref.rust_name in {*OWNED_VECTOR_ELEMENTS, "Str"} and not type_ref.arguments
+        type_ref.rust_name in {*OWNED_VECTOR_ELEMENTS, "Str", "IoError"}
+        and not type_ref.arguments
     )

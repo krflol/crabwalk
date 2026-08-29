@@ -695,6 +695,11 @@ def _render_expression(
                 expression.arguments[0], boundary_names, emission_names
             )
             return f"__CwThreadPool::new({size})"
+        if expression.constructor == "FileOpen":
+            path = _render_expression(
+                expression.arguments[0], boundary_names, emission_names
+            )
+            return f"std::fs::File::open({path})"
     if isinstance(expression, StructConstructorIR):
         fields = ", ".join(
             f"{name}: {_render_expression(value, boundary_names, emission_names)}"
@@ -832,6 +837,14 @@ def _render_expression(
                     f"{{ let mut {response} = String::new(); "
                     f"std::io::Read::read_to_string(&mut {rendered_receiver}, "
                     f"&mut {response}).unwrap(); {response} }}"
+                )
+        if expression.receiver.type_ref.rust_name == "File":
+            if expression.method == "read_to_string":
+                contents = emission_names.temporary("file_contents")
+                return (
+                    f"{{ let mut {contents} = String::new(); "
+                    f"std::io::Read::read_to_string(&mut {rendered_receiver}, "
+                    f"&mut {contents}).map(|_| {contents}) }}"
                 )
         if expression.receiver.type_ref.rust_name == "HashMap":
             if expression.method in {"contains_key", "remove", "get", "get_mut"}:

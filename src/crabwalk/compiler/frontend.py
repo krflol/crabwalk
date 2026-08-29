@@ -191,6 +191,8 @@ _PRIMITIVES.update(
         "TcpListener": TypeRef("TcpListener"),
         "TcpStream": TypeRef("TcpStream"),
         "ThreadPool": TypeRef("ThreadPool"),
+        "File": TypeRef("File"),
+        "IoError": TypeRef("IoError"),
     }
 )
 _GENERIC_ARITY = {
@@ -2468,6 +2470,23 @@ class _FunctionLowerer(PatternLoweringMixin):
 
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             path = _attribute_parts(node.func)
+            if path == ("rust", "File", "open"):
+                if node.keywords or len(node.args) != 1:
+                    _fail(
+                        "CRAB114",
+                        "Rust file open argument mismatch",
+                        "rust.File.open expects one path string.",
+                        self.path,
+                        node,
+                    )
+                path_value = self._lower_expression(node.args[0], environment, STR)
+                result_type = TypeRef(
+                    "Result",
+                    (TypeRef("File"), TypeRef("IoError")),
+                )
+                if expected is not None:
+                    _require_type(result_type, expected, self.path, node)
+                return ConstructorIR("FileOpen", (path_value,), result_type, span)
             enum = self.domain_enums.get(".".join(path[:-1])) if len(path) > 1 else None
             if enum is not None:
                 variant = next(
@@ -2926,6 +2945,38 @@ class _FunctionLowerer(PatternLoweringMixin):
                     f"Found {value.type_ref.display()}.",
                     self.path,
                     node.args[0],
+                )
+            enclosing_return = self.signature.return_type.underlying
+            if enclosing_return.rust_name != "Result":
+                _fail(
+                    "CRAB177",
+                    "Rust try requires a Result-returning function",
+                    (
+                        f"'{self.signature.name}' returns "
+                        f"{self.signature.return_type.display()}, so it cannot "
+                        "propagate an Err value."
+                    ),
+                    self.path,
+                    node,
+                    "Return rust.Result[T, E] or handle the error explicitly.",
+                )
+            operand_error = value.type_ref.arguments[1]
+            return_error = enclosing_return.arguments[1]
+            if operand_error != return_error:
+                _fail(
+                    "CRAB177",
+                    "Rust try error types differ",
+                    (
+                        f"The operand uses {operand_error.display()}, but "
+                        f"'{self.signature.name}' returns "
+                        f"rust.Result[_, {return_error.display()}]."
+                    ),
+                    self.path,
+                    node.args[0],
+                    (
+                        "Use the same error type. Crabwalk does not yet model "
+                        "arbitrary Rust From conversions for rust.try_."
+                    ),
                 )
             result_type = value.type_ref.arguments[0]
             if expected is not None:
@@ -3928,6 +3979,16 @@ class _FunctionLowerer(PatternLoweringMixin):
                     node,
                     self.path,
                     f"TcpStream.{method} is not in the Crabwalk capability table.",
+                )
+        elif receiver_type.rust_name == "File":
+            if method == "read_to_string" and not node.args:
+                arguments = ()
+                result = TypeRef("Result", (STRING, TypeRef("IoError")))
+            else:
+                _unsupported(
+                    node,
+                    self.path,
+                    f"File.{method} is not in the Crabwalk capability table.",
                 )
         elif receiver_type.rust_name == "ThreadPool":
             if method == "execute" and len(node.args) == 1:

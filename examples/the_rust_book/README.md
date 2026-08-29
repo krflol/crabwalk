@@ -53,7 +53,7 @@ one successful expression shape. The most useful expanded examples are:
 | 5 | `make_square` and Rectangle methods | inherent `&self` methods, a native domain factory, and an `Owned[Rectangle]` return handle |
 | 6 | `plus_one` | typed `Option` construction, payload capture, and exhaustive matching |
 | 8 | `normalize_fields`, `team_scores`, `word_frequencies` | borrowed string splitting, non-`Copy` iterator adapters, `HashMap` mutation, iteration, and Python dict output |
-| 9 | `parse_nonzero`, `nonzero_or_default` | typed parsing, `Result.and_then`, `Ok`/`Err` patterns, and controlled recovery |
+| 9 | `read_username_from_file`, `parse_nonzero` | real `File::open`/whole-file I/O with `?` propagation, typed parsing, `Result` patterns, and controlled recovery |
 | 12 | `SearchConfig` and `search_with_config` | an owned native configuration returned to Python and borrowed across later native calls |
 | 13 | `shoes_in_size` | structured `Vec<Shoe>` input, consuming iteration, domain filtering, and an owned structured return |
 | 13 | `normalize_active_rows` | a borrowed non-`Copy` pipeline split across anonymous iterator locals |

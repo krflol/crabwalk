@@ -156,6 +156,8 @@ def direct_expression_effects(expression: ExpressionIR) -> frozenset[Effect]:
             "TcpStream",
         }:
             effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
+        elif expression.constructor == "FileOpen":
+            effects.add(Effect.BLOCKING)
         return frozenset(effects)
     if isinstance(expression, MethodCallIR):
         effects = set()
@@ -164,6 +166,8 @@ def direct_expression_effects(expression: ExpressionIR) -> frozenset[Effect]:
             effects.update({Effect.UNSAFE_MEMORY, Effect.MAY_PANIC})
         if receiver in {"TcpListener", "TcpStream"}:
             effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
+        if receiver == "File" and expression.method == "read_to_string":
+            effects.add(Effect.BLOCKING)
         if receiver == "ThreadPool":
             effects.update({Effect.THREAD_SPAWN, Effect.BLOCKING, Effect.MAY_PANIC})
         if receiver == "ThreadHandle" and expression.method == "join":

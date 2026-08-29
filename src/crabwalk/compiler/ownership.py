@@ -92,6 +92,8 @@ def builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
         return "mutable"
     if receiver == "TcpStream" and method in {"write_get", "read_to_string"}:
         return "mutable"
+    if receiver == "File" and method == "read_to_string":
+        return "mutable"
     if receiver == "RefCell" and method == "replace":
         return "interior"
     if receiver == "Arc" and method in {"add_locked", "get_locked"}:

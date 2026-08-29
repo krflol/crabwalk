@@ -15,7 +15,7 @@ Compositional example refresh: 2026-08-29.
 | 6 | `ch06_enums.py` | Message variants, exhaustive match, Option `plus_one` | unit/tuple/record enums and typed Option patterns | Complete |
 | 7 | `ch07_modules.py` | cross-module domain import/call | package graph and re-export resolution | Complete |
 | 8 | `ch08_collections.py` | Vec, String pipelines, returned/iterated HashMap | split-transform-collect and grouping algebra | Complete |
-| 9 | `ch09_error_handling.py` | Result, parse, combinators, patterns, propagation, panic | `?`, typed error algebra, panic containment | Complete |
+| 9 | `ch09_error_handling.py` | Result, native file I/O, parse, combinators, patterns, propagation, panic | real `io::Error` propagation with `?`, typed error algebra, panic containment | Complete |
 | 10 | `ch10_generics_traits_lifetimes.py` | generic largest, bounds, named lifetime | monomorphization and LifetimeRef | Complete |
 | 11 | `ch11_automated_tests.py` | assertions, panic expectations | runnable pytest teaching suite | Complete |
 | 12 | `ch12_minigrep.py` | search, owned SearchConfig, config-driven dispatch | domain return/borrow plus lines iteration and Vec returns | Complete, filesystem CLI adapted to pure inputs |

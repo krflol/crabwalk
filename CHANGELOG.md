@@ -4,10 +4,19 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.0.10] - 2026-08-29
+
+### Added
+
+- `rust.File.open(path)` and mutable `File.read_to_string()` provide a bounded,
+  typed native filesystem path for the Rust Book's real `io::Error` and `?`
+  propagation example.
+
 ### Changed
 
-- Post-release development builds identify themselves as `1.0.10.dev0`, keeping
-  `main` distinct from the immutable 1.0.9 artifacts.
+- `rust.try_(...)` now rejects use outside a `Result`-returning function and
+  rejects mismatched error families before rustc; arbitrary `From` conversion is
+  explicitly outside the current surface.
 
 ## [1.0.9] - 2026-08-29
 

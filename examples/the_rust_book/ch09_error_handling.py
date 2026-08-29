@@ -17,12 +17,24 @@ def require_nonzero(value: rust.u64) -> rust.Result[rust.u64, rust.String]:
 # Rust Book source (`?` propagation):
 # https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html#a-shortcut-for-propagating-errors-the--operator
 #
-# `rust.try_(...)` is valid Python syntax that emits Rust's `?` operator. The caller
-# and callee keep the same `Result<T, E>` error type, so rustc checks propagation.
+# `rust.try_(...)` is the Python-valid spelling of postfix Rust `?`. This version
+# follows Listing 9-7 instead of substituting a synthetic validator:
+#
+# * `rust.File.open(path)` emits `std::fs::File::open(path)`.
+# * `File.read_to_string()` is a typed Crabwalk adapter around
+#   `std::io::Read::read_to_string`. It owns the destination `String` internally
+#   and returns `Result[String, IoError]`.
+# * Each `rust.try_` unwraps `Ok` or immediately returns the real `io::Error`.
+#
+# Crabwalk currently requires the operand and enclosing function to use the same
+# error type; it does not yet model arbitrary `From` conversions performed by `?`.
 @rust.fn
-def increment_nonzero(value: rust.u64) -> rust.Result[rust.u64, rust.String]:
-    checked: rust.u64 = rust.try_(require_nonzero(value))
-    return rust.Ok(checked + 1)
+def read_username_from_file(
+    path: rust.Str,
+) -> rust.Result[rust.String, rust.IoError]:
+    username_file: rust.File = rust.try_(rust.File.open(path))
+    username: rust.String = rust.try_(username_file.read_to_string())
+    return rust.Ok(username)
 
 
 # Rust Book source (propagating and composing Result values):

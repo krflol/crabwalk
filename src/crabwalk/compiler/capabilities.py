@@ -202,6 +202,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
+        "filesystem-results",
+        "Native filesystem results",
+        Maturity.PROOF,
+        "typed File::open and whole-file String reads with io::Error propagation",
+        "native success, open-error, and read-error Result propagation test",
+        "read-only whole-file teaching surface; no general path or filesystem API",
+        ("filesystem.result-propagation",),
+    ),
+    Capability(
         "crate-adapters",
         "Typed crate adapters",
         Maturity.BOUNDED,

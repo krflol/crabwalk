@@ -333,6 +333,7 @@ class ConstructorIR:
         "TcpListener",
         "TcpStream",
         "ThreadPool",
+        "FileOpen",
     ]
     arguments: tuple["ExpressionIR", ...]
     type_ref: TypeRef
