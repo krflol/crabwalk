@@ -11,6 +11,7 @@ from .diagnostics import (
     CrabwalkRustError,
     CrabwalkThreadError,
 )
+from .embedding import CompiledSource, compile_source
 
 __all__ = [
     "CrabwalkCompilationError",
@@ -20,8 +21,10 @@ __all__ = [
     "CrabwalkPanicError",
     "CrabwalkRustError",
     "CrabwalkThreadError",
+    "CompiledSource",
     "RUNTIME_ABI_VERSION",
     "RUNTIME_DISTRIBUTION",
     "__version__",
+    "compile_source",
     "rust",
 ]

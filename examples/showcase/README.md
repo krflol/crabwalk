@@ -57,6 +57,26 @@ cold build from a warm execution.
 | [`fastapi_mre.py`](fastapi_mre.py) | Native computation inside an async web API | FastAPI, Uvicorn, asyncio | Rayon, GIL-detached native call |
 | [`ml_mre.py`](ml_mre.py) | Train in Rust and analyze/plot in Python | NumPy, Matplotlib | Owned vectors, `libm`, native gradient descent |
 | [`etl_rayon.py`](etl_rayon.py) | Non-`Copy` String filter/map/collect pipeline | Python input and reporting | typed Rayon adapters, owned vectors |
+| [`structured_etl.py`](structured_etl.py) | Domain rows filtered and grouped in one native call | Python mappings and reporting | `Vec<Sale>`, borrowed iteration, `HashMap` aggregation |
+
+## Structured one-crossing ETL
+
+```text
+python examples/showcase/structured_etl.py
+```
+
+Python mappings are explicitly allocated as a move-aware `Vec<Sale>`. The native
+function borrows each domain row, filters by normalized status, aggregates amounts
+into a Rust `HashMap<String, f64>`, and returns one Python dictionary. The script
+asserts both the grouped result and that the input handle was consumed. This is a
+boundary-composition demonstration; it does not present four rows as a benchmark.
+
+Expected output (dictionary presentation is sorted by the Python shell):
+
+```text
+[('midwest', 16.0), ('west', 7.25)]
+structured rows moved=True
+```
 
 ## Typed Rayon String ETL
 

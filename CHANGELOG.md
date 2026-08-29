@@ -4,10 +4,27 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+### Added
+
+- `crabwalk.compile_source()` now compiles content-addressed source text and binds
+  exported native functions directly from static IR without importing or executing
+  the authored Python module. It exposes structured inspection, phase progress, and
+  cooperative cancellation for embedding hosts.
+
 ### Changed
 
 - Post-release development builds identify themselves as `1.0.9.dev0`, keeping
   `main` distinct from the immutable 1.0.8 artifacts.
+- The Rust Book package now exercises the compositional language surface through
+  inherent methods, owned domain factories, Option/Result patterns and adapters,
+  String/HashMap pipelines, structured `Vec<Shoe>` ownership, and typed sequential
+  and Rayon non-`Copy` iterator chains. A runnable structured ETL showcase adds a
+  one-crossing `Vec<domain>`-to-`HashMap` example.
+
+### Fixed
+
+- `rust.Str` runtime inspection now reports the generated call-scoped `&str`
+  borrow instead of incorrectly claiming a cloned native container and element copy.
 
 ## [1.0.8] - 2026-08-27
 

@@ -81,6 +81,38 @@ fingerprint inputs, cache status, effects, native/Python calls, conversions,
 ownership, and whether the exported wrapper releases the GIL. `show` prints the
 native implementation and Python ABI wrapper for one symbol.
 
+## Embed editable source without importing it
+
+Use the public source API when an editor, service, or plugin host needs native
+callables but must not execute the authored module's top-level Python:
+
+```python
+from crabwalk import compile_source
+
+phases: list[str] = []
+compiled = compile_source(
+    source_text,
+    filename="recipe.py",
+    cache_directory=".recipe-cache",
+    progress=phases.append,
+)
+transform = compiled.function("transform")
+```
+
+The returned `CompiledSource` exposes `functions`, `function(name)`, `fingerprint`,
+`source_hash`, `source_path`, and `inspect()`. Crabwalk normalizes the text to UTF-8,
+stores an immutable content-addressed snapshot, performs static analysis, builds and
+loads the extension, and binds exported `RustFunction` objects directly from IR.
+It never imports the source module, so unrelated top-level Python statements do not
+run and there is no second decorator-driven build lifecycle.
+
+This API is a non-executing Python-module boundary, not a capability sandbox for the
+Rust toolchain. Declared Cargo dependencies, build scripts, procedural macros,
+linkers, and configured tools retain developer permissions. Hosts accepting
+untrusted edits must enforce their own allowed declaration, crate, and effect policy
+before building. The optional `cancelled` callback is checked between phases; it
+cannot stop Cargo work that has already begun.
+
 ## Packages
 
 A regular package (`__init__.py` present) is one compilation unit. Crabwalk finds

@@ -100,6 +100,7 @@ files = [
     "src/crabwalk/compiler/validation.py",
     "src/crabwalk/config.py",
     "src/crabwalk/diagnostics.py",
+    "src/crabwalk/embedding.py",
     "src/crabwalk/namespaces.py",
     "src/crabwalk/progress.py",
     "src/crabwalk/service.py",

@@ -70,6 +70,7 @@ Open `http://127.0.0.1:8001/docs`, or run the focused examples:
 ```text
 python examples/showcase/true_par.py
 python examples/showcase/etl_rayon.py
+python examples/showcase/structured_etl.py
 python examples/showcase/fastapi_mre.py
 python examples/showcase/ml_mre.py
 ```
@@ -155,6 +156,28 @@ and the invariants required when extending the compiled language.
 Normal builds may maintain a copied dependency lock and persist an intentional
 Cargo update. Pass `--locked` when the lock must remain byte-for-byte unchanged.
 
+Applications that accept editable source can compile and bind exported functions
+without importing or executing that Python module:
+
+```python
+from crabwalk import compile_source
+
+compiled = compile_source(
+    editor_text,
+    filename="recipe.py",
+    progress=show_compile_phase,
+)
+transform = compiled.function("transform")
+```
+
+`compile_source` stores a content-addressed UTF-8 snapshot for diagnostics and
+Cargo source maps, then binds `RustFunction` objects directly from the static IR
+and loaded extension. Top-level Python statements in the authored source are not
+executed. This is not a sandbox for Cargo dependencies, build scripts, proc macros,
+or linkers; apply an application-specific source/effect/crate policy before building
+untrusted input. Cancellation is cooperative between phases and cannot preempt an
+already-running Cargo process.
+
 When a `.py` file triggers an implicit first build, Crabwalk reports analysis,
 dependency, cache, Cargo, and extension-loading phases on stderr. Interactive
 terminals get an animated elapsed-time meter; redirected output gets plain log
@@ -191,6 +214,7 @@ python examples/ownership/app.py
 python examples/buffer/app.py
 python examples/crates_regex/app.py
 python examples/parallel/app.py
+python examples/showcase/structured_etl.py
 # From the examples directory:
 python -m the_rust_book.run_all
 ```
@@ -200,6 +224,11 @@ covers Chapters 1–21 and doubles as an end-to-end compiler evolution suite.
 That is chapter coverage, not a claim that every represented Rust subsystem is
 feature-complete. The [generated capability maturity table](https://github.com/krflol/crabwalk/blob/main/Docs/Crabwalk%20Language%20Reference.md#capability-maturity)
 separates proofs, bounded surfaces, and compositional support.
+
+The expanded chapter tour now includes inherent methods and owned domain returns,
+Option/Result pattern algebra, delimited String pipelines, returned HashMaps,
+structured `Vec<domain>` ownership, split-local non-`Copy` iterators, and typed
+Rayon filter/map/collect and indexed-enumerate examples.
 
 ## Documentation
 

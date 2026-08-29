@@ -1,4 +1,4 @@
-"""Chapter 6: data-carrying enums and exhaustive match."""
+"""Chapter 6: data-carrying enums, Option, and exhaustive match."""
 
 from crabwalk import rust
 
@@ -39,3 +39,17 @@ def message_weight(message: rust.Ref[Message]) -> rust.i32:
 @rust.fn
 def optional_or(value: rust.Option[rust.u64], fallback: rust.u64) -> rust.u64:
     return value.unwrap_or(fallback)
+
+
+# Rust Book source (`plus_one`, Listing 6-5):
+# https://doc.rust-lang.org/book/ch06-02-match.html#patterns-that-bind-to-values
+#
+# `rust.Some(...)` and `None` are semantic Option patterns. Crabwalk validates the
+# payload type and emits `Some(number)`/`None`; rustc still checks exhaustiveness.
+@rust.fn
+def plus_one(value: rust.Option[rust.i32]) -> rust.Option[rust.i32]:
+    match value:
+        case rust.Some(number):
+            return rust.Some(number + 1)
+        case None:
+            return None

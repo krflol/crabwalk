@@ -26,19 +26,27 @@ from .ch04_ownership import (
     first_word_length,
     vector_length,
 )
-from .ch05_structs import Rectangle, can_hold, rectangle_area, square_area
-from .ch06_enums import Message, message_weight, optional_or
+from .ch05_structs import Rectangle, can_hold, make_square, rectangle_area, square_area
+from .ch06_enums import Message, message_weight, optional_or, plus_one
 from .ch07_modules import area_through_module
 from .ch08_collections import (
     blue_team_score,
     greeting,
+    joined_languages,
+    normalize_fields,
     normalize_greeting,
+    team_scores,
+    total_team_score,
     vector_total,
+    word_frequencies,
 )
 from .ch09_error_handling import (
+    doubled_nonzero_or_zero,
     expect_nonzero,
     increment_nonzero,
+    nonzero_or_default,
     panic_on_zero,
+    parse_nonzero,
     require_nonzero,
 )
 from .ch10_generics_traits_lifetimes import (
@@ -51,8 +59,23 @@ from .ch11_automated_tests import (
     can_hold_dimensions,
     greeting as test_greeting,
 )
-from .ch12_minigrep import search, search_case_insensitive, validate_argument_count
-from .ch13_closures_iterators import matching_line_count, shifted_sum, transformed
+from .ch12_minigrep import (
+    build_config,
+    search,
+    search_case_insensitive,
+    search_with_config,
+    validate_argument_count,
+)
+from .ch13_closures_iterators import (
+    Shoe,
+    indexed_parallel_values,
+    matching_line_count,
+    normalize_active_rows,
+    parallel_normalize_active_rows,
+    shifted_sum,
+    shoes_in_size,
+    transformed,
+)
 from .ch14_cargo import contains_number
 from .ch15_smart_pointers import boxed_value, interior_mutation, rc_counts
 from .ch16_concurrency import channel_value, moved_vector_length, shared_counter
@@ -143,6 +166,10 @@ def main() -> None:
     assert rectangle_area(outer) == 1_500
     assert can_hold(outer, inner) is True
     assert square_area(12) == 144
+    square = make_square(9)
+    assert square.to_python() == {"width": 9, "height": 9}
+    assert rectangle_area(square) == 81
+    assert square.moved is False
     assert area_through_module(outer) == 1_500
 
     quit_message = Message.Quit()
@@ -162,19 +189,43 @@ def main() -> None:
     }
     assert optional_or(None, 9) == 9
     assert optional_or(7, 9) == 7
+    assert plus_one(None) is None
+    assert plus_one(41) == 42
 
     assert vector_total() == 15
     assert greeting("Ferris") == "Hello, Ferris"
     assert normalize_greeting("hello world") == "hello Rust"
     assert normalize_greeting("hello Crabwalk") == "hello Crabwalk"
+    assert normalize_fields("  Rust||PYTHON|Crabwalk  ") == [
+        "rust",
+        "python",
+        "crabwalk",
+    ]
+    assert joined_languages() == "Rust + Python + Crabwalk"
+    assert team_scores() == {"Blue": 25, "Yellow": 50}
+    assert total_team_score() == 75
     assert blue_team_score() == 25
+    assert word_frequencies("hello world wonderful world") == {
+        "hello": 1,
+        "world": 2,
+        "wonderful": 1,
+    }
 
     assert require_nonzero(5) == 5
     assert increment_nonzero(5) == 6
+    assert parse_nonzero(" 42 ") == 42
+    assert nonzero_or_default(0, 7) == 7
+    assert nonzero_or_default(9, 7) == 9
+    assert doubled_nonzero_or_zero(4) == 8
+    assert doubled_nonzero_or_zero(0) == 0
     assert panic_on_zero(8) == 8
     assert expect_nonzero(8) == 8
 
-    for operation in (lambda: require_nonzero(0), lambda: increment_nonzero(0)):
+    for operation in (
+        lambda: require_nonzero(0),
+        lambda: increment_nonzero(0),
+        lambda: parse_nonzero("not-a-number"),
+    ):
         try:
             operation()
         except CrabwalkRustError:
@@ -201,6 +252,10 @@ def main() -> None:
     poem = "Rust:\nsafe, fast, productive.\nPick three.\nTrust me."
     assert search("duct", poem) == ["safe, fast, productive."]
     assert search_case_insensitive("rUsT", poem) == ["Rust:", "Trust me."]
+    config = build_config("rust", True)
+    assert config.to_python() == {"query": "rust", "ignore_case": True}
+    assert search_with_config(config, poem) == ["Rust:", "Trust me."]
+    assert config.moved is False
     assert validate_argument_count(3) == 3
     try:
         validate_argument_count(2)
@@ -212,6 +267,39 @@ def main() -> None:
     assert transformed(4, 2) == [4, 5, 6]
     assert shifted_sum(3) == 15
     assert matching_line_count("Rust", poem) == 1
+
+    shoes = rust.Vec[Shoe](
+        [
+            {"size": 10, "style": "sneaker"},
+            {"size": 13, "style": "sandal"},
+            {"size": 10, "style": "boot"},
+        ]
+    )
+    matching_shoes = shoes_in_size(shoes, 10)
+    assert shoes.moved is True
+    assert matching_shoes.to_python() == [
+        {"size": 10, "style": "sneaker"},
+        {"size": 10, "style": "boot"},
+    ]
+
+    rows = rust.Vec[rust.String](
+        [
+            "1|ALICE|active|CHICAGO",
+            "2|BOB|inactive|MADISON",
+            "3|CAROL|active|MILWAUKEE",
+        ]
+    )
+    expected_rows = [
+        "1|alice|active|chicago",
+        "3|carol|active|milwaukee",
+    ]
+    assert normalize_active_rows(rows) == expected_rows
+    assert rows.moved is False
+    parallel_rows = rust.Vec[rust.String](rows.to_python())
+    assert parallel_normalize_active_rows(parallel_rows) == expected_rows
+    assert parallel_rows.moved is True
+    indexed_values = rust.Vec[rust.u64]([10, 20, 30])
+    assert indexed_parallel_values(indexed_values) == [(0, 10), (1, 20), (2, 30)]
 
     assert contains_number("room 7") is True
     assert contains_number("no digits") is False

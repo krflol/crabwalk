@@ -14,6 +14,12 @@ tags:
 
 Crabwalk's Python frontend is static: analyzing a package does not import it,
 execute `__init__.py`, evaluate annotations, or call runtime crate objects.
+`crabwalk.compile_source()` extends that property through callable binding: it
+materializes a content-addressed source snapshot, builds the native extension, and
+constructs exported `RustFunction` wrappers directly from semantic IR without
+importing or executing the authored Python module. The snapshot is required for
+durable source spans and Cargo diagnostics.
+
 Compilation is different. Cargo dependencies, build scripts, procedural macros,
 rustc wrappers, linkers, and configured external tools can execute code with the
 developer's permissions. Crabwalk does not sandbox them.
@@ -136,6 +142,10 @@ index, dependency, and provenance policies.
 - No general Python calls, objects, reflection, exceptions-as-control-flow,
   generators, or dynamic imports inside `@rust.fn`. Closures are accepted only in
   statically typed iterator/thread/async/pool positions.
+- `compile_source` is currently a single-module, content-addressed embedding API.
+  It does not make Cargo dependencies safe for untrusted execution, and its
+  cancellation callback is cooperative between phases rather than a running-Cargo
+  preemption mechanism.
 - No defaults, keyword calls, variadics, arbitrary crate reflection, inline Rust,
   arbitrary macros, raw address dereference, unions, user-authored unsafe traits, or
   general FFI declarations. Methods, generics, object-safe traits, focused Add/UFCS,

@@ -16,6 +16,7 @@ from crabwalk._version import (
 )
 from crabwalk.boundary import (
     AllocationKind,
+    OwnershipPolicy,
     boundary_codec,
     normalize_boundary_output,
     validate_boundary_input,
@@ -25,7 +26,7 @@ from crabwalk.boundary import (
 from crabwalk.build.cache import read_json, sha256_file
 from crabwalk.build.loader import load_extension
 from crabwalk.compiler.codegen import function_releases_gil
-from crabwalk.compiler.ir import TypeRef
+from crabwalk.compiler.ir import FunctionIR, TypeRef
 from crabwalk.compiler.naming import owned_class_names
 from crabwalk.compiler.frontend import (
     analyze_project_path,
@@ -732,24 +733,53 @@ class RustFunction:
 
     def __init__(
         self,
-        original: Callable[..., object],
+        original: Callable[..., object] | None,
         native: Callable[..., object],
         compilation: CompilationResult,
+        *,
+        function_ir: FunctionIR | None = None,
     ) -> None:
-        self.__name__ = original.__name__
-        self.__qualname__ = original.__qualname__
-        self.__module__ = original.__module__
-        self.__doc__ = original.__doc__
-        self.__annotations__ = dict(getattr(original, "__annotations__", {}))
-        self.__signature__ = inspect.signature(original)
         self._native = native
         self._compilation = compilation
-        function_ir = next(
-            value
-            for value in compilation.ir.functions
-            if value.name == original.__name__
-            and (not value.module_name or value.module_name == original.__module__)
-        )
+        if function_ir is None:
+            if original is None:
+                raise TypeError("a source declaration or FunctionIR is required")
+            function_ir = next(
+                value
+                for value in compilation.ir.functions
+                if value.name == original.__name__
+                and (not value.module_name or value.module_name == original.__module__)
+            )
+        if original is None:
+            self.__name__ = function_ir.name
+            self.__qualname__ = function_ir.name
+            self.__module__ = function_ir.module_name or compilation.ir.module_name
+            self.__doc__ = None
+            self.__annotations__ = {
+                **{
+                    parameter.name: parameter.type_ref.display()
+                    for parameter in function_ir.parameters
+                },
+                "return": function_ir.return_type.display(),
+            }
+            self.__signature__ = inspect.Signature(
+                tuple(
+                    inspect.Parameter(
+                        parameter.name,
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        annotation=parameter.type_ref.display(),
+                    )
+                    for parameter in function_ir.parameters
+                ),
+                return_annotation=function_ir.return_type.display(),
+            )
+        else:
+            self.__name__ = original.__name__
+            self.__qualname__ = original.__qualname__
+            self.__module__ = original.__module__
+            self.__doc__ = original.__doc__
+            self.__annotations__ = dict(getattr(original, "__annotations__", {}))
+            self.__signature__ = inspect.signature(original)
         self._rust_symbol = function_ir.rust_symbol
         self._parameters = function_ir.parameters
         self._return_type = (
@@ -932,17 +962,21 @@ class RustFunction:
 
 def _boundary_metadata(type_ref: TypeRef) -> dict[str, object]:
     codec = boundary_codec(type_ref)
-    borrowed_buffer = codec.allocation == AllocationKind.BORROWED_BUFFER
+    borrowed = codec.ownership in {
+        OwnershipPolicy.BORROW,
+        OwnershipPolicy.SHARED_BORROW,
+        OwnershipPolicy.MUTABLE_BORROW,
+    }
     return {
         "rust_type": type_ref.display(),
         "input_policy": codec.input_policy.value,
         "allocation": codec.allocation.value,
         "ownership": codec.ownership.value,
-        "borrowed": borrowed_buffer,
-        "copies_elements": not borrowed_buffer
+        "borrowed": borrowed,
+        "copies_elements": not borrowed
         and codec.allocation
         in {AllocationKind.NATIVE_CONTAINER, AllocationKind.PYTHON_CONTAINER},
-        "lifetime": "native call" if borrowed_buffer else None,
+        "lifetime": "native call" if borrowed else None,
     }
 
 
@@ -1013,6 +1047,37 @@ def compile_function(function: Callable[..., object]) -> RustFunction:
                 )
             ) from error
     return RustFunction(function, native, cached)
+
+
+def _bind_compilation_function(
+    compilation: CompilationResult,
+    function_ir: FunctionIR,
+) -> RustFunction:
+    """Bind an exported IR function without executing its Python declaration."""
+
+    if not function_ir.exported:
+        raise ValueError(f"{function_ir.qualified_name} is native-only")
+    module = compilation.module
+    if module is None:
+        raise AssertionError("loaded compilation has no extension module")
+    _register_owned_types(compilation)
+    try:
+        native = getattr(module, function_ir.rust_symbol)
+    except AttributeError as error:
+        raise CrabwalkCompilationError(
+            Diagnostic(
+                "CRAB402",
+                "Native symbol is missing",
+                f"The generated extension does not export {function_ir.name}.",
+                function_ir.span,
+            )
+        ) from error
+    return RustFunction(
+        None,
+        native,
+        compilation,
+        function_ir=function_ir,
+    )
 
 
 def compile_struct(original: type[object]) -> object:

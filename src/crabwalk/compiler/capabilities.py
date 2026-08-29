@@ -79,6 +79,21 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
+        "source-embedding",
+        "Non-executing source embedding",
+        Maturity.BOUNDED,
+        "content-addressed source compilation and direct native callable binding",
+        "native top-level side-effect rejection-by-nonexecution and callable test",
+        (
+            "single-module source snapshots; Cargo dependencies remain a trusted "
+            "build boundary; cancellation is phase-cooperative"
+        ),
+        (
+            "embedding.nonexecuting-source-callable",
+            "embedding.phase-cancellation",
+        ),
+    ),
+    Capability(
         "ownership",
         "Ownership boundary",
         Maturity.COMPOSITIONAL,
