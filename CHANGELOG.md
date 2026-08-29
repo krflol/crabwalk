@@ -15,6 +15,11 @@ All notable Crabwalk changes are recorded here.
 
 - Post-release development builds identify themselves as `1.0.9.dev0`, keeping
   `main` distinct from the immutable 1.0.8 artifacts.
+- The Rust Book package now exercises the compositional language surface through
+  inherent methods, owned domain factories, Option/Result patterns and adapters,
+  String/HashMap pipelines, structured `Vec<Shoe>` ownership, and typed sequential
+  and Rayon non-`Copy` iterator chains. A runnable structured ETL showcase adds a
+  one-crossing `Vec<domain>`-to-`HashMap` example.
 
 ### Fixed
 

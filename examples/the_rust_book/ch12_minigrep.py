@@ -3,6 +3,25 @@
 from crabwalk import rust
 
 
+# Rust Book source (`Config` owns parsed command-line values, Listings 12-6 to
+# 12-10):
+# https://doc.rust-lang.org/book/ch12-03-improving-error-handling-and-modularity.html#grouping-configuration-values
+#
+# Python still owns argv/environment parsing, but the validated query and mode can
+# live in a native domain value and cross calls as one move-aware handle.
+@rust.struct
+class SearchConfig:
+    query: rust.String
+    ignore_case: rust.bool
+
+
+@rust.fn
+def build_config(
+    query: rust.String, ignore_case: rust.bool
+) -> rust.Owned[SearchConfig]:
+    return SearchConfig(query=query, ignore_case=ignore_case)
+
+
 # Rust Book sources (the evolving `search` implementation, Listings 12-13–12-19):
 # https://doc.rust-lang.org/book/ch12-03-improving-error-handling-and-modularity.html#splitting-code-into-a-library-crate
 # https://doc.rust-lang.org/book/ch12-04-testing-the-librarys-functionality.html#writing-code-to-pass-the-test
@@ -39,6 +58,20 @@ def search_case_insensitive(
         if lowered_line.contains(lowered_query.as_str()):
             matches.push(rust.String(line))
     return matches
+
+
+# Rust Book source (`run` consumes one coherent Config, Listing 12-12):
+# https://doc.rust-lang.org/book/ch12-03-improving-error-handling-and-modularity.html#extracting-logic-from-main
+#
+# `SearchConfig` is borrowed for the complete call. Its owned query lends a short
+# `&str` through `as_str()`, and dispatch selects one of the two native helpers.
+@rust.fn
+def search_with_config(
+    config: rust.Ref[SearchConfig], contents: rust.Str
+) -> rust.Vec[rust.String]:
+    if config.ignore_case:
+        return search_case_insensitive(config.query.as_str(), contents)
+    return search(config.query.as_str(), contents)
 
 
 # Rust Book source (`Config::build` returning `Result`, Listings 12-8–12-10):

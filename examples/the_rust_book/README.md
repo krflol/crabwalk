@@ -20,6 +20,7 @@ Run the test commands below from the repository root:
 ```text
 python -m pytest examples/the_rust_book/test_ch11_automated_tests.py -q
 python -m pytest tests/integration/test_native_rust_book.py -q
+python -m pytest tests/integration/test_native_showcase_examples.py -q
 ```
 
 The first cold import can invoke Cargo. Crabwalk reports analysis, cache, build, and load phases on stderr; an interactive terminal gets the animated meter. Use `CRABWALK_PROGRESS=never` for quiet CI or `CRABWALK_PROGRESS=always` to force durable phase output.
@@ -41,6 +42,27 @@ The committed dependency resolution is [the package Cargo.lock](../../crabwalk-l
 - `run_all.py` is the boundary-visible contract for the whole package.
 - `test_ch11_automated_tests.py` preserves the Book's testing chapter as actual pytest tests.
 - `hello.html` and `404.html` reproduce the final project's page assets.
+
+## Expanded compositional tour
+
+The chapter files preserve the Book's teaching order, but they no longer stop at
+one successful expression shape. The most useful expanded examples are:
+
+| Chapter | Example | What composes |
+|---:|---|---|
+| 5 | `make_square` and Rectangle methods | inherent `&self` methods, a native domain factory, and an `Owned[Rectangle]` return handle |
+| 6 | `plus_one` | typed `Option` construction, payload capture, and exhaustive matching |
+| 8 | `normalize_fields`, `team_scores`, `word_frequencies` | borrowed string splitting, non-`Copy` iterator adapters, `HashMap` mutation, iteration, and Python dict output |
+| 9 | `parse_nonzero`, `nonzero_or_default` | typed parsing, `Result.and_then`, `Ok`/`Err` patterns, and controlled recovery |
+| 12 | `SearchConfig` and `search_with_config` | an owned native configuration returned to Python and borrowed across later native calls |
+| 13 | `shoes_in_size` | structured `Vec<Shoe>` input, consuming iteration, domain filtering, and an owned structured return |
+| 13 | `normalize_active_rows` | a borrowed non-`Copy` pipeline split across anonymous iterator locals |
+| 13 | `parallel_normalize_active_rows` | the same String filter/map/collect shape on typed Rayon workers with explicit ownership transfer |
+| 13 | `indexed_parallel_values` | indexed-parallel capability tracked through `copied().enumerate().collect_vec()` |
+
+`run_all.py` exercises all of these through their real Python/Rust boundaries and
+checks observable move state as well as returned values. The package now resolves
+both `regex` and Rayon through its committed Cargo lock.
 
 ## Adaptation vocabulary
 

@@ -1,4 +1,4 @@
-"""Chapter 14: a Cargo dependency resolved for the generated package crate."""
+"""Chapter 14: Cargo dependencies resolved for the generated package crate."""
 
 from crabwalk import rust
 
@@ -22,9 +22,15 @@ from crabwalk import rust
 # inside compiled functions—there is no Python import or foreign-function shim.
 regex = rust.crate("regex", version="1")
 
+# Chapter 13 declares Rayon in the same way, so this package's committed lock now
+# demonstrates multiple crates shared by one generated native package.
+
 
 @rust.fn
 def contains_number(value: rust.Str) -> rust.bool:
+    # This compact terminal chain is intentionally rustc-resolved. Use Crabwalk's
+    # typed `rust.extern_type`/`rust.extern` adapters when a crate-defined value
+    # must be stored, passed, or assigned an explicit effect contract.
     return regex.Regex.new(r"\d+").unwrap().is_match(value)
 
 

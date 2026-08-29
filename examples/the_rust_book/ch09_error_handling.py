@@ -25,6 +25,41 @@ def increment_nonzero(value: rust.u64) -> rust.Result[rust.u64, rust.String]:
     return rust.Ok(checked + 1)
 
 
+# Rust Book source (propagating and composing Result values):
+# https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html#propagating-errors
+#
+# The expected local type selects Rust's `parse::<u64>()`. `and_then` receives a
+# typed closure returning the same `Result[_, String]` error family, so parsing and
+# semantic validation remain one recoverable native pipeline.
+@rust.fn
+def parse_nonzero(text: rust.Str) -> rust.Result[rust.u64, rust.String]:
+    parsed: rust.Result[rust.u64, rust.String] = text.trim().parse()
+    return parsed.and_then(lambda number: require_nonzero(number))
+
+
+# Rust Book source (`match` over Result):
+# https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html#matching-on-different-errors
+#
+# Result is a real typed sum in pattern position. This helper keeps both branches
+# inside Rust and returns an ordinary value, making recovery visible without an
+# exception crossing the Python boundary.
+@rust.fn
+def nonzero_or_default(value: rust.u64, fallback: rust.u64) -> rust.u64:
+    checked: rust.Result[rust.u64, rust.String] = require_nonzero(value)
+    match checked:
+        case rust.Ok(number):
+            return number
+        case rust.Err(_):
+            return fallback
+
+
+# `map` transforms only Ok; `unwrap_or` supplies a value only for Err. The adapter
+# chain is lazy native control flow, not Python exception handling.
+@rust.fn
+def doubled_nonzero_or_zero(value: rust.u64) -> rust.u64:
+    return require_nonzero(value).map(lambda number: number * 2).unwrap_or(0)
+
+
 # Rust Book source:
 # https://doc.rust-lang.org/book/ch09-01-unrecoverable-errors-with-panic.html
 #
