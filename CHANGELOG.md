@@ -4,6 +4,11 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+### Changed
+
+- Post-release development builds identify themselves as `1.0.11.dev0`, keeping
+  `main` distinct from the immutable 1.0.10 artifacts.
+
 ## [1.0.10] - 2026-08-29
 
 ### Added
