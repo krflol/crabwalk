@@ -36,6 +36,7 @@ xfail-only contract does not satisfy a maturity claim.
 | Structured native data | Compositional | recursive vectors, domain rows, nested domains, owned domain returns | Python mappings/handles through Vec<Row>, nested struct/enum round trips<br>Contracts: `structured.vector-domain-input`, `structured.nested-domain-roundtrip`, `structured.owned-domain-return` | allocating explicit input; direct recursive domain cycles are invalid Rust |
 | Read-only numeric buffer boundary | Bounded | call-scoped zero-copy input from one-dimensional, C-contiguous, native-endian Python buffers | native array/memoryview track-plan test, zero-length exporters, and negative shape/format/alignment tests<br>Contracts: `buffer.readonly-numeric-native`, `buffer.invalid-input-rejected` | primitive numeric inputs only; GIL held; no writable, strided, retained, parallel, or output buffers |
 | String, HashMap, Option/Result | Compositional | parse-transform-group-iterate-return algebra with typed errors | native delimited parsing and structured filter-group-emit acceptance<br>Contracts: `collections.result-pattern-algebra`, `collections.hashmap-iteration`, `collections.hashmap-split-local`, `collections.hashable-map-return`, `collections.hashmap-borrowed-string-key` | documented method table is finite, not the complete Rust standard library |
+| Native filesystem results | Proof | typed File::open and whole-file String reads with io::Error propagation | native success, open-error, and read-error Result propagation test<br>Contracts: `filesystem.result-propagation` | read-only whole-file teaching surface; no general path or filesystem API |
 | Typed crate adapters | Bounded | external types/functions, borrow signatures, closures, declared effects | real path-crate value and generic callback native test<br>Contracts: `crate.typed-value`, `crate.typed-callback` | no trait/builder manifest generation or automatic crate API discovery |
 | Traits, generics, operators | Bounded | generic helpers, shared no-argument traits, Add implementations | Rust Book and focused native conformance tests<br>Contracts: `traits.dynamic-dispatch`, `generics.concrete-export` | not a general Rust trait or operator declaration language |
 | std-only native futures | Proof | Future/await/join/select lowering through a teaching executor | focused Rust Book subprocess tests<br>Contracts: `futures.split-local-block-on` | busy-polling; no reactor, cancellation, Tokio, or Python future ABI |
@@ -69,6 +70,8 @@ xfail-only contract does not satisfy a maturity claim.
 | `rust.bool` | `bool` | exact Python `bool` only |
 | `rust.String` | `String` | allocating UTF-8 copy |
 | `rust.Str` | `&str` | call-scoped Python string borrow; cannot be returned |
+| `rust.File` | `std::fs::File` | native-only local returned by `rust.File.open(path)` |
+| `rust.IoError` | `std::io::Error` | error type for a top-level exported `Result`; becomes `CrabwalkRustError` |
 | `rust.Buffer[T]` | call-scoped alias-aware numeric view | top-level input only; borrows a read-only, one-dimensional, C-contiguous, native-endian Python buffer without copying elements |
 | `rust.Option[T]` | `Option<T>` | `None` or the supported conversion for `T`; `T` must not itself normalize to `None` |
 | `rust.Result[T, E]` | `Result<T, E>` | top-level exported return control type only; `Ok` converts `T`; `Err` raises `CrabwalkRustError` |
@@ -186,12 +189,19 @@ raised as `CrabwalkPanicError`; it never unwinds into Python.
 | `Sender`, `Receiver`, `ThreadHandle` | `send`, `recv`, `recv_async`, `join` |
 | `TcpListener` | `local_port`, bounded `serve_http_once` |
 | `TcpStream` | `write_get`, `shutdown_write`, `read_to_string` |
+| `File` | `rust.File.open(path) -> Result[File, IoError]`; mutable `read_to_string() -> Result[String, IoError]` |
 | `ThreadPool` | unit-returning `execute(lambda: expression)` jobs |
 
 `ThreadPool.finish()` consumes the pool and returns `Result[Unit, String]` after
 closing the channel and joining workers. Use `.expect(...)` or propagate the result
 when worker failure matters; `Drop` still closes/joins but never propagates a worker
 panic.
+
+`rust.try_(result)` is the Python-valid spelling of Rust's postfix `?` operator.
+It unwraps `Ok` and returns `Err` from the enclosing native function immediately.
+The enclosing function must return `rust.Result`, and its error type must exactly
+match the operand's error type. Rust's more general `From`-based error conversion
+is not yet modeled by Crabwalk.
 
 For `HashMap[String, V]`, lookup operations (`contains_key`, `remove`, `get`,
 `get_mut`, and `get_or`) accept either an owned `String` key or a borrowed `Str`.
@@ -279,7 +289,14 @@ These are audited examples, not general inline Rust. Arbitrary raw addresses,
 unions, user-authored unsafe traits, arbitrary FFI signatures, and escape-hatch
 expressions remain rejected.
 
-## Native networking and thread pool
+## Native filesystem, networking, and thread pool
+
+`rust.File` and `rust.IoError` provide the bounded Chapter 9 lifecycle:
+`rust.File.open(path)` returns the real `std::io::Result<File>`, and mutable
+`File.read_to_string()` allocates a destination `String`, invokes
+`std::io::Read::read_to_string`, and returns `Result[String, IoError]`. This is a
+whole-file teaching adapter, not a general filesystem, path, buffered-I/O, or
+streaming API.
 
 `rust.TcpListener`, `rust.TcpStream`, and `rust.ThreadPool` are native-only local
 types for the bounded Rust Book server proof. The listener binds an explicit

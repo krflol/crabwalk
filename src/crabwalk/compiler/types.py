@@ -210,6 +210,8 @@ class TypeRef(metaclass=_TypeRefMeta):
             "TcpListener": "std::net::TcpListener",
             "TcpStream": "std::net::TcpStream",
             "ThreadPool": "__CwThreadPool",
+            "File": "std::fs::File",
+            "IoError": "std::io::Error",
         }
         if self.rust_name == "Buffer":
             return f"__CwBuffer<'_, {self.arguments[0].render()}>"

@@ -9,6 +9,8 @@ body is compiled together into one Rust extension, while this small host program
 checks the values crossing the Python/Rust boundary.
 """
 
+from pathlib import Path
+
 from crabwalk import CrabwalkPanicError, CrabwalkRustError, rust
 
 from .ch01_getting_started import hello_world
@@ -43,10 +45,10 @@ from .ch08_collections import (
 from .ch09_error_handling import (
     doubled_nonzero_or_zero,
     expect_nonzero,
-    increment_nonzero,
     nonzero_or_default,
     panic_on_zero,
     parse_nonzero,
+    read_username_from_file,
     require_nonzero,
 )
 from .ch10_generics_traits_lifetimes import (
@@ -212,7 +214,8 @@ def main() -> None:
     }
 
     assert require_nonzero(5) == 5
-    assert increment_nonzero(5) == 6
+    username_path = Path(__file__).with_name("username.txt")
+    assert read_username_from_file(str(username_path)).strip() == "Ferris"
     assert parse_nonzero(" 42 ") == 42
     assert nonzero_or_default(0, 7) == 7
     assert nonzero_or_default(9, 7) == 9
@@ -221,9 +224,15 @@ def main() -> None:
     assert panic_on_zero(8) == 8
     assert expect_nonzero(8) == 8
 
+    try:
+        read_username_from_file(str(Path(__file__).with_name("missing-username.txt")))
+    except CrabwalkRustError as error:
+        assert error.rust_type == "rust.IoError"
+    else:  # pragma: no cover - this is a failure message for manual runs
+        raise AssertionError("a missing file must cross as rust.IoError")
+
     for operation in (
         lambda: require_nonzero(0),
-        lambda: increment_nonzero(0),
         lambda: parse_nonzero("not-a-number"),
     ):
         try:

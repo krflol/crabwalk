@@ -1,6 +1,6 @@
 """Runtime and distribution compatibility versions."""
 
-__version__ = "1.0.10.dev0"
+__version__ = "1.0.10"
 RUNTIME_ABI_VERSION = 1
 RUNTIME_DISTRIBUTION = "crabwalk-lang"
 PREBUILT_MANIFEST_SCHEMA_VERSION = 4

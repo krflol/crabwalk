@@ -5,7 +5,7 @@ aliases:
 type: project
 project: Crabwalk
 status: active
-phase: 1.0.10 development
+phase: 1.0.10 release
 created: 2026-08-21
 updated: 2026-08-29
 tags:
@@ -18,7 +18,7 @@ tags:
 > [!abstract] Current outcome
 > Crabwalk is a published Apache-2.0 compiler/runtime that lowers an explicit,
 > source-spanned Python subset into inspectable Rust and CPython extensions.
-> Version 1.0.9 is published; development on `main` identifies as 1.0.10.dev0.
+> Version 1.0.10 is the current release candidate.
 
 ## Sources of truth
 
@@ -40,8 +40,9 @@ tags:
 - deterministic Rust, PyO3, Cargo, source-map, and mixed-wheel generation;
 - typed effects, dispatch propagation, boundary-placement validation, and explicit
   opaque external-crate calls;
-- primitive/string/container, structured-domain, and borrowed-buffer boundaries;
-  panic and `Result` translation; and effect-aware GIL detachment;
+- primitive/string/container, structured-domain, borrowed-buffer, and bounded
+  native-file boundaries; panic and `Result` translation; and effect-aware GIL
+  detachment;
 - persisted complete Cargo locks and content-addressed, integrity-checked artifacts;
 - coordinated build/prune/load locks, mapped-artifact leases, and uncertainty-aware
   cache accounting;

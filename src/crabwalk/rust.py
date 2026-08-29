@@ -257,6 +257,8 @@ ThreadHandle = RustGeneric("ThreadHandle", 1)
 TcpListener = RustType("TcpListener")
 TcpStream = RustType("TcpStream")
 ThreadPool = RustType("ThreadPool")
+File = RustType("File")
+IoError = RustType("IoError")
 Tuple = RustTupleGeneric()
 Array = RustArrayGeneric()
 Borrow = RustBorrowGeneric()
@@ -706,6 +708,8 @@ __all__ = [
     "TcpListener",
     "TcpStream",
     "ThreadPool",
+    "File",
+    "IoError",
     "Vec",
     "bool",
     "char",

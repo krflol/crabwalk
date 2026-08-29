@@ -135,6 +135,8 @@ CRABWALK_BUILTIN_TYPE_NAMES = frozenset(
         "TcpListener",
         "TcpStream",
         "ThreadPool",
+        "File",
+        "IoError",
         "Tuple",
         "Array",
         "Borrow",

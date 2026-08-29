@@ -93,7 +93,7 @@ precise wording for public claims.
 The current compiler surface includes:
 
 - checked Rust primitives, `String`, borrowed `Str`, read-only numeric `Buffer`,
-  `Vec`, `Option`, and `Result`;
+  `Vec`, `Option`, and `Result`, plus bounded `File`/`IoError` propagation;
 - locals, arithmetic, conditionals, loops, native calls, recursion, and semantic
   receiver/place capability checking;
 - one native extension per regular Python package, including imports/re-exports;
