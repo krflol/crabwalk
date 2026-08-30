@@ -8,7 +8,13 @@ import venv
 import zipfile
 from pathlib import Path
 
+from crabwalk import __version__
 from crabwalk.compiler.capabilities import capability_contract
+
+
+def _current_runtime_prerelease_args() -> list[str]:
+    """Let pip select the locally built runtime while main is a dev release."""
+    return ["--pre"] if ".dev" in __version__ else []
 
 
 def _write_package(root: Path) -> Path:
@@ -168,6 +174,7 @@ def test_installed_wheel_uses_embedded_extension_without_rust(
             "-m",
             "pip",
             "install",
+            *_current_runtime_prerelease_args(),
             "--no-index",
             "--find-links",
             str(runtime_dist),
@@ -388,6 +395,7 @@ packages = ["src/regular_kernel", "src/namespace_kernel"]
             "-m",
             "pip",
             "install",
+            *_current_runtime_prerelease_args(),
             "--no-index",
             "--find-links",
             str(runtime_dist),
