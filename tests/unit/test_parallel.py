@@ -38,7 +38,7 @@ def parallel_sum(stop: rust.u64) -> rust.u64:
     assert 'rayon = { version = "1" }' in generated.cargo_toml
     assert f"extern crate rayon as {binding};" in generated.rust_source
     assert f"use {binding}::prelude::*;" in generated.rust_source
-    assert ".par_iter().copied().sum()" in generated.rust_source
+    assert ".par_iter().copied().sum::<u64>()" in generated.rust_source
 
     missing = tmp_path / "missing_rayon.py"
     missing.write_text(
@@ -109,7 +109,7 @@ def reduce_total(values: rust.Ref[rust.Vec[rust.u64]]) -> rust.Option[rust.u64]:
     assert map_closure.rust_parameter is not None
     assert re.search(
         r"\.par_iter\(\)\.filter\(\|(?P<item>__cw_tmp_\d+_[0-9a-f]+)\| "
-        rf"\{{ let {re.escape(filter_closure.rust_parameter)} = \*(?P=item); "
+        rf"\{{ let {re.escape(filter_closure.rust_parameter)} = \*(?P=item);\s+"
         rf"{re.escape(filter_closure.rust_parameter)}\.contains\(\"\|active\|\"\) \}}\)"
         rf"\.map\(\|{re.escape(map_closure.rust_parameter)}\| "
         rf"{re.escape(map_closure.rust_parameter)}\.to_lowercase\(\)\)"

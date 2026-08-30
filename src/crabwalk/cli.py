@@ -11,8 +11,9 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
+import time
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Literal, Sequence, cast
 
 from crabwalk import __version__
 from crabwalk.diagnostics import CrabwalkCompilationError
@@ -31,6 +32,12 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--project", type=Path)
         command.add_argument("--locked", action="store_true")
         command.add_argument("--offline", action="store_true")
+        command.add_argument(
+            "--diagnostic-format", choices=("human", "json"), default="human"
+        )
+        if name == "check":
+            command.add_argument("--watch", action="store_true")
+            command.add_argument("--watch-interval", type=float, default=0.5)
     inspect_command = commands.add_parser(
         "inspect",
         help="classify compiled functions and build inputs",
@@ -80,6 +87,19 @@ def build_parser() -> argparse.ArgumentParser:
     cache_prune.add_argument("--max-bytes", type=int, default=2 * 1024 * 1024 * 1024)
     cache_prune.add_argument("--max-age-days", type=float, default=30.0)
     cache_prune.add_argument("--dry-run", action="store_true")
+    explain = commands.add_parser("explain", help="explain a Crabwalk diagnostic")
+    explain.add_argument("code")
+    explain.add_argument("--json", action="store_true")
+    export = commands.add_parser(
+        "export-rust", help="export the exact generated Cargo project"
+    )
+    export.add_argument("path", type=Path)
+    export.add_argument("destination", type=Path)
+    export.add_argument("--module-name")
+    export.add_argument("--project", type=Path)
+    export.add_argument("--locked", action="store_true")
+    export.add_argument("--offline", action="store_true")
+    commands.add_parser("lsp", help="serve source diagnostics over LSP stdio")
     return parser
 
 
@@ -87,11 +107,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     if arguments.command == "doctor":
         return _doctor()
+    if arguments.command == "explain":
+        return _explain(arguments.code, arguments.json)
+    if arguments.command == "lsp":
+        from crabwalk.lsp import serve
+
+        return serve()
+    if arguments.command == "export-rust":
+        return _export_rust(arguments)
     if arguments.command == "wheel":
         from crabwalk.wheel import build_wheel
 
         try:
-            result = build_wheel(
+            wheel_result = build_wheel(
                 arguments.path,
                 arguments.output_dir,
                 distribution_name=arguments.name,
@@ -103,15 +131,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         except CrabwalkCompilationError as error:
             print(str(error), file=sys.stderr)
             return 1
-        print(result.path)
+        print(wheel_result.path)
         return 0
     if arguments.command == "cache":
         return _cache(arguments)
+    if arguments.command == "check" and arguments.watch:
+        return _watch_check(arguments)
     try:
-        mode = (
-            "expand" if arguments.command in {"inspect", "show"} else arguments.command
+        mode = cast(
+            Literal["expand", "check", "build"],
+            "expand" if arguments.command in {"inspect", "show"} else arguments.command,
         )
-        result = default_service.compile_path(
+        compilation_result = default_service.compile_path(
             arguments.path,
             module_name=arguments.module_name,
             mode=mode,
@@ -121,20 +152,136 @@ def main(argv: Sequence[str] | None = None) -> int:
             project=arguments.project,
         )
     except CrabwalkCompilationError as error:
-        print(str(error), file=sys.stderr)
+        _print_compilation_error(
+            error,
+            operation=arguments.command,
+            output_format=getattr(arguments, "diagnostic_format", "human"),
+        )
         return 1
     if arguments.command == "inspect":
-        _inspect(result, arguments.json)
+        _inspect(compilation_result, arguments.json)
     elif arguments.command == "show":
-        return _show(result, arguments.symbol)
+        return _show(compilation_result, arguments.symbol)
     elif arguments.command == "expand":
-        print(result.generated_dir / "src" / "lib.rs")
+        print(compilation_result.generated_dir / "src" / "lib.rs")
     elif arguments.command == "check":
-        print(f"checked {result.ir.module_name} ({result.fingerprint[:16]})")
+        print(
+            f"checked {compilation_result.ir.module_name} "
+            f"({compilation_result.fingerprint[:16]})"
+        )
     else:
-        state = "cache hit" if result.cache_hit else "built"
-        print(f"{state}: {result.artifact}")
+        state = "cache hit" if compilation_result.cache_hit else "built"
+        print(f"{state}: {compilation_result.artifact}")
     return 0
+
+
+def _print_compilation_error(
+    error: CrabwalkCompilationError,
+    *,
+    operation: str,
+    output_format: str,
+) -> None:
+    if output_format == "json":
+        from crabwalk.tooling import diagnostic_document
+
+        print(
+            json.dumps(
+                diagnostic_document(error.diagnostics, operation=operation),
+                sort_keys=True,
+            )
+        )
+    else:
+        print(str(error), file=sys.stderr)
+
+
+def _explain(code: str, as_json: bool) -> int:
+    from crabwalk.tooling import explain_diagnostic
+
+    explanation = explain_diagnostic(code)
+    if explanation is None:
+        print(f"unknown Crabwalk diagnostic: {code.upper()}", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(explanation.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"{explanation.code} — {explanation.family}")
+        print(explanation.summary)
+        print(f"next: {explanation.next_step}")
+    return 0
+
+
+def _export_rust(arguments: argparse.Namespace) -> int:
+    from crabwalk.tooling import export_generated_project
+
+    try:
+        result = default_service.compile_path(
+            arguments.path,
+            module_name=arguments.module_name,
+            mode="expand",
+            load=False,
+            locked=arguments.locked,
+            offline=arguments.offline,
+            project=arguments.project,
+        )
+        destination = export_generated_project(result, arguments.destination)
+    except CrabwalkCompilationError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+    print(destination)
+    return 0
+
+
+def _watch_check(arguments: argparse.Namespace) -> int:
+    """Recheck when any compiler-input source changes, preserving Cargo locks."""
+
+    interval = arguments.watch_interval
+    if interval <= 0:
+        print("--watch-interval must be positive", file=sys.stderr)
+        return 2
+    known: tuple[tuple[str, int, int], ...] | None = None
+    paths: tuple[Path, ...]
+    try:
+        while True:
+            try:
+                result = default_service.compile_path(
+                    arguments.path,
+                    module_name=arguments.module_name,
+                    mode="check",
+                    load=False,
+                    locked=arguments.locked,
+                    offline=arguments.offline,
+                    project=arguments.project,
+                )
+            except CrabwalkCompilationError as error:
+                _print_compilation_error(
+                    error,
+                    operation="check",
+                    output_format=arguments.diagnostic_format,
+                )
+                paths = (Path(arguments.path).resolve(),)
+            else:
+                print(f"checked {result.ir.module_name} ({result.fingerprint[:16]})")
+                paths = tuple(Path(path) for path in result.ir.source_paths)
+            known = _watch_snapshot(paths)
+            while True:
+                time.sleep(interval)
+                current = _watch_snapshot(paths)
+                if current != known:
+                    break
+    except KeyboardInterrupt:
+        print("watch stopped", file=sys.stderr)
+        return 0
+
+
+def _watch_snapshot(paths: tuple[Path, ...]) -> tuple[tuple[str, int, int], ...]:
+    result: list[tuple[str, int, int]] = []
+    for path in sorted(paths):
+        try:
+            stat = path.stat()
+            result.append((str(path), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            result.append((str(path), -1, -1))
+    return tuple(result)
 
 
 def _cache(arguments: argparse.Namespace) -> int:
@@ -154,7 +301,7 @@ def _cache(arguments: argparse.Namespace) -> int:
             return 1
         from crabwalk.inspection import compilation_inspection
 
-        cache = compilation_inspection(result)["cache"]
+        cache = cast(dict[str, Any], compilation_inspection(result)["cache"])
         if arguments.json:
             print(json.dumps(cache, indent=2, sort_keys=True))
         else:
@@ -205,15 +352,15 @@ def _inspect(result: object, as_json: bool) -> None:
 
     if not isinstance(result, CompilationResult):
         raise TypeError("expected a CompilationResult")
-    payload = compilation_inspection(result)
+    payload = cast(dict[str, Any], compilation_inspection(result))
     if as_json:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
     print(f"module: {payload['module']}")
     print(f"fingerprint: {payload['fingerprint']}")
-    cache = payload["cache"]
+    cache = cast(dict[str, Any], payload["cache"])
     print(f"cache: {cache['status']} ({cache['artifact']})")
-    cargo_policy = payload["cargo_policy"]
+    cargo_policy = cast(dict[str, Any], payload["cargo_policy"])
     print(
         "cargo policy: "
         f"locked={str(cargo_policy['locked']).lower()}, "
@@ -269,7 +416,7 @@ def _show(result: object, symbol: str) -> int:
         )
         return 1
     function = matches[0]
-    details = function_inspection(function)
+    details = cast(dict[str, Any], function_inspection(function))
     source = (result.generated_dir / "src" / "lib.rs").read_text(encoding="utf-8")
     lines = source.splitlines()
     native = _rust_item(lines, f"fn __cw_native_{function.rust_symbol}(")

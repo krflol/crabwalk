@@ -26,11 +26,11 @@ print(repr(read_username_from_file({str(username)!r})))
 try:
     read_username_from_file({str(missing)!r})
 except CrabwalkRustError as error:
-    print(type(error).__name__, error.rust_type)
+    print(type(error).__name__, error.variant, error.source_chain[0].rust_type)
 try:
     read_username_from_file({str(invalid_utf8)!r})
 except CrabwalkRustError as error:
-    print(type(error).__name__, error.rust_type)
+    print(type(error).__name__, error.variant, error.source_chain[0].rust_type)
 """,
         encoding="utf-8",
     )
@@ -52,6 +52,6 @@ except CrabwalkRustError as error:
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
         "'Ferris\\n'",
-        "CrabwalkRustError rust.IoError",
-        "CrabwalkRustError rust.IoError",
+        "CrabwalkRustError Io rust.IoError",
+        "CrabwalkRustError Io rust.IoError",
     ]

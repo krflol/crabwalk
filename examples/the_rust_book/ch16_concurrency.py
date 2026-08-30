@@ -46,6 +46,22 @@ def shared_counter() -> rust.u64:
     return counter.get_locked()
 
 
+# The Python-facing sharing boundary is also explicit. `freeze()` consumes an
+# owned Vec and returns an immutable Arc-backed handle; only compiler-approved
+# `Send + Sync` payloads can appear under `Shared`. The same handle can therefore
+# be read from many Python threads without weakening Rust's aliasing rules.
+@rust.struct
+class SharedReading:
+    value: rust.u64
+
+
+@rust.fn
+def shared_reading_total(
+    rows: rust.Shared[rust.Vec[SharedReading]],
+) -> rust.u64:
+    return rows.iter_ref().map(lambda row: row.value).sum()
+
+
 # Rust Book source (extensible concurrency with Send and Sync):
 # https://doc.rust-lang.org/book/ch16-04-extensible-concurrency-sync-and-send.html
 #

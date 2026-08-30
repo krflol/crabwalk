@@ -57,6 +57,39 @@ print(created_delivery.to_python())
 payload = Payload.AddressValue({"city": "Toledo"})
 print(payload._0.to_python())
 print(payload.to_python())
+enriched = EnrichedRow(
+    terms=[{"text": "rust"}, Term(text="python")],
+    metadata={"source": "qa"},
+    pair=({"text": "crab"}, {"source": "book"}),
+)
+print([term.to_python() for term in enriched.terms])
+print(enriched.metadata.to_python())
+print(tuple(value.to_python() for value in enriched.pair))
+print(enriched.to_python())
+
+bulk_source = [
+    {
+        "terms": [{"text": "rust"}],
+        "metadata": {"source": "qa"},
+        "pair": ({"text": "crab"}, {"source": "book"}),
+    }
+    for _ in range(100_000)
+]
+bulk_rows = rust.Vec[EnrichedRow](bulk_source)
+bulk_report = bulk_rows.boundary_telemetry
+assert bulk_report is not None
+assert bulk_report.boundary_crossings == 1
+assert bulk_report.native_domain_values == 500_000
+assert bulk_report.native_container_allocations == 500_001, bulk_report
+assert bulk_report.native_clones == 0
+assert bulk_report.input_validation_ns > 0
+assert bulk_report.native_ns > 0
+term_count, call_report = total_terms.call_with_telemetry(bulk_rows)
+assert term_count == 100_000
+assert call_report.boundary_crossings == 1
+assert call_report.input_values == 1
+assert call_report.native_ns > 0
+print("bulk-100k-ok")
 """,
         encoding="utf-8",
     )
@@ -93,4 +126,9 @@ print(payload.to_python())
         "{'variant': 'Home', 'address': {'city': 'Detroit'}}",
         "{'city': 'Toledo'}",
         "{'variant': 'AddressValue', '_0': {'city': 'Toledo'}}",
+        "[{'text': 'rust'}, {'text': 'python'}]",
+        "{'source': 'qa'}",
+        "({'text': 'crab'}, {'source': 'book'})",
+        "{'terms': [{'text': 'rust'}, {'text': 'python'}], 'metadata': {'source': 'qa'}, 'pair': ({'text': 'crab'}, {'source': 'book'})}",
+        "bulk-100k-ok",
     ]

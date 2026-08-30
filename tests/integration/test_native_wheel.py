@@ -8,6 +8,8 @@ import venv
 import zipfile
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
+
 
 def _write_package(root: Path) -> Path:
     package = root / "wheel_pkg"
@@ -254,3 +256,167 @@ print((pathlib.Path.cwd() / ".crabwalk").exists())
     assert rejected.returncode != 0
     assert "CRAB405 Embedded native artifact is invalid" in rejected.stderr
     assert not (consumer / ".crabwalk").exists()
+
+
+@capability_contract("packaging.pep517-multi-package")
+def test_pep517_wheel_installs_regular_and_namespace_packages_without_rust(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    application = tmp_path / "application"
+    regular = application / "src" / "regular_kernel"
+    namespace = application / "src" / "namespace_kernel"
+    regular.mkdir(parents=True)
+    namespace.mkdir(parents=True)
+    (regular / "__init__.py").write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def double(value: rust.u64) -> rust.u64:
+    return value * 2
+""",
+        encoding="utf-8",
+    )
+    (regular / "cli.py").write_text(
+        """\
+def main() -> None:
+    from namespace_kernel.maths import triple
+    from regular_kernel import double
+
+    print(double(21), triple(14))
+""",
+        encoding="utf-8",
+    )
+    (namespace / "maths.py").write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def triple(value: rust.u64) -> rust.u64:
+    return value * 3
+""",
+        encoding="utf-8",
+    )
+    (application / "pyproject.toml").write_text(
+        """\
+[build-system]
+requires = ["crabwalk-lang>=1.1,<1.2"]
+build-backend = "crabwalk.build_backend"
+
+[project]
+name = "multi-native-demo"
+version = "1.0.0"
+requires-python = ">=3.11"
+
+[project.scripts]
+multi-native-demo = "regular_kernel.cli:main"
+
+[tool.crabwalk]
+packages = ["src/regular_kernel", "src/namespace_kernel"]
+""",
+        encoding="utf-8",
+    )
+
+    application_dist = tmp_path / "application-dist"
+    build_environment = os.environ.copy()
+    build_environment["PYTHONPATH"] = str(root / "src")
+    built = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "build",
+            "--no-isolation",
+            "--skip-dependency-check",
+            "--outdir",
+            str(application_dist),
+        ],
+        cwd=application,
+        env=build_environment,
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+    )
+    assert built.returncode == 0, built.stderr or built.stdout
+    application_wheels = list(application_dist.glob("multi_native_demo-*.whl"))
+    assert len(application_wheels) == 1
+    application_sdists = list(application_dist.glob("multi-native-demo-*.tar.gz"))
+    assert len(application_sdists) == 1
+    with zipfile.ZipFile(application_wheels[0]) as archive:
+        names = set(archive.namelist())
+        assert "regular_kernel/__init__.py" in names
+        assert "regular_kernel/_crabwalk_prebuilt.json" in names
+        assert "namespace_kernel/maths.py" in names
+        assert "namespace_kernel/__init__.py" not in names
+        assert "namespace_kernel/_crabwalk_prebuilt.json" in names
+        assert (
+            archive.read("multi_native_demo-1.0.0.dist-info/top_level.txt")
+            == b"regular_kernel\nnamespace_kernel\n"
+        )
+
+    runtime_dist = tmp_path / "runtime-dist"
+    runtime_built = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "wheel",
+            str(root),
+            "--no-deps",
+            "--wheel-dir",
+            str(runtime_dist),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert runtime_built.returncode == 0, runtime_built.stderr
+
+    consumer = tmp_path / "consumer"
+    environment_directory = consumer / "venv"
+    consumer.mkdir()
+    venv.EnvBuilder(with_pip=True).create(environment_directory)
+    executable = environment_directory / (
+        "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    )
+    installed = subprocess.run(
+        [
+            str(executable),
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--find-links",
+            str(runtime_dist),
+            "--find-links",
+            str(application_dist),
+            "multi-native-demo==1.0.0",
+        ],
+        cwd=consumer,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    run_environment = _without_rust_toolchain(os.environ.copy())
+    run_environment.pop("PYTHONPATH", None)
+    console_script = environment_directory / (
+        "Scripts/multi-native-demo.exe" if os.name == "nt" else "bin/multi-native-demo"
+    )
+    executed = subprocess.run(
+        [str(console_script)],
+        cwd=consumer,
+        env=run_environment,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert executed.returncode == 0, executed.stderr
+    assert executed.stdout.strip() == "42 42"
+    assert "cargo" not in executed.stderr.casefold()

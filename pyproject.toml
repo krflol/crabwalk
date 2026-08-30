@@ -37,6 +37,7 @@ Changelog = "https://github.com/krflol/crabwalk/blob/main/CHANGELOG.md"
 [project.optional-dependencies]
 quality = [
     "mypy==1.15.0",
+    "pyright==1.1.407",
     "pytest==8.4.2",
     "ruff==0.15.17",
 ]
@@ -47,6 +48,9 @@ crabwalk = "crabwalk.cli:main"
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
+
+[tool.setuptools.package-data]
+crabwalk = ["py.typed"]
 
 [tool.setuptools.dynamic]
 version = {attr = "crabwalk._version.__version__"}
@@ -73,9 +77,12 @@ warn_unused_ignores = true
 files = [
     "src/crabwalk/_version.py",
     "src/crabwalk/boundary.py",
+    "src/crabwalk/build_backend.py",
     "src/crabwalk/build/cache.py",
     "src/crabwalk/build/cargo.py",
     "src/crabwalk/build/fingerprint.py",
+    "src/crabwalk/build/loader.py",
+    "src/crabwalk/cli.py",
     "src/crabwalk/compiler/ir.py",
     "src/crabwalk/compiler/abi.py",
     "src/crabwalk/compiler/bindings.py",
@@ -95,22 +102,24 @@ files = [
     "src/crabwalk/compiler/signatures.py",
     "src/crabwalk/compiler/symbols.py",
     "src/crabwalk/compiler/types.py",
+    "src/crabwalk/compiler/type_rendering.py",
     "src/crabwalk/compiler/codegen.py",
     "src/crabwalk/compiler/effects.py",
+    "src/crabwalk/compiler/frontend.py",
     "src/crabwalk/compiler/validation.py",
     "src/crabwalk/config.py",
     "src/crabwalk/diagnostics.py",
     "src/crabwalk/embedding.py",
+    "src/crabwalk/inspection.py",
+    "src/crabwalk/lsp.py",
     "src/crabwalk/namespaces.py",
+    "src/crabwalk/native_exceptions.py",
     "src/crabwalk/progress.py",
+    "src/crabwalk/project_metadata.py",
+    "src/crabwalk/runtime.py",
+    "src/crabwalk/rust.py",
     "src/crabwalk/service.py",
+    "src/crabwalk/telemetry.py",
+    "src/crabwalk/tooling.py",
     "src/crabwalk/wheel.py",
 ]
-
-[[tool.mypy.overrides]]
-module = [
-    "crabwalk.compiler.frontend",
-    "crabwalk.rust",
-    "crabwalk.runtime",
-]
-ignore_errors = true

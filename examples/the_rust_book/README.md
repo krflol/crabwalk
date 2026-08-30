@@ -53,12 +53,15 @@ one successful expression shape. The most useful expanded examples are:
 | 5 | `make_square` and Rectangle methods | inherent `&self` methods, a native domain factory, and an `Owned[Rectangle]` return handle |
 | 6 | `plus_one` | typed `Option` construction, payload capture, and exhaustive matching |
 | 8 | `normalize_fields`, `team_scores`, `word_frequencies` | borrowed string splitting, non-`Copy` iterator adapters, `HashMap` mutation, iteration, and Python dict output |
-| 9 | `read_username_from_file`, `parse_nonzero` | real `File::open`/whole-file I/O with `?` propagation, typed parsing, `Result` patterns, and controlled recovery |
+| 9 | `read_username_from_file`, `parse_nonzero` | real `File::open`/whole-file I/O with `?`, declared `From<IoError>` application errors, typed parsing, `Result` patterns, and controlled recovery |
+| 10 | `trait_argument_demo` | a trait method with a mutable receiver and typed argument, alongside generic monomorphization and named lifetimes |
 | 12 | `SearchConfig` and `search_with_config` | an owned native configuration returned to Python and borrowed across later native calls |
 | 13 | `shoes_in_size` | structured `Vec<Shoe>` input, consuming iteration, domain filtering, and an owned structured return |
 | 13 | `normalize_active_rows` | a borrowed non-`Copy` pipeline split across anonymous iterator locals |
 | 13 | `parallel_normalize_active_rows` | the same String filter/map/collect shape on typed Rayon workers with explicit ownership transfer |
 | 13 | `indexed_parallel_values` | indexed-parallel capability tracked through `copied().enumerate().collect_vec()` |
+| 13 | `explicitly_moved_transform` | an explicit `Fn` closure with move capture, stored and called as a native value |
+| 16 | `shared_reading_total` | one immutable `Shared[Vec<u64>]` handle read concurrently by multiple Python worker threads |
 
 `run_all.py` exercises all of these through their real Python/Rust boundaries and
 checks observable move state as well as returned values. The package now resolves

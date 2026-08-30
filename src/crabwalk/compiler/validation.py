@@ -13,6 +13,7 @@ from .ir import (
     CallIR,
     ClosureIR,
     ConstructorIR,
+    CrateCallIR,
     Effect,
     ExpressionIR,
     FunctionPointerTwiceIR,
@@ -23,6 +24,7 @@ from .ir import (
     PythonPrintIR,
     StringLiteralIR,
     TraitCallIR,
+    TypeRef,
 )
 from .types import IteratorExecution, IteratorType
 from .naming import (
@@ -30,6 +32,7 @@ from .naming import (
     cargo_dependency_key,
     is_rust_2024_identifier,
     owned_class_names,
+    shared_class_names,
 )
 from .symbols import BindingIR, RustNamespace, SymbolId
 
@@ -53,6 +56,7 @@ def validate_package_ir(ir: PackageIR) -> None:
             if (closure := _worker_closure(expression)) is not None
         }
         for expression in expressions:
+            _validate_closure_contract(expression)
             closure = _worker_closure(expression)
             closures = (() if closure is None else (closure,)) + _parallel_closures(
                 expression
@@ -126,6 +130,49 @@ def validate_package_ir(ir: PackageIR) -> None:
                 )
 
 
+def _validate_closure_contract(expression: object) -> None:
+    if not isinstance(expression, MethodCallIR) or not isinstance(
+        expression.receiver.type_ref, IteratorType
+    ):
+        return
+    closures = tuple(
+        value for value in expression.arguments if isinstance(value, ClosureIR)
+    )
+    for closure in closures:
+        if (
+            expression.receiver.type_ref.execution == IteratorExecution.PARALLEL
+            and closure.call_trait in {"FnMut", "FnOnce"}
+        ):
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB233",
+                    "Parallel closure must implement Fn",
+                    (
+                        f"Rayon {expression.method} may call the closure concurrently; "
+                        f"kind={closure.call_trait!r} is not compatible."
+                    ),
+                    closure.span,
+                    "Use kind='fn' with immutable captures.",
+                )
+            )
+        if (
+            expression.receiver.type_ref.execution == IteratorExecution.SEQUENTIAL
+            and closure.call_trait == "FnOnce"
+        ):
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB233",
+                    "Iterator adapter may call its closure more than once",
+                    (
+                        f"Sequential {expression.method} requires FnMut; an explicit "
+                        "FnOnce contract can be consumed after one item."
+                    ),
+                    closure.span,
+                    "Use kind='fn' or kind='fn_mut'.",
+                )
+            )
+
+
 def _validate_unicode_literals(expressions: tuple[object, ...]) -> None:
     for expression in expressions:
         if not isinstance(expression, StringLiteralIR):
@@ -147,6 +194,33 @@ def _validate_unicode_literals(expressions: tuple[object, ...]) -> None:
 def _validate_trait_conformance(ir: PackageIR) -> None:
     traits = {trait.symbol: trait for trait in ir.traits}
     implementations: dict[tuple[str, str], dict[str, FunctionIR]] = {}
+    associated_by_impl: dict[tuple[str, str], dict[str, TypeRef]] = {}
+
+    def matches_associated(
+        pattern: TypeRef,
+        concrete: TypeRef,
+        bindings: dict[str, TypeRef],
+    ) -> bool:
+        if pattern.rust_name == "Associated":
+            name = pattern.python_name
+            assert name is not None
+            previous = bindings.get(name)
+            if previous is None:
+                bindings[name] = concrete
+                return True
+            return previous == concrete
+        if (
+            pattern.rust_name != concrete.rust_name
+            or pattern.python_name != concrete.python_name
+            or pattern.const_value != concrete.const_value
+            or len(pattern.arguments) != len(concrete.arguments)
+        ):
+            return False
+        return all(
+            matches_associated(left, right, bindings)
+            for left, right in zip(pattern.arguments, concrete.arguments, strict=True)
+        )
+
     for function in ir.functions:
         if function.trait_symbol is None:
             continue
@@ -172,8 +246,52 @@ def _validate_trait_conformance(ir: PackageIR) -> None:
                     "Use one of the methods declared by rust.trait.",
                 )
             )
-        if len(function.parameters) != 1:
-            extra_count = max(0, len(function.parameters) - 1)
+        receiver = function.parameters[0].type_ref
+        if receiver.ownership != declared.receiver_ownership:
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB211",
+                    "Trait implementation receiver mismatch",
+                    (
+                        f"{trait.qualified_name}.{declared.name} requires a "
+                        f"rust.{declared.receiver_ownership} receiver, but "
+                        f"{function.qualified_name} uses rust.{receiver.ownership}."
+                    ),
+                    function.parameters[0].span,
+                    "Match the receiver mode declared by rust.trait_method.",
+                )
+            )
+        declared_generics = tuple(
+            (value.is_lifetime, value.bounds) for value in declared.type_parameters
+        )
+        implementation_generics = tuple(
+            (value.is_lifetime, value.bounds) for value in function.type_parameters
+        )
+        if implementation_generics != declared_generics:
+            raise CrabwalkCompilationError(
+                Diagnostic(
+                    "CRAB211",
+                    "Trait implementation generic mismatch",
+                    (
+                        f"{trait.qualified_name}.{declared.name} declares "
+                        f"{declared_generics}, but {function.qualified_name} "
+                        f"declares {implementation_generics}."
+                    ),
+                    function.span,
+                    "Match the trait method type parameters and bounds.",
+                )
+            )
+        key = (trait.symbol, function.method_for.rust_name)
+        associated = associated_by_impl.setdefault(key, {})
+        implementation_tail = tuple(
+            parameter.type_ref for parameter in function.parameters[1:]
+        )
+        if len(implementation_tail) != len(declared.parameter_types) or not all(
+            matches_associated(pattern, concrete, associated)
+            for pattern, concrete in zip(
+                declared.parameter_types, implementation_tail, strict=True
+            )
+        ):
             span = (
                 function.parameters[1].span
                 if len(function.parameters) > 1
@@ -184,19 +302,18 @@ def _validate_trait_conformance(ir: PackageIR) -> None:
                     "CRAB211",
                     "Trait implementation parameter mismatch",
                     (
-                        f"{trait.qualified_name}.{declared.name} currently accepts "
-                        "only its shared receiver, but "
-                        f"{function.qualified_name} declares "
-                        f"{extra_count} additional parameter(s)."
+                        f"{trait.qualified_name}.{declared.name} requires "
+                        f"{tuple(value.display() for value in declared.parameter_types)}, "
+                        f"but {function.qualified_name} declares "
+                        f"{tuple(value.display() for value in implementation_tail)}."
                     ),
                     span,
-                    (
-                        "Remove the additional parameter; Crabwalk trait declarations "
-                        "do not yet describe method arguments."
-                    ),
+                    "Match every tail parameter declared by rust.trait_method.",
                 )
             )
-        if function.return_type != declared.return_type:
+        if not matches_associated(
+            declared.return_type, function.return_type, associated
+        ):
             raise CrabwalkCompilationError(
                 Diagnostic(
                     "CRAB211",
@@ -211,7 +328,6 @@ def _validate_trait_conformance(ir: PackageIR) -> None:
                     "Match the return type declared by rust.trait.",
                 )
             )
-        key = (trait.symbol, function.method_for.rust_name)
         group = implementations.setdefault(key, {})
         previous = group.get(function.method_name)
         if previous is not None:
@@ -490,10 +606,10 @@ def _validate_emitted_identifiers(ir: PackageIR) -> None:
         if function.exported
         for parameter in function.parameters
         if parameter.type_ref.ownership is not None
-        and parameter.type_ref.underlying.rust_name == "Vec"
+        and parameter.type_ref.underlying.rust_name in {"Vec", "TextColumn"}
     ]
     owned_types.extend(struct.type_ref for struct in ir.structs)
-    owned_types.extend(enum.type_ref for enum in ir.enums)
+    owned_types.extend(enum.type_ref for enum in ir.enums if not enum.is_error)
     emitted_owned: set[str] = set()
     for type_ref in owned_types:
         _, rust_name = owned_class_names(type_ref)
@@ -501,6 +617,16 @@ def _validate_emitted_identifiers(ir: PackageIR) -> None:
             continue
         emitted_owned.add(rust_name)
         type_table.append((rust_name, type_ref, type_ref.display()))
+    shared_types = {
+        parameter.type_ref.underlying.render(): parameter.type_ref.underlying
+        for function in ir.functions
+        if function.exported
+        for parameter in function.parameters
+        if parameter.type_ref.ownership == "Shared"
+    }
+    for type_ref in shared_types.values():
+        _, rust_name = shared_class_names(type_ref)
+        type_table.append((rust_name, type_ref, f"shared {type_ref.display()}"))
     dependency_table.append((PYO3_CARGO_ALIAS, ir, "mandatory PyO3 runtime"))
     dependency_table.extend(
         (
@@ -522,6 +648,7 @@ def _validate_emitted_identifiers(ir: PackageIR) -> None:
     }
     reserved_types = {
         "__CwBuffer",
+        "__CwTextColumn",
         "__CwThreadPool",
         "__CwWorker",
         "__CwNoopWake",
@@ -676,6 +803,12 @@ def _python_runtime_offender(
     for expression in _walk_ir(closure.body):
         if isinstance(expression, PythonPrintIR):
             return expression
+        if (
+            isinstance(expression, CrateCallIR)
+            and expression.declared_effects is not None
+            and Effect.PYTHON_RUNTIME in expression.declared_effects
+        ):
+            return expression
         for target_name in _dispatch_targets(expression):
             target = functions.get(target_name)
             if target is not None and Effect.PYTHON_RUNTIME in target.effects:
@@ -689,6 +822,12 @@ def _python_runtime_offender_in_body(
 ) -> object | None:
     for expression in _walk_ir(function.body):
         if isinstance(expression, PythonPrintIR):
+            return expression
+        if (
+            isinstance(expression, CrateCallIR)
+            and expression.declared_effects is not None
+            and Effect.PYTHON_RUNTIME in expression.declared_effects
+        ):
             return expression
         for target_name in _dispatch_targets(expression):
             target = functions.get(target_name)

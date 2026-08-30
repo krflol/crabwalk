@@ -18,6 +18,7 @@ UTF-8 source
   -> ownership.py          places, receiver access, moves, and reborrows
   -> effects.py            exhaustive direct effects and call-graph propagation
   -> validation.py         cross-pass ownership/effect/name/ABI invariants
+  -> type_rendering.py     semantic-type to Rust-backend spelling
   -> rust_emission.py      deterministic typed function/body Rust emission
   -> emission.py           source-mapped writer and backend gensym state
   -> codegen.py            domain, runtime-support, and PyO3 ABI orchestration
@@ -65,8 +66,9 @@ Types use a tagged algebra rather than optional string fields. Concrete variants
 include primitives, domains, external crate types, generic parameters, lifetimes,
 ownership wrappers, tuples, arrays, containers, sequential/parallel iterators,
 dynamic traits, runtime support types, unit, and the narrowly bounded inferred
-terminal type. Rust spelling belongs to the backend; semantic passes match type
-variants and stable IDs.
+terminal type. Rust spelling lives in `type_rendering.py`; the legacy
+`TypeRef.render()` call delegates there while semantic passes match type variants
+and stable IDs.
 
 ## Iterator contract
 
@@ -123,7 +125,7 @@ coverage is pedagogical coverage, not a claim that a language family is complete
 The extraction is incremental rather than a rewrite, but the pass boundaries are
 now executable modules rather than roadmap labels. Source/graph discovery,
 declarations, signatures, expression/statement/pattern policies, binding identity,
-ownership, effects, validation, Rust body emission, ABI policy, and Cargo emission
+ownership, effects, validation, Rust type/body emission, ABI policy, and Cargo emission
 are independently imported, typed, and tested. `frontend.py` retains stateful scope
 orchestration; `codegen.py` retains final backend composition. Neither owns the
 semantic policies extracted into those passes. Match patterns are structured IR

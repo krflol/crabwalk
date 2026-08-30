@@ -25,12 +25,14 @@ must be verified in GitHub and PyPI settings.
    merge the release candidate after the ordinary required checks pass.
 2. Create and push an annotated `vX.Y.Z` tag at that exact commit.
 3. The `Crabwalk Release` workflow verifies that the tag and package version match,
-   invokes the complete CI workflow, and builds the wheel and source distribution
-   once.
-4. The workflow validates package metadata and installs each exact artifact in clean
-   Python 3.11 and 3.14 environments.
+   invokes the complete CI workflow (including pinned Miri), and enforces the
+   versioned cold/warm/100k performance and retained-RSS budgets.
+4. The workflow builds the wheel and source distribution once, validates package
+   metadata, records provenance, and installs each exact artifact in clean Python
+   3.11 and 3.14 environments.
 5. After all gates pass, GitHub's OIDC identity publishes the files to PyPI. The
-   workflow attaches those same files and `SHA256SUMS` to the GitHub release.
+   workflow attaches those same files, the performance report, and `SHA256SUMS` to
+   the GitHub release.
 6. Verify the public index with a clean, uncached install:
 
    ```text

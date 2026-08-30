@@ -21,6 +21,26 @@ class Address:
     city: rust.String
 
 @rust.struct
+class Term:
+    text: rust.String
+
+@rust.struct
+class Metadata:
+    source: rust.String
+
+@rust.struct
+class EnrichedRow:
+    terms: rust.Vec[Term]
+    metadata: rust.Option[Metadata]
+    pair: rust.Tuple[Term, Metadata]
+
+@rust.fn
+def total_terms(
+    rows: rust.Owned[rust.Vec[EnrichedRow]],
+) -> rust.usize:
+    return rows.iter_ref().map(lambda row: row.terms.len()).sum()
+
+@rust.struct
 class Customer:
     customer_id: rust.u64
     address: Address
@@ -100,9 +120,10 @@ def test_recursive_owned_vectors_and_owned_returns_have_generated_codecs(
     row = next(value for value in ir.structs if value.name == "Row")
     delivery = next(value for value in ir.enums if value.name == "Delivery")
 
-    assert ir.functions[0].parameters[0].type_ref.underlying.render() == (
-        f"Vec<{row.symbol}>"
+    active = next(
+        value for value in ir.functions if value.name == "active_customer_ids"
     )
+    assert active.parameters[0].type_ref.underlying.render() == (f"Vec<{row.symbol}>")
     assert row.symbol_id is not None
     assert all(field.binding is not None for field in row.fields)
     assert delivery.symbol_id is not None
@@ -116,11 +137,10 @@ def test_recursive_owned_vectors_and_owned_returns_have_generated_codecs(
     assert "Vec<Option<u64>>" in generated.rust_source
     assert "Vec<Vec<u8>>" in generated.rust_source
     assert "Vec<PyRef<'_," in generated.rust_source
-    assert re.search(
-        r"__cw_tmp_\d+_[0-9a-f]+\.push\("
-        r"__cw_tmp_\d+_[0-9a-f]+\.clone\(\)\)",
-        generated.rust_source,
-    )
+    assert "fn new(value: &Bound<'_, PyAny>) -> PyResult<Self>" in generated.rust_source
+    assert "fn __cw_extract_" in generated.rust_source
+    assert 'format!("vector element {}"' in generated.rust_source
+    assert "handle or mapping" in generated.rust_source
     assert re.search(
         r"value: std::option::Option::Some\(__cw_tmp_\d+_[0-9a-f]+\)",
         generated.rust_source,
@@ -129,4 +149,7 @@ def test_recursive_owned_vectors_and_owned_returns_have_generated_codecs(
     assert '#[getter("address")]' in generated.rust_source
     assert "fn get_address(&self, py: Python<'_>)" in generated.rust_source
     assert "fn Home(address: PyRef<'_," in generated.rust_source
-    assert ".into_any()" in generated.rust_source
+    assert ".into_py_any(py)?" in generated.rust_source
+    assert "terms: Vec<PyRef<'_," in generated.rust_source
+    assert "metadata: Option<PyRef<'_," in generated.rust_source
+    assert "pair: (PyRef<'_," in generated.rust_source

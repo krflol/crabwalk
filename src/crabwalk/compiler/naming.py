@@ -122,6 +122,7 @@ CRABWALK_BUILTIN_TYPE_NAMES = frozenset(
         "String",
         "Str",
         "Buffer",
+        "TextColumn",
         "Vec",
         "HashMap",
         "Box",
@@ -146,6 +147,7 @@ CRABWALK_BUILTIN_TYPE_NAMES = frozenset(
         "Owned",
         "Ref",
         "Mut",
+        "Shared",
         "Unit",
         "LifetimeRef",
         "PartialOrd",
@@ -227,6 +229,14 @@ def owned_class_names(type_ref: TypeRef) -> tuple[str, str]:
     identity = _type_identity(type_ref)
     digest = hashlib.sha256(identity).hexdigest()
     return f"_Crabwalk_{digest}", f"__CwOwned_{digest}"
+
+
+def shared_class_names(type_ref: TypeRef) -> tuple[str, str]:
+    """Return collision-resistant Python and Rust names for an Arc wrapper."""
+
+    identity = b"shared\0" + _type_identity(type_ref)
+    digest = hashlib.sha256(identity).hexdigest()
+    return f"_CrabwalkShared_{digest}", f"__CwShared_{digest}"
 
 
 def _encode_component(value: str) -> str:

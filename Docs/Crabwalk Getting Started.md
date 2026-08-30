@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-22
+updated: 2026-08-30
 tags:
   - project/crabwalk
   - docs/getting-started
@@ -106,22 +106,27 @@ loads the extension, and binds exported `RustFunction` objects directly from IR.
 It never imports the source module, so unrelated top-level Python statements do not
 run and there is no second decorator-driven build lifecycle.
 
+Pass a mapping such as `{"__init__.py": "...", "model.py": "..."}` plus
+`entry="model.py"` for a virtual multi-module package. Crabwalk synthesizes missing
+package initializers, materializes one immutable snapshot, resolves the internal
+graph, and exposes qualified names such as `model.transform`.
+
 This API is a non-executing Python-module boundary, not a capability sandbox for the
 Rust toolchain. Declared Cargo dependencies, build scripts, procedural macros,
 linkers, and configured tools retain developer permissions. Hosts accepting
 untrusted edits must enforce their own allowed declaration, crate, and effect policy
-before building. The optional `cancelled` callback is checked between phases; it
-cannot stop Cargo work that has already begun.
+before building. The optional `cancelled` callback is checked between phases and
+also terminates an already-running Cargo process tree before raising `CRAB309`.
 
 ## Packages
 
-A regular package (`__init__.py` present) is one compilation unit. Crabwalk finds
-modules containing native declarations or crate declarations, adds the requested
-entry module and required package initializers, and follows supported internal
-imports and re-exports without importing Python code. It emits that reachable
-native graph as one extension. Unrelated Python-only modules do not block or
-invalidate native compilation; mixed-wheel integrity still covers every shipped
-`.py` and `.pyi` source file.
+A regular package (`__init__.py` present) or explicitly configured namespace
+package is one compilation unit. Crabwalk finds modules containing native
+declarations or crate declarations, adds the requested entry module and required
+package initializers, and follows supported internal imports and re-exports without
+importing Python code. It emits that reachable native graph as one extension.
+Unrelated Python-only modules do not block or invalidate native compilation;
+mixed-wheel integrity still covers every shipped `.py` and `.pyi` source file.
 
 ```text
 my_package/
@@ -130,10 +135,11 @@ my_package/
   model.py
 ```
 
-Namespace packages are not currently compilation units. Pass a file or regular
-package directory to the CLI. Internal import cycles and `import *` are rejected
-when they are reachable from the native compiler graph; use an acyclic graph and
-explicit imported names there.
+Declaration cycles are resolved to a fixed point rather than by executing Python
+initializers. `import *` follows a literal static `__all__`; without one it follows
+Python's leading-underscore export rule over compiler-visible bindings. Dynamic or
+malformed `__all__` remains a source-spanned error because executing it would break
+the static-analysis contract.
 
 For explicit, bounded project discovery:
 
@@ -149,10 +155,10 @@ wheel-include = ["templates/**/*.html"]
 
 Valid boundary policies are `allow`, `warn`, and `deny`. Unknown configuration
 keys are errors rather than silently ignored. Configured paths must remain inside
-the project and contain `__init__.py`. A project-directory command resolves the
-package only when exactly one entry is configured; otherwise select a package or
-source file explicitly, optionally with `--project`. The same project selection is
-available to `crabwalk wheel`.
+the project and contain Python sources. A project-directory source command resolves
+the package only when exactly one entry is configured; otherwise select a package
+or source file explicitly, optionally with `--project`. The PEP 517 backend compiles
+every configured top-level package into the same distribution.
 
 `--project` selects configuration and containment policy; it does not change the
 base directory of the positional source argument. Relative source paths resolve
@@ -163,6 +169,35 @@ change into that project root or pass an absolute source path beneath it.
 locked policy. Without it, source imports use the normal lock-maintaining policy
 and intentionally do not reuse a CLI artifact built with `--locked`. Function
 `__crabwalk__` metadata and `crabwalk inspect` report the effective Cargo policy.
+
+## Build an application with ordinary Python tooling
+
+Add static PEP 621 metadata and select Crabwalk's backend:
+
+```toml
+[build-system]
+requires = ["crabwalk-lang>=1.1,<1.2"]
+build-backend = "crabwalk.build_backend"
+
+[project]
+name = "native-application"
+version = "1.0.0"
+readme = "README.md"
+license = "Apache-2.0"
+dependencies = ["fastapi>=0.116"]
+
+[project.scripts]
+native-application = "my_package.cli:main"
+
+[tool.crabwalk]
+packages = ["src/my_package", "src/company_namespace"]
+```
+
+`python -m build`, `pip wheel .`, and `pip install .` preserve dependencies,
+extras, scripts, arbitrary entry-point groups, package data allowlists, readme,
+license files, and project URLs. The produced wheel embeds one verified extension
+per configured package and installs/runs without a Rust toolchain. The sdist is
+deterministic and contains every declared native/metadata input.
 
 ## Where state goes
 

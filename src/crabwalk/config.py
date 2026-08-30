@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,11 +135,11 @@ def _read_config(pyproject: Path, *, required: bool) -> ProjectConfig | None:
                 "Configured package escapes the project",
                 str(value),
             )
-        if not (package / "__init__.py").is_file():
+        if not package.is_dir() or not any(package.rglob("*.py")):
             _fail(
                 "CRAB010",
-                "Configured package is not a regular Python package",
-                f"{package} has no __init__.py.",
+                "Configured package has no Python sources",
+                f"{package} must be a regular or namespace package directory.",
             )
         packages.append(package)
     policy = table.get("python-boundaries", "allow")
@@ -208,8 +209,36 @@ def _read_config(pyproject: Path, *, required: bool) -> ProjectConfig | None:
         extra_files=tuple(extra_files),
         extra_env=tuple(extra_env_values),
         wheel_include=tuple(wheel_include_values),
-        content_hash=hashlib.sha256(raw).hexdigest(),
+        content_hash=_native_configuration_hash(
+            packages=tuple(package_values),
+            python_boundaries=str(policy),
+            source_locked=source_locked,
+            extra_files=tuple(extra_file_values),
+            extra_env=tuple(extra_env_values),
+        ),
     )
+
+
+def _native_configuration_hash(
+    *,
+    packages: tuple[str, ...],
+    python_boundaries: str,
+    source_locked: bool,
+    extra_files: tuple[str, ...],
+    extra_env: tuple[str, ...],
+) -> str:
+    """Hash only project settings that can affect generated native output."""
+
+    payload = {
+        "schema": 1,
+        "packages": packages,
+        "python_boundaries": python_boundaries,
+        "source_locked": source_locked,
+        "extra_files": extra_files,
+        "extra_env": extra_env,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _fail(code: str, title: str, message: str) -> None:

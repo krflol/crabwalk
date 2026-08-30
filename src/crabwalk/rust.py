@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import update_wrapper
-from typing import Callable, TypeVar, overload
+from typing import Callable, Literal, TypeVar, overload
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +21,7 @@ class RustType:
     is_generic: bool = False
     is_lifetime: bool = False
     compilation_fingerprint: str | None = None
+    is_error: bool = False
 
     def __repr__(self) -> str:
         if self.is_generic:
@@ -45,6 +46,8 @@ class RustType:
         raise AttributeError(name)
 
     def rust_key(self) -> str:
+        if self.name == "TextColumn":
+            return "__CwTextColumn"
         if self.name == "LifetimeRef":
             target = self.arguments[0]
             rendered = "str" if target.name == "Str" else target.rust_key()
@@ -155,6 +158,18 @@ class RustVariantConstructor:
 class VariantDeclaration:
     positional: tuple[object, ...]
     named: tuple[tuple[str, object], ...]
+    from_source: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RustTraitMethod:
+    """Static signature for one Crabwalk-declared Rust trait method."""
+
+    return_type: RustType
+    parameters: tuple[RustType, ...] = ()
+    receiver: Literal["ref", "mut", "owned"] = "ref"
+    type_parameters: tuple[RustType, ...] = ()
+    bounds: tuple[tuple[RustType, tuple["RustTrait", ...]], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +177,7 @@ class RustTrait:
     """A marker for a Rust trait used in a native generic bound."""
 
     name: str
-    methods: tuple[tuple[str, RustType], ...] = ()
+    methods: tuple[tuple[str, RustTraitMethod], ...] = ()
 
     def __repr__(self) -> str:
         return f"rust.{self.name}"
@@ -231,6 +246,7 @@ i16 = RustType("i16")
 i32 = RustType("i32")
 i64 = RustType("i64")
 i128 = RustType("i128")
+isize = RustType("isize")
 u8 = RustType("u8")
 u16 = RustType("u16")
 u32 = RustType("u32")
@@ -245,7 +261,12 @@ String = RustType("String")
 Str = RustType("Str")
 Vec = RustGeneric("Vec", 1)
 Buffer = RustGeneric("Buffer", 1)
+TextColumn = RustType("TextColumn")
 HashMap = RustGeneric("HashMap", 2)
+HashSet = RustGeneric("HashSet", 1)
+BTreeMap = RustGeneric("BTreeMap", 2)
+BTreeSet = RustGeneric("BTreeSet", 1)
+Slice = RustGeneric("Slice", 1)
 Box = RustGeneric("Box", 1)
 Rc = RustGeneric("Rc", 1)
 RefCell = RustGeneric("RefCell", 1)
@@ -259,6 +280,7 @@ TcpStream = RustType("TcpStream")
 ThreadPool = RustType("ThreadPool")
 File = RustType("File")
 IoError = RustType("IoError")
+PathBuf = RustType("PathBuf")
 Tuple = RustTupleGeneric()
 Array = RustArrayGeneric()
 Borrow = RustBorrowGeneric()
@@ -268,6 +290,7 @@ Result = RustGeneric("Result", 2)
 Owned = RustGeneric("Owned", 1)
 Ref = RustGeneric("Ref", 1)
 Mut = RustGeneric("Mut", 1)
+Shared = RustGeneric("Shared", 1)
 Closure = RustGeneric("Closure", 2)
 
 _F = TypeVar("_F", bound=Callable[..., object])
@@ -275,6 +298,11 @@ _F = TypeVar("_F", bound=Callable[..., object])
 
 class NativeOnlyFunction:
     """Metadata-bearing declaration that cannot fall back to Python execution."""
+
+    __name__: str
+    __qualname__: str
+    __module__: str
+    __doc__: str | None
 
     def __init__(
         self,
@@ -332,9 +360,21 @@ def lifetime(name: str) -> RustType:
     return RustType(name, is_generic=True, is_lifetime=True)
 
 
+def associated_type(name: str) -> RustType:
+    """Name one trait-associated type within a ``rust.trait_method`` signature."""
+
+    if not isinstance(name, str) or not name.isidentifier():
+        raise TypeError("rust.associated_type expects a valid identifier string")
+    return RustType("Associated", python_name=name)
+
+
 def generic(
     *type_parameters: RustType,
-    bounds: list[RustTrait] | tuple[RustTrait, ...] = (),
+    bounds: (
+        list[RustTrait]
+        | tuple[RustTrait, ...]
+        | dict[RustType, list[RustTrait] | tuple[RustTrait, ...]]
+    ) = (),
 ) -> Callable[[_F], NativeOnlyFunction]:
     """Mark a function as a native-only generic Rust helper.
 
@@ -346,36 +386,103 @@ def generic(
         isinstance(value, RustType) and value.is_generic for value in type_parameters
     ):
         raise TypeError("rust.generic expects one or more rust.typevar values")
-    if not all(isinstance(value, RustTrait) for value in bounds):
+    if isinstance(bounds, dict):
+        if not all(
+            key in type_parameters
+            and all(isinstance(value, RustTrait) for value in values)
+            for key, values in bounds.items()
+        ):
+            raise TypeError(
+                "rust.generic bound maps must map declared type parameters to traits"
+            )
+    elif not all(isinstance(value, RustTrait) for value in bounds):
         raise TypeError("rust.generic bounds must be Rust trait markers")
 
     def decorate(function: _F) -> NativeOnlyFunction:
         return _native_only_function(
             function,
             "generic",
-            {"type_parameters": type_parameters, "bounds": tuple(bounds)},
+            {"type_parameters": type_parameters, "bounds": bounds},
         )
 
     return decorate
 
 
-def trait(name: str, **methods: RustType) -> RustTrait:
-    """Declare an object-safe Rust trait with shared, no-argument methods."""
+def trait_method(
+    return_type: RustType,
+    *parameters: RustType,
+    receiver: Literal["ref", "mut", "owned"] = "ref",
+    type_parameters: tuple[RustType, ...] | list[RustType] = (),
+    bounds: (
+        tuple[RustTrait, ...]
+        | list[RustTrait]
+        | dict[RustType, tuple[RustTrait, ...] | list[RustTrait]]
+    ) = (),
+) -> RustTraitMethod:
+    """Describe one typed trait method, including receiver and tail arguments."""
+
+    if not isinstance(return_type, RustType) or not all(
+        isinstance(value, RustType) for value in parameters
+    ):
+        raise TypeError("rust.trait_method expects Rust parameter and return types")
+    if receiver not in {"ref", "mut", "owned"}:
+        raise TypeError("rust.trait_method receiver must be 'ref', 'mut', or 'owned'")
+    if not all(
+        isinstance(value, RustType) and value.is_generic for value in type_parameters
+    ):
+        raise TypeError("rust.trait_method type_parameters must be rust.typevar values")
+    if isinstance(bounds, dict):
+        normalized_bounds = tuple(
+            (key, tuple(values)) for key, values in bounds.items()
+        )
+    else:
+        normalized_bounds = tuple(
+            (parameter, tuple(bounds)) for parameter in type_parameters
+        )
+    if not all(
+        key in type_parameters and all(isinstance(value, RustTrait) for value in values)
+        for key, values in normalized_bounds
+    ):
+        raise TypeError("rust.trait_method bounds must target declared type parameters")
+    return RustTraitMethod(
+        return_type,
+        tuple(parameters),
+        receiver,
+        tuple(type_parameters),
+        normalized_bounds,
+    )
+
+
+def trait(name: str, **methods: RustType | RustTraitMethod) -> RustTrait:
+    """Declare a typed Rust trait.
+
+    A bare return type retains the original shared/no-argument shorthand. Use
+    :func:`trait_method` for arguments or mutable/owned receivers.
+    """
 
     if not isinstance(name, str) or not name.isidentifier():
         raise TypeError("rust.trait expects a valid identifier string")
-    if not methods or not all(
-        key.isidentifier() and isinstance(value, RustType)
-        for key, value in methods.items()
-    ):
-        raise TypeError("rust.trait methods must map names to Rust return types")
-    return RustTrait(name, tuple(methods.items()))
+    if not methods or not all(key.isidentifier() for key in methods):
+        raise TypeError("rust.trait methods must use valid identifiers")
+    normalized: list[tuple[str, RustTraitMethod]] = []
+    for method_name, value in methods.items():
+        if isinstance(value, RustType):
+            value = RustTraitMethod(value)
+        if not isinstance(value, RustTraitMethod):
+            raise TypeError(
+                "rust.trait methods must map names to Rust return types or "
+                "rust.trait_method declarations"
+            )
+        normalized.append((method_name, value))
+    return RustTrait(name, tuple(normalized))
 
 
 def method(
     type_value: object,
     *,
     name: str | None = None,
+    type_parameters: tuple[RustType, ...] | list[RustType] = (),
+    bounds: object = (),
 ) -> Callable[[_F], NativeOnlyFunction]:
     """Attach a native-only helper as an inherent method on a Rust domain type."""
 
@@ -386,7 +493,12 @@ def method(
         return _native_only_function(
             function,
             "method",
-            {"type": type_value, "name": name},
+            {
+                "type": type_value,
+                "name": name,
+                "type_parameters": tuple(type_parameters),
+                "bounds": bounds,
+            },
         )
 
     return decorate
@@ -397,6 +509,8 @@ def impl(
     type_value: object,
     *,
     name: str | None = None,
+    type_parameters: tuple[RustType, ...] | list[RustType] = (),
+    bounds: object = (),
 ) -> Callable[[_F], NativeOnlyFunction]:
     """Implement one declared trait method for a concrete Rust domain type."""
 
@@ -407,7 +521,13 @@ def impl(
         return _native_only_function(
             function,
             "impl",
-            {"trait": trait_value, "type": type_value, "name": name},
+            {
+                "trait": trait_value,
+                "type": type_value,
+                "name": name,
+                "type_parameters": tuple(type_parameters),
+                "bounds": bounds,
+            },
         )
 
     return decorate
@@ -420,8 +540,10 @@ def operator(
 ) -> Callable[[_F], NativeOnlyFunction]:
     """Implement a supported Rust operator for one generated domain type."""
 
-    if name != "add":
-        raise TypeError("rust.operator currently supports name='add'")
+    if name not in {"add", "subtract", "multiply", "divide", "remainder"}:
+        raise TypeError(
+            "rust.operator name must be add, subtract, multiply, divide, or remainder"
+        )
 
     def decorate(function: _F) -> NativeOnlyFunction:
         return _native_only_function(
@@ -502,12 +624,44 @@ def enum(
     return decorate if class_ is None else decorate(class_)
 
 
+def error(
+    class_: type[object] | None = None,
+    *,
+    derive: list[object] | tuple[object, ...] = (),
+) -> object:
+    """Compile a native-only enum implementing ``Display`` and ``Error``.
+
+    Use :func:`from_error` for variants that declare a Rust ``From`` conversion
+    consumed by ``rust.try_``. Error enums cross an exported ``Result`` as a
+    structured :class:`CrabwalkRustError`; they are not Python-owned values.
+    """
+
+    del derive
+
+    def decorate(value: type[object]) -> object:
+        if not isinstance(value, type):
+            raise TypeError("@rust.error expects a class")
+        from .runtime import compile_enum
+
+        return compile_enum(value)
+
+    return decorate if class_ is None else decorate(class_)
+
+
 def variant(*fields: object, **named_fields: object) -> VariantDeclaration:
     """Declare one @rust.enum variant while its ordinary Python class body runs."""
 
     if fields and named_fields:
         raise TypeError("rust.variant uses positional or named fields, not both")
     return VariantDeclaration(tuple(fields), tuple(named_fields.items()))
+
+
+def from_error(source_type: RustType) -> VariantDeclaration:
+    """Declare a one-field error variant and ``From[source_type]`` conversion."""
+
+    if not isinstance(source_type, RustType):
+        raise TypeError("rust.from_error expects one Rust error type")
+    return VariantDeclaration((source_type,), (), source_type)
 
 
 def crate(
@@ -578,6 +732,82 @@ def extern(
         )
 
     return decorate
+
+
+def extern_method(
+    crate_value: Crate,
+    type_value: RustType,
+    *,
+    path: str,
+    name: str | None = None,
+    effects: list[RustEffect] | tuple[RustEffect, ...] | None = None,
+) -> Callable[[_F], NativeOnlyFunction]:
+    """Declare a typed crate function as a method on an external type."""
+
+    if not isinstance(crate_value, Crate):
+        raise TypeError("rust.extern_method expects a value returned by rust.crate")
+    if not isinstance(type_value, RustType) or type_value.name != "External":
+        raise TypeError("rust.extern_method expects a rust.extern_type target")
+    parts = tuple(path.split("::")) if isinstance(path, str) else ()
+    if not parts or any(not part.isidentifier() for part in parts):
+        raise TypeError("rust.extern_method path must be a static Rust path")
+    if name is not None and (not isinstance(name, str) or not name.isidentifier()):
+        raise TypeError("rust.extern_method name must be an identifier")
+    if effects is not None and (
+        not effects or not all(isinstance(value, RustEffect) for value in effects)
+    ):
+        raise TypeError("rust.extern_method effects must be RustEffect values")
+
+    def decorate(function: _F) -> NativeOnlyFunction:
+        return _native_only_function(
+            function,
+            "extern_method",
+            {
+                "crate": crate_value,
+                "type": type_value,
+                "path": parts,
+                "name": name or function.__name__,
+                "effects": None if effects is None else tuple(effects),
+            },
+        )
+
+    return decorate
+
+
+def python_adapter(
+    function: _F | None = None,
+    *,
+    effects: list[RustEffect] | tuple[RustEffect, ...] = (),
+) -> _F | Callable[[_F], _F]:
+    """Declare an ordinary Python callable available to compiled Rust code.
+
+    The Python function remains directly callable. Static Crabwalk calls use its
+    annotated signature, reacquire the GIL, validate the returned value through
+    PyO3, and propagate Python exceptions without an interpreted fallback.
+    """
+
+    if not all(isinstance(value, RustEffect) for value in effects):
+        raise TypeError("rust.python_adapter effects must be RustEffect values")
+    if Pure in effects or PythonRuntime in effects:
+        raise TypeError(
+            "rust.python_adapter always has PythonRuntime semantics; declare only "
+            "additional effects such as rust.Blocking"
+        )
+
+    def decorate(value: _F) -> _F:
+        if not callable(value):
+            raise TypeError("@rust.python_adapter expects a callable")
+        setattr(
+            value,
+            "__crabwalk_declaration__",
+            {
+                "kind": "python_adapter",
+                "effects": (PythonRuntime, MayPanic, *effects),
+            },
+        )
+        return value
+
+    return decorate if function is None else decorate(function)
 
 
 def from_python(
@@ -664,6 +894,8 @@ unsafe_static_increment = _compiler_only("unsafe_static_increment")
 type_alias_identity = _compiler_only("type_alias_identity")
 boxed_closure_call = _compiler_only("boxed_closure_call")
 closure_vector_total = _compiler_only("closure_vector_total")
+closure = _compiler_only("closure")
+checked_cast = _compiler_only("checked_cast")
 
 
 __all__ = [
@@ -672,6 +904,7 @@ __all__ = [
     "Arc",
     "Borrow",
     "Buffer",
+    "TextColumn",
     "Box",
     "Clone",
     "Copy",
@@ -680,6 +913,9 @@ __all__ = [
     "Dyn",
     "Err",
     "HashMap",
+    "HashSet",
+    "BTreeMap",
+    "BTreeSet",
     "Ok",
     "Option",
     "Ord",
@@ -690,6 +926,7 @@ __all__ = [
     "Range",
     "RefCell",
     "Mut",
+    "Shared",
     "Mutex",
     "NativeOnlyFunction",
     "Result",
@@ -697,6 +934,7 @@ __all__ = [
     "RustGeneric",
     "RustPath",
     "RustTrait",
+    "RustTraitMethod",
     "RustType",
     "RustVariantConstructor",
     "Sender",
@@ -710,6 +948,8 @@ __all__ = [
     "ThreadPool",
     "File",
     "IoError",
+    "PathBuf",
+    "Slice",
     "Vec",
     "bool",
     "char",
@@ -718,17 +958,25 @@ __all__ = [
     "c_abs",
     "async_call",
     "async_fn",
+    "associated_type",
     "block_on",
     "boxed_closure_call",
     "crate",
     "const",
     "closure_vector_total",
+    "closure",
+    "checked_cast",
     "f32",
     "f64",
+    "error",
     "enum",
+    "extern",
+    "extern_method",
+    "extern_type",
     "drop",
     "dyn_box",
     "fn",
+    "from_error",
     "from_python",
     "generic",
     "impl",
@@ -737,11 +985,13 @@ __all__ = [
     "i32",
     "i64",
     "i128",
+    "isize",
     "println",
     "lifetime",
     "join",
     "method",
     "operator",
+    "python_adapter",
     "panic",
     "repeat",
     "select",
@@ -751,6 +1001,7 @@ __all__ = [
     "struct",
     "to_python",
     "trait",
+    "trait_method",
     "trait_call",
     "type_alias_identity",
     "typevar",

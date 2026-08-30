@@ -129,9 +129,25 @@ def _bind_trait(value: TraitIR) -> TraitIR:
     gensym = Gensym()
     methods: list[TraitMethodIR] = []
     for method in value.methods:
+        type_gensym = Gensym()
+        type_bindings: dict[str, BindingIR] = {}
+        type_parameters: list[TypeParameterIR] = []
+        for parameter in method.type_parameters:
+            namespace = (
+                RustNamespace.LIFETIME if parameter.is_lifetime else RustNamespace.TYPE
+            )
+            binding = type_gensym.bind(parameter.name, parameter.span, namespace)
+            type_bindings[parameter.name] = binding
+            type_parameters.append(replace(parameter, binding=binding))
         methods.append(
             replace(
                 method,
+                return_type=_rename_type(method.return_type, type_bindings),
+                parameter_types=tuple(
+                    _rename_type(type_ref, type_bindings)
+                    for type_ref in method.parameter_types
+                ),
+                type_parameters=tuple(type_parameters),
                 binding=gensym.bind(
                     method.name,
                     method.span,
@@ -527,6 +543,10 @@ def _bind_expression(
             ),
             body=_bind_expression(
                 expression.body, closure_environment, type_bindings, gensym
+            ),
+            prefix=tuple(
+                _bind_expression(value, closure_environment, type_bindings, gensym)
+                for value in expression.prefix
             ),
             type_ref=_rename_type(expression.type_ref, type_bindings),
             parameter_binding=parameter_binding,

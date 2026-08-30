@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 
 from crabwalk.native_exceptions import (
@@ -18,7 +19,6 @@ from .ir import (
     FunctionIR,
     PackageIR,
     ParameterIR,
-    StructFieldIR,
     StructIR,
     TraitIR,
     TypeRef,
@@ -26,9 +26,14 @@ from .ir import (
 from .cargo_emission import render_build_rs, render_cargo_toml
 from .emission import EmissionNames, Writer as _Writer
 from .rust_emission import write_native_function as _write_native_function
-from .naming import PYO3_CARGO_ALIAS, cargo_dependency_key, owned_class_names
+from .naming import (
+    PYO3_CARGO_ALIAS,
+    cargo_dependency_key,
+    owned_class_names,
+    shared_class_names,
+)
 
-CODEGEN_SCHEMA_VERSION = 40
+CODEGEN_SCHEMA_VERSION = 43
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
@@ -59,6 +64,11 @@ def generate_project(
     writer = _Writer()
     domains_by_symbol = {value.symbol: value.type_ref for value in ir.structs}
     domains_by_symbol.update({value.symbol: value.type_ref for value in ir.enums})
+    structs_by_symbol = {value.symbol: value for value in ir.structs}
+    enums_by_symbol = {value.symbol: value for value in ir.enums if not value.is_error}
+    error_enums_by_symbol = {
+        value.symbol: value for value in ir.enums if value.is_error
+    }
     boundary_names = {
         function.rust_symbol for function in ir.functions if function.python_boundary
     }
@@ -98,6 +108,10 @@ def generate_project(
     ):
         _write_buffer_support(writer)
         writer.line()
+    owned_text_column = _owned_text_column_type(ir)
+    if owned_text_column is not None:
+        _write_text_column_support(writer, owned_text_column)
+        writer.line()
     _write_thread_pool(writer)
     writer.line()
 
@@ -112,7 +126,10 @@ def generate_project(
     for enum in ir.enums:
         _write_native_enum(writer, enum)
         writer.line()
-        _write_owned_enum_class(writer, enum, domains_by_symbol)
+        if enum.is_error:
+            _write_native_error_impls(writer, enum)
+        else:
+            _write_owned_enum_class(writer, enum, domains_by_symbol)
         writer.line()
 
     for struct in ir.structs:
@@ -122,8 +139,30 @@ def generate_project(
         writer.line()
 
     owned_vectors = _owned_vector_types(ir)
+    domain_vector_elements = tuple(
+        value.arguments[0]
+        for value in owned_vectors
+        if _contains_domain(value.arguments[0], domains_by_symbol)
+    )
+    if domain_vector_elements:
+        _write_bulk_input_extractors(
+            writer,
+            domain_vector_elements,
+            structs_by_symbol,
+            enums_by_symbol,
+        )
+        writer.line()
     for vector_type in owned_vectors:
-        _write_owned_vector_class(writer, vector_type, domains_by_symbol)
+        _write_owned_vector_class(
+            writer,
+            vector_type,
+            domains_by_symbol,
+        )
+        writer.line()
+
+    shared_types = _shared_types(ir)
+    for shared_type in shared_types:
+        _write_shared_class(writer, shared_type)
         writer.line()
 
     for function in ir.functions:
@@ -134,7 +173,12 @@ def generate_project(
 
     for function in ir.functions:
         if function.exported:
-            _write_export_wrapper(writer, function, boundary_names)
+            _write_export_wrapper(
+                writer,
+                function,
+                boundary_names,
+                error_enums_by_symbol,
+            )
             writer.line()
 
     writer.line(f'#[pymodule(name = "{extension_name}")]')
@@ -153,10 +197,18 @@ def generate_project(
     for vector_type in owned_vectors:
         _, rust_class = owned_class_names(vector_type)
         writer.line(f"m.add_class::<{rust_class}>()?;")
+    if owned_text_column is not None:
+        _, rust_class = owned_class_names(owned_text_column)
+        writer.line(f"m.add_class::<{rust_class}>()?;")
+    for shared_type in shared_types:
+        _, rust_class = shared_class_names(shared_type)
+        writer.line(f"m.add_class::<{rust_class}>()?;")
     for struct in ir.structs:
         _, rust_class = owned_class_names(struct.type_ref)
         writer.line(f"m.add_class::<{rust_class}>()?;")
     for enum in ir.enums:
+        if enum.is_error:
+            continue
         _, rust_class = owned_class_names(enum.type_ref)
         writer.line(f"m.add_class::<{rust_class}>()?;")
     writer.line("std::result::Result::Ok(())")
@@ -202,9 +254,44 @@ def _write_native_struct(writer: _Writer, struct: StructIR) -> None:
 def _write_native_trait(writer: _Writer, trait: TraitIR) -> None:
     writer.line(f"trait {trait.symbol} {{", trait.span, "trait")
     writer.enter()
+    associated_names: set[str] = set()
+
+    def collect_associated(type_ref: TypeRef) -> None:
+        if type_ref.rust_name == "Associated" and type_ref.python_name is not None:
+            associated_names.add(type_ref.python_name)
+        for argument in type_ref.arguments:
+            collect_associated(argument)
+
     for method in trait.methods:
+        collect_associated(method.return_type)
+        for parameter_type in method.parameter_types:
+            collect_associated(parameter_type)
+    for name in sorted(associated_names):
+        writer.line(f"type {name};", trait.span, "trait_associated_type")
+    if associated_names:
+        writer.line()
+    for method in trait.methods:
+        rendered_generics: list[str] = []
+        for parameter in method.type_parameters:
+            if parameter.is_lifetime:
+                rendered_generics.append(f"'{parameter.rust_name}")
+            else:
+                bounds = f": {' + '.join(parameter.bounds)}" if parameter.bounds else ""
+                rendered_generics.append(f"{parameter.rust_name}{bounds}")
+        generics = f"<{', '.join(rendered_generics)}>" if rendered_generics else ""
+        receiver = {
+            "Ref": "&self",
+            "Mut": "&mut self",
+            "Owned": "self",
+        }[method.receiver_ownership]
+        parameters = tuple(
+            f"__cw_trait_arg_{index}: {type_ref.render()}"
+            for index, type_ref in enumerate(method.parameter_types)
+        )
+        signature = ", ".join((receiver, *parameters))
         writer.line(
-            f"fn {method.rust_name}(&self) -> {method.return_type.render()};",
+            f"fn {method.rust_name}{generics}({signature}) "
+            f"-> {method.return_type.render()};",
             method.span,
             "trait_method",
         )
@@ -213,6 +300,7 @@ def _write_native_trait(writer: _Writer, trait: TraitIR) -> None:
 
 
 def _write_method_impls(writer: _Writer, package: PackageIR) -> None:
+    traits_by_symbol = {trait.symbol: trait for trait in package.traits}
     trait_method_names = {
         (trait.symbol, method.name): method.rust_name
         for trait in package.traits
@@ -241,18 +329,26 @@ def _write_method_impls(writer: _Writer, package: PackageIR) -> None:
     ]
     for function in operators:
         assert function.method_for is not None
-        assert function.operator_kind == "add"
+        assert function.operator_kind is not None
         assert len(function.parameters) == 2
+        trait_name, method_name = {
+            "add": ("Add", "add"),
+            "subtract": ("Sub", "sub"),
+            "multiply": ("Mul", "mul"),
+            "divide": ("Div", "div"),
+            "remainder": ("Rem", "rem"),
+        }[function.operator_kind]
         right = function.parameters[1]
         writer.line(
-            f"impl std::ops::Add<{right.type_ref.render()}> "
+            f"impl std::ops::{trait_name}<{right.type_ref.render()}> "
             f"for {function.method_for.render()} {{"
         )
         writer.enter()
         writer.line(f"type Output = {function.return_type.render()};")
         writer.line()
         writer.line(
-            f"fn add(self, {right.rust_name}: {right.type_ref.render()}) -> Self::Output {{",
+            f"fn {method_name}(self, {right.rust_name}: {right.type_ref.render()}) "
+            "-> Self::Output {",
             function.span,
             "operator_impl",
         )
@@ -276,6 +372,41 @@ def _write_method_impls(writer: _Writer, package: PackageIR) -> None:
         assert target is not None
         writer.line(f"impl {trait_symbol} for {target.render()} {{")
         writer.enter()
+        associated: dict[str, TypeRef] = {}
+
+        def bind_associated(pattern: TypeRef, concrete: TypeRef) -> None:
+            if pattern.rust_name == "Associated":
+                assert pattern.python_name is not None
+                previous = associated.get(pattern.python_name)
+                if previous is not None and previous != concrete:
+                    raise AssertionError("validated associated type mapping diverged")
+                associated[pattern.python_name] = concrete
+                return
+            if len(pattern.arguments) != len(concrete.arguments):
+                return
+            for pattern_arg, concrete_arg in zip(
+                pattern.arguments, concrete.arguments, strict=True
+            ):
+                bind_associated(pattern_arg, concrete_arg)
+
+        trait = traits_by_symbol[trait_symbol]
+        for function in functions:
+            declared = next(
+                method
+                for method in trait.methods
+                if method.name == function.method_name
+            )
+            bind_associated(declared.return_type, function.return_type)
+            for pattern, parameter in zip(
+                declared.parameter_types,
+                function.parameters[1:],
+                strict=True,
+            ):
+                bind_associated(pattern, parameter.type_ref)
+        for name, type_ref in sorted(associated.items()):
+            writer.line(f"type {name} = {type_ref.render()};")
+        if associated:
+            writer.line()
         for function in functions:
             assert function.method_name is not None
             _write_method_glue(
@@ -295,6 +426,25 @@ def _write_method_glue(
 ) -> None:
     assert function.method_name is not None and function.parameters
     receiver_type = function.parameters[0].type_ref
+    rendered_generics: list[str] = []
+    for parameter in function.type_parameters:
+        if parameter.is_lifetime:
+            rendered_generics.append(f"'{parameter.rust_name}")
+        else:
+            qualified = tuple(
+                {
+                    "Clone": "std::clone::Clone",
+                    "Copy": "std::marker::Copy",
+                    "Debug": "std::fmt::Debug",
+                    "Display": "std::fmt::Display",
+                    "Ord": "std::cmp::Ord",
+                    "PartialOrd": "std::cmp::PartialOrd",
+                }.get(value, value)
+                for value in parameter.bounds
+            )
+            bounds = f": {' + '.join(qualified)}" if qualified else ""
+            rendered_generics.append(f"{parameter.rust_name}{bounds}")
+    generics = f"<{', '.join(rendered_generics)}>" if rendered_generics else ""
     receiver = {
         "Ref": "&self",
         "Mut": "&mut self",
@@ -309,7 +459,7 @@ def _write_method_glue(
         ("self", *(parameter.rust_name for parameter in function.parameters[1:]))
     )
     writer.line(
-        f"fn {emitted_method_name or function.method_name}({parameters}) "
+        f"fn {emitted_method_name or function.method_name}{generics}({parameters}) "
         f"-> {function.return_type.render()} {{",
         function.span,
         "method_impl",
@@ -321,7 +471,9 @@ def _write_method_glue(
 
 
 def _write_native_enum(writer: _Writer, enum: EnumIR) -> None:
-    derives = ["Clone", "Debug"] + ["::".join(value) for value in enum.derives]
+    derives = (["Debug"] if enum.is_error else ["Clone", "Debug"]) + [
+        "::".join(value) for value in enum.derives
+    ]
     writer.line(f"#[derive({', '.join(derives)})]", enum.span, "enum_derive")
     writer.line(f"enum {enum.symbol} {{", enum.span, "enum")
     writer.enter()
@@ -346,6 +498,374 @@ def _write_native_enum(writer: _Writer, enum: EnumIR) -> None:
     writer.line("}")
 
 
+def _write_native_error_impls(writer: _Writer, enum: EnumIR) -> None:
+    """Emit declared conversions and structured, source-preserving error metadata."""
+
+    writer.line(f"impl std::fmt::Display for {enum.symbol} {{")
+    writer.enter()
+    writer.line(
+        "fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {"
+    )
+    writer.enter()
+    writer.line('write!(formatter, "{:?}", self)')
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+    writer.line()
+
+    writer.line(f"impl std::error::Error for {enum.symbol} {{")
+    writer.enter()
+    writer.line(
+        "fn source(&self) -> std::option::Option<&(dyn std::error::Error + 'static)> {"
+    )
+    writer.enter()
+    writer.line("match self {")
+    writer.enter()
+    for variant in enum.variants:
+        source = variant.from_source
+        if source is None or not (
+            source.rust_name == "IoError" or _is_error_domain_type(source)
+        ):
+            continue
+        source_binding = "__cw_source"
+        pattern = _enum_variant_pattern(
+            enum,
+            variant.name,
+            ((variant.fields[0].name, source_binding),),
+            variant.tuple_style,
+        )
+        writer.line(f"{pattern} => std::option::Option::Some({source_binding}),")
+    writer.line("_ => std::option::Option::None,")
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+    writer.line()
+
+    for variant in enum.variants:
+        source = variant.from_source
+        if source is None:
+            continue
+        writer.line(f"impl std::convert::From<{source.render()}> for {enum.symbol} {{")
+        writer.enter()
+        writer.line(f"fn from(source: {source.render()}) -> Self {{")
+        writer.enter()
+        writer.line(f"Self::{variant.rust_name}(source)")
+        writer.leave()
+        writer.line("}")
+        writer.leave()
+        writer.line("}")
+        writer.line()
+
+    writer.line(f"impl {enum.symbol} {{")
+    writer.enter()
+    writer.line("fn __cw_variant(&self) -> &'static str {")
+    writer.enter()
+    writer.line("match self {")
+    writer.enter()
+    for variant in enum.variants:
+        pattern = _enum_variant_pattern(enum, variant.name, (), variant.tuple_style)
+        writer.line(f'{pattern} => "{variant.name}",')
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+    writer.line()
+
+    writer.line("fn __cw_fields(&self) -> Vec<(String, String)> {")
+    writer.enter()
+    writer.line("match self {")
+    writer.enter()
+    for variant_index, variant in enumerate(enum.variants):
+        bindings = tuple(
+            (field.name, f"__cw_field_{variant_index}_{field_index}")
+            for field_index, field in enumerate(variant.fields)
+        )
+        pattern = _enum_variant_pattern(
+            enum,
+            variant.name,
+            bindings,
+            variant.tuple_style,
+        )
+        if not variant.fields:
+            writer.line(f"{pattern} => Vec::new(),")
+            continue
+        values = ", ".join(
+            (
+                f'(String::from("{_error_field_name(variant, field.name)}"), '
+                f'format!("{{}}", {binding}))'
+            )
+            for field, (_, binding) in zip(variant.fields, bindings)
+        )
+        writer.line(f"{pattern} => vec![{values}],")
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+    writer.line()
+
+    writer.line("fn __cw_sources(&self) -> Vec<(String, String)> {")
+    writer.enter()
+    writer.line("match self {")
+    writer.enter()
+    for variant in enum.variants:
+        source = variant.from_source
+        if source is None:
+            continue
+        source_binding = "__cw_source"
+        pattern = _enum_variant_pattern(
+            enum,
+            variant.name,
+            ((variant.fields[0].name, source_binding),),
+            variant.tuple_style,
+        )
+        source_type = json.dumps(source.display())
+        if _is_error_domain_type(source):
+            writer.line(f"{pattern} => {{")
+            writer.enter()
+            writer.line(
+                f"let mut __cw_sources = vec![(String::from({source_type}), "
+                f"{source_binding}.to_string())];"
+            )
+            writer.line(f"__cw_sources.extend({source_binding}.__cw_sources());")
+            writer.line("__cw_sources")
+            writer.leave()
+            writer.line("},")
+        else:
+            writer.line(
+                f"{pattern} => vec![(String::from({source_type}), "
+                f"{source_binding}.to_string())],"
+            )
+    writer.line("_ => Vec::new(),")
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+
+
+def _is_error_domain_type(type_ref: TypeRef) -> bool:
+    from .types import ErrorDomainType
+
+    return isinstance(type_ref, ErrorDomainType)
+
+
+def _error_field_name(variant: object, field_name: str) -> str:
+    from_source = getattr(variant, "from_source", None)
+    return "source" if from_source is not None and field_name == "_0" else field_name
+
+
+def _domain_class(
+    type_ref: TypeRef,
+    domains_by_symbol: dict[str, TypeRef],
+) -> str | None:
+    domain = domains_by_symbol.get(type_ref.rust_name)
+    return owned_class_names(domain)[1] if domain is not None else None
+
+
+def _contains_domain(
+    type_ref: TypeRef,
+    domains_by_symbol: dict[str, TypeRef],
+) -> bool:
+    return _domain_class(type_ref, domains_by_symbol) is not None or any(
+        _contains_domain(value, domains_by_symbol) for value in type_ref.arguments
+    )
+
+
+def _domain_input_type(
+    type_ref: TypeRef,
+    domains_by_symbol: dict[str, TypeRef],
+) -> str:
+    domain_class = _domain_class(type_ref, domains_by_symbol)
+    if domain_class is not None:
+        return f"PyRef<'_, {domain_class}>"
+    if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
+        return f"Vec<{_domain_input_type(type_ref.arguments[0], domains_by_symbol)}>"
+    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        return f"Option<{_domain_input_type(type_ref.arguments[0], domains_by_symbol)}>"
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        values = ", ".join(
+            _domain_input_type(value, domains_by_symbol) for value in type_ref.arguments
+        )
+        return f"({values}{',' if len(type_ref.arguments) == 1 else ''})"
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        key, value = type_ref.arguments
+        return (
+            "std::collections::HashMap<"
+            f"{_domain_input_type(key, domains_by_symbol)}, "
+            f"{_domain_input_type(value, domains_by_symbol)}>"
+        )
+    return type_ref.render()
+
+
+def _domain_input_conversion(
+    expression: str,
+    type_ref: TypeRef,
+    domains_by_symbol: dict[str, TypeRef],
+    names: EmissionNames,
+    field_name: str,
+) -> str:
+    if _domain_class(type_ref, domains_by_symbol) is not None:
+        return (
+            f"{expression}.value.as_ref().cloned().ok_or_else(|| "
+            f"{_native_move_error(field_name)})"
+        )
+    if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
+        item = names.temporary("domain_input_item")
+        child = _domain_input_conversion(
+            item,
+            type_ref.arguments[0],
+            domains_by_symbol,
+            names,
+            field_name,
+        )
+        return (
+            f"{expression}.into_iter().map(|{item}| {child})"
+            ".collect::<PyResult<Vec<_>>>()"
+        )
+    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        item = names.temporary("domain_input_item")
+        child = _domain_input_conversion(
+            item,
+            type_ref.arguments[0],
+            domains_by_symbol,
+            names,
+            field_name,
+        )
+        return (
+            f"match {expression} {{ std::option::Option::Some({item}) => "
+            f"({child}).map(std::option::Option::Some), "
+            "std::option::Option::None => "
+            "std::result::Result::<_, pyo3::PyErr>::Ok("
+            "std::option::Option::None) }"
+        )
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        values = ", ".join(
+            f"({_domain_input_conversion(f'({expression}).{index}', child, domains_by_symbol, names, field_name)})?"
+            for index, child in enumerate(type_ref.arguments)
+        )
+        suffix = "," if len(type_ref.arguments) == 1 else ""
+        return f"std::result::Result::<_, pyo3::PyErr>::Ok(({values}{suffix}))"
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        key_name = names.temporary("domain_input_key")
+        value_name = names.temporary("domain_input_value")
+        key = _domain_input_conversion(
+            key_name,
+            type_ref.arguments[0],
+            domains_by_symbol,
+            names,
+            field_name,
+        )
+        value = _domain_input_conversion(
+            value_name,
+            type_ref.arguments[1],
+            domains_by_symbol,
+            names,
+            field_name,
+        )
+        return (
+            f"{expression}.into_iter().map(|({key_name}, {value_name})| "
+            f"std::result::Result::<_, pyo3::PyErr>::Ok((({key})?, ({value})?)))"
+            ".collect::<PyResult<std::collections::HashMap<_, _>>>()"
+        )
+    return f"std::result::Result::<_, pyo3::PyErr>::Ok({expression})"
+
+
+def _domain_output_type(
+    type_ref: TypeRef,
+    domains_by_symbol: dict[str, TypeRef],
+) -> str:
+    domain_class = _domain_class(type_ref, domains_by_symbol)
+    if domain_class is not None:
+        return f"Py<{domain_class}>"
+    if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
+        return f"Vec<{_domain_output_type(type_ref.arguments[0], domains_by_symbol)}>"
+    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        return (
+            f"Option<{_domain_output_type(type_ref.arguments[0], domains_by_symbol)}>"
+        )
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        values = ", ".join(
+            _domain_output_type(value, domains_by_symbol)
+            for value in type_ref.arguments
+        )
+        return f"({values}{',' if len(type_ref.arguments) == 1 else ''})"
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        key, value = type_ref.arguments
+        return (
+            "std::collections::HashMap<"
+            f"{_domain_output_type(key, domains_by_symbol)}, "
+            f"{_domain_output_type(value, domains_by_symbol)}>"
+        )
+    return type_ref.render()
+
+
+def _domain_output_conversion(
+    expression: str,
+    type_ref: TypeRef,
+    domains_by_symbol: dict[str, TypeRef],
+    names: EmissionNames,
+) -> str:
+    domain_class = _domain_class(type_ref, domains_by_symbol)
+    if domain_class is not None:
+        return (
+            f"Py::new(py, {domain_class} {{ value: "
+            f"std::option::Option::Some((*({expression})).clone()) }})"
+        )
+    if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
+        item = names.temporary("domain_output_item")
+        child = _domain_output_conversion(
+            item,
+            type_ref.arguments[0],
+            domains_by_symbol,
+            names,
+        )
+        return (
+            f"({expression}).iter().map(|{item}| {child}).collect::<PyResult<Vec<_>>>()"
+        )
+    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        item = names.temporary("domain_output_item")
+        child = _domain_output_conversion(
+            item,
+            type_ref.arguments[0],
+            domains_by_symbol,
+            names,
+        )
+        return f"({expression}).as_ref().map(|{item}| {child}).transpose()"
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        values = ", ".join(
+            f"({_domain_output_conversion(f'&({expression}).{index}', child, domains_by_symbol, names)})?"
+            for index, child in enumerate(type_ref.arguments)
+        )
+        suffix = "," if len(type_ref.arguments) == 1 else ""
+        return f"std::result::Result::<_, pyo3::PyErr>::Ok(({values}{suffix}))"
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        key_name = names.temporary("domain_output_key")
+        value_name = names.temporary("domain_output_value")
+        key = _domain_output_conversion(
+            key_name,
+            type_ref.arguments[0],
+            domains_by_symbol,
+            names,
+        )
+        value = _domain_output_conversion(
+            value_name,
+            type_ref.arguments[1],
+            domains_by_symbol,
+            names,
+        )
+        return (
+            f"({expression}).iter().map(|({key_name}, {value_name})| "
+            f"std::result::Result::<_, pyo3::PyErr>::Ok((({key})?, ({value})?)))"
+            ".collect::<PyResult<std::collections::HashMap<_, _>>>()"
+        )
+    return f"std::result::Result::<_, pyo3::PyErr>::Ok((*({expression})).clone())"
+
+
 def _write_owned_enum_class(
     writer: _Writer,
     enum: EnumIR,
@@ -364,24 +884,20 @@ def _write_owned_enum_class(
     writer.line(f"impl {rust_name} {{")
     writer.enter()
 
-    def domain_class(type_ref: TypeRef) -> str | None:
-        domain = domains_by_symbol.get(type_ref.rust_name)
-        return owned_class_names(domain)[1] if domain is not None else None
-
     for variant in enum.variants:
         constructor_names = EmissionNames.reserving(
             *(field.rust_name for field in variant.fields)
         )
         extracted_fields: dict[str, str] = {}
         parameters = ", ".join(
-            (
-                f"{field.rust_name}: PyRef<'_, {domain_class(field.type_ref)}>"
-                if domain_class(field.type_ref) is not None
-                else f"{field.rust_name}: {field.type_ref.render()}"
-            )
+            f"{field.rust_name}: "
+            f"{_domain_input_type(field.type_ref, domains_by_symbol)}"
             for field in variant.fields
         )
-        fallible = any(domain_class(field.type_ref) for field in variant.fields)
+        fallible = any(
+            _contains_domain(field.type_ref, domains_by_symbol)
+            for field in variant.fields
+        )
         writer.line("#[staticmethod]")
         return_type = "PyResult<Self>" if fallible else "Self"
         if variant.rust_name != variant.name:
@@ -389,25 +905,21 @@ def _write_owned_enum_class(
         writer.line(f"fn {variant.rust_name}({parameters}) -> {return_type} {{")
         writer.enter()
         for field in variant.fields:
-            if domain_class(field.type_ref) is None:
+            if not _contains_domain(field.type_ref, domains_by_symbol):
                 continue
             extracted_field = constructor_names.temporary(f"field_{field.name}")
             extracted_fields[field.name] = extracted_field
             writer.line(
-                f"let {extracted_field} = "
-                f"{field.rust_name}.value.as_ref().ok_or_else(|| {{"
+                f"let {extracted_field}: {field.type_ref.render()} = "
+                f"{_domain_input_conversion(field.rust_name, field.type_ref, domains_by_symbol, constructor_names, field.name)}?;"
             )
-            writer.enter()
-            writer.line(_native_move_error(field.name))
-            writer.leave()
-            writer.line("})?.clone();")
         if not variant.fields:
             value = f"{enum.symbol}::{variant.rust_name}"
         elif variant.tuple_style:
             arguments = ", ".join(
                 (
                     extracted_fields[field.name]
-                    if domain_class(field.type_ref) is not None
+                    if _contains_domain(field.type_ref, domains_by_symbol)
                     else field.rust_name
                 )
                 for field in variant.fields
@@ -417,7 +929,7 @@ def _write_owned_enum_class(
             arguments = ", ".join(
                 (
                     f"{field.rust_name}: {extracted_fields[field.name]}"
-                    if domain_class(field.type_ref) is not None
+                    if _contains_domain(field.type_ref, domains_by_symbol)
                     else f"{field.rust_name}: {field.rust_name}"
                 )
                 for field in variant.fields
@@ -453,7 +965,11 @@ def _write_owned_enum_class(
     for field_name, candidate_types in sorted(field_types.items()):
         heterogeneous = len(candidate_types) > 1
         field_type = next(iter(candidate_types))
-        nested_class = domain_class(field_type) if not heterogeneous else None
+        nested_domain = (
+            _contains_domain(field_type, domains_by_symbol)
+            if not heterogeneous
+            else False
+        )
         getter_names = EmissionNames.reserving("self", "py")
         stored_value = getter_names.temporary("stored_value")
         target_name = getter_names.temporary("variant_target")
@@ -470,10 +986,10 @@ def _write_owned_enum_class(
                 f"fn get_{getter_field.rust_name}(&self, py: Python<'_>) -> "
                 "PyResult<Option<Py<PyAny>>> {"
             )
-        elif nested_class is not None:
+        elif nested_domain:
             writer.line(
                 f"fn get_{getter_field.rust_name}(&self, py: Python<'_>) -> "
-                f"PyResult<Option<Py<{nested_class}>>> {{"
+                f"PyResult<Option<{_domain_output_type(field_type, domains_by_symbol)}>> {{"
             )
         else:
             writer.line(
@@ -504,13 +1020,17 @@ def _write_owned_enum_class(
                 bindings,
                 variant.tuple_style,
             )
-            target_class = domain_class(target.type_ref)
-            if target_class is not None:
-                native = (
-                    f"Py::new(py, {target_class} {{ value: "
-                    f"std::option::Option::Some({target_name}.clone()) }})?"
+            target_has_domain = _contains_domain(target.type_ref, domains_by_symbol)
+            if target_has_domain:
+                native = _domain_output_conversion(
+                    target_name,
+                    target.type_ref,
+                    domains_by_symbol,
+                    getter_names,
                 )
-                converted = f"{native}.into_any()" if heterogeneous else native
+                converted = (
+                    f"({native})?.into_py_any(py)?" if heterogeneous else f"({native})?"
+                )
             else:
                 converted = (
                     f"{target_name}.clone().into_py_any(py)?"
@@ -602,16 +1122,8 @@ def _write_owned_struct_class(
     writer.line(f"impl {rust_name} {{")
     writer.enter()
 
-    def domain_class(field: StructFieldIR) -> str | None:
-        domain = domains_by_symbol.get(field.type_ref.rust_name)
-        return owned_class_names(domain)[1] if domain is not None else None
-
     parameters = ", ".join(
-        (
-            f"{field.rust_name}: PyRef<'_, {domain_class(field)}>"
-            if domain_class(field) is not None
-            else f"{field.rust_name}: {field.type_ref.render()}"
-        )
+        f"{field.rust_name}: {_domain_input_type(field.type_ref, domains_by_symbol)}"
         for field in struct.fields
     )
     writer.line("#[new]")
@@ -622,17 +1134,14 @@ def _write_owned_struct_class(
     )
     extracted_fields: dict[str, str] = {}
     for field in struct.fields:
-        if domain_class(field) is None:
+        if not _contains_domain(field.type_ref, domains_by_symbol):
             continue
         extracted_field = constructor_names.temporary(f"field_{field.name}")
         extracted_fields[field.name] = extracted_field
         writer.line(
-            f"let {extracted_field} = {field.rust_name}.value.as_ref().ok_or_else(|| {{"
+            f"let {extracted_field}: {field.type_ref.render()} = "
+            f"{_domain_input_conversion(field.rust_name, field.type_ref, domains_by_symbol, constructor_names, field.name)}?;"
         )
-        writer.enter()
-        writer.line(_native_move_error(field.name))
-        writer.leave()
-        writer.line("})?.clone();")
     writer.line(
         "std::result::Result::Ok(Self { value: std::option::Option::Some("
         + struct.symbol
@@ -642,7 +1151,7 @@ def _write_owned_struct_class(
     for field in struct.fields:
         value = (
             extracted_fields[field.name]
-            if domain_class(field) is not None
+            if _contains_domain(field.type_ref, domains_by_symbol)
             else field.rust_name
         )
         writer.line(f"{field.rust_name}: {value},")
@@ -651,12 +1160,12 @@ def _write_owned_struct_class(
     writer.leave()
     writer.line("}")
     for field in struct.fields:
-        nested_class = domain_class(field)
+        nested_domain = _contains_domain(field.type_ref, domains_by_symbol)
         getter_names = EmissionNames.reserving("self", "py")
         stored_value = getter_names.temporary("stored_value")
         writer.line()
         writer.line(f'#[getter("{field.name}")]')
-        if nested_class is None:
+        if not nested_domain:
             writer.line(
                 f"fn get_{field.rust_name}(&self) "
                 f"-> PyResult<{field.type_ref.render()}> {{"
@@ -664,7 +1173,7 @@ def _write_owned_struct_class(
         else:
             writer.line(
                 f"fn get_{field.rust_name}(&self, py: Python<'_>) -> "
-                f"PyResult<Py<{nested_class}>> {{"
+                f"PyResult<{_domain_output_type(field.type_ref, domains_by_symbol)}> {{"
             )
         writer.enter()
         writer.line(f"let {stored_value} = self.value.as_ref().ok_or_else(|| {{")
@@ -672,24 +1181,24 @@ def _write_owned_struct_class(
         writer.line(_native_move_error(""))
         writer.leave()
         writer.line("})?;")
-        if nested_class is None:
+        if not nested_domain:
             writer.line(
                 f"std::result::Result::Ok({stored_value}.{field.rust_name}.clone())"
             )
         else:
             writer.line(
-                f"Py::new(py, {nested_class} {{ value: std::option::Option::Some("
-                f"{stored_value}.{field.rust_name}.clone()) }})"
+                _domain_output_conversion(
+                    f"&{stored_value}.{field.rust_name}",
+                    field.type_ref,
+                    domains_by_symbol,
+                    getter_names,
+                )
             )
         writer.leave()
         writer.line("}")
         writer.line()
         writer.line(f'#[setter("{field.name}")]')
-        setter_type = (
-            f"PyRef<'_, {nested_class}>"
-            if nested_class is not None
-            else field.type_ref.render()
-        )
+        setter_type = _domain_input_type(field.type_ref, domains_by_symbol)
         writer.line(
             f"fn set_{field.rust_name}(&mut self, value: {setter_type}) "
             "-> PyResult<()> {"
@@ -697,13 +1206,12 @@ def _write_owned_struct_class(
         writer.enter()
         setter_names = EmissionNames.reserving("self", "value")
         assigned_value = "value"
-        if nested_class is not None:
+        if nested_domain:
             assigned_value = setter_names.temporary("assigned_value")
-            writer.line(f"let {assigned_value} = value.value.as_ref().ok_or_else(|| {{")
-            writer.enter()
-            writer.line(_native_move_error(field.name))
-            writer.leave()
-            writer.line("})?.clone();")
+            writer.line(
+                f"let {assigned_value}: {field.type_ref.render()} = "
+                f"{_domain_input_conversion('value', field.type_ref, domains_by_symbol, setter_names, field.name)}?;"
+            )
         target = setter_names.temporary("target")
         writer.line(f"let {target} = self.value.as_mut().ok_or_else(|| {{")
         writer.enter()
@@ -729,16 +1237,21 @@ def _write_owned_struct_class(
     writer.line(_native_move_error(""))
     writer.leave()
     writer.line("})?;")
+    converted_fields: dict[str, str] = {}
+    for field in struct.fields:
+        if not _contains_domain(field.type_ref, domains_by_symbol):
+            continue
+        converted = to_python_names.temporary(f"python_field_{field.name}")
+        converted_fields[field.name] = converted
+        writer.line(
+            f"let {converted} = "
+            f"{_domain_output_conversion(f'&{stored_value}.{field.rust_name}', field.type_ref, domains_by_symbol, to_python_names)}?;"
+        )
     writer.line(f"let {items}: Vec<Py<PyAny>> = vec![")
     writer.enter()
     for field in struct.fields:
-        nested_class = domain_class(field)
-        if nested_class is not None:
-            converted = (
-                f"Py::new(py, {nested_class} {{ value: "
-                f"std::option::Option::Some("
-                f"{stored_value}.{field.rust_name}.clone()) }})?.into_any(),"
-            )
+        if field.name in converted_fields:
+            converted = f"{converted_fields[field.name]}.into_py_any(py)?,"
         else:
             converted = f"{stored_value}.{field.rust_name}.clone().into_py_any(py)?,"
         writer.line(converted, field.span, "struct_field_to_python")
@@ -776,6 +1289,7 @@ def _write_export_wrapper(
     writer: _Writer,
     function: FunctionIR,
     boundary_names: set[str],
+    error_enums_by_symbol: dict[str, EnumIR],
 ) -> None:
     emission_names = EmissionNames.for_function(function)
     wrapper_parameters = [
@@ -887,12 +1401,33 @@ def _write_export_wrapper(
         )
         writer.enter()
         writer.line("std::result::Result::Ok(value) => std::result::Result::Ok(value),")
-        error_type = function.return_type.arguments[1].display()
-        writer.line(
-            "std::result::Result::Err(error) => std::result::Result::Err("
-            "__CwNativeRustResultError::new_err(("
-            f"{json.dumps(error_type)}, error.to_string()))),"
-        )
+        error_ref = function.return_type.arguments[1]
+        error_type = error_ref.display()
+        error_enum = error_enums_by_symbol.get(error_ref.rust_name)
+        if error_enum is None:
+            writer.line(
+                "std::result::Result::Err(error) => std::result::Result::Err("
+                "__CwNativeRustResultError::new_err(("
+                f"{json.dumps(error_type)}, error.to_string()))),"
+            )
+        else:
+            writer.line(
+                "std::result::Result::Err(error) => {",
+                error_enum.span,
+                "structured_error_boundary",
+            )
+            writer.enter()
+            writer.line("let __cw_message = error.to_string();")
+            writer.line("let __cw_variant = error.__cw_variant();")
+            writer.line("let __cw_fields = error.__cw_fields();")
+            writer.line("let __cw_sources = error.__cw_sources();")
+            writer.line(
+                "std::result::Result::Err(__CwNativeRustResultError::new_err(("
+                f"{json.dumps(error_type)}, __cw_message, __cw_variant, "
+                "__cw_fields, __cw_sources)))"
+            )
+            writer.leave()
+            writer.line("},")
         writer.leave()
         writer.line("}")
     elif function.python_boundary:
@@ -947,6 +1482,127 @@ def _write_buffer_support(writer: _Writer) -> None:
         "fn iter(&self) -> impl Iterator<Item = T> + '_ { "
         "self.values.iter().map(pyo3::buffer::ReadOnlyCell::get) }"
     )
+    writer.leave()
+    writer.line("}")
+
+
+def _write_text_column_support(writer: _Writer, type_ref: TypeRef) -> None:
+    """Emit an immutable owned UTF-8 byte/offset column and its Python handle."""
+
+    python_name, rust_name = owned_class_names(type_ref)
+    writer.line("#[derive(Clone, Debug)]")
+    writer.line("struct __CwTextColumn { data: Vec<u8>, offsets: Vec<usize> }")
+    writer.line("impl __CwTextColumn {")
+    writer.enter()
+    writer.line("fn len(&self) -> usize { self.offsets.len() - 1 }")
+    writer.line("fn is_empty(&self) -> bool { self.len() == 0 }")
+    writer.line("fn total_bytes(&self) -> usize { self.data.len() }")
+    writer.line("fn value_at(&self, index: usize) -> &str {")
+    writer.enter()
+    writer.line("let start = self.offsets[index];")
+    writer.line("let end = self.offsets[index + 1];")
+    writer.line(
+        "std::str::from_utf8(&self.data[start..end])"
+        '.expect("TextColumn UTF-8 invariant")'
+    )
+    writer.leave()
+    writer.line("}")
+    writer.line(
+        "fn get(&self, index: usize) -> String { self.value_at(index).to_owned() }"
+    )
+    writer.line(
+        "fn contains_at(&self, index: usize, marker: &str) -> bool { "
+        "self.value_at(index).contains(marker) }"
+    )
+    writer.leave()
+    writer.line("}")
+    writer.line()
+    writer.line(f'#[pyclass(name = "{python_name}")]')
+    writer.line(f"struct {rust_name} {{ value: Option<__CwTextColumn> }}")
+    writer.line("#[pymethods]")
+    writer.line(f"impl {rust_name} {{")
+    writer.enter()
+    writer.line("#[new]")
+    writer.line("fn new(data: Vec<u8>, offsets: Vec<usize>) -> PyResult<Self> {")
+    writer.enter()
+    writer.line("if offsets.is_empty() || offsets[0] != 0 {")
+    writer.enter()
+    writer.line(
+        "return std::result::Result::Err(pyo3::exceptions::PyValueError::new_err("
+        '"TextColumn offsets must start at zero"));'
+    )
+    writer.leave()
+    writer.line("}")
+    writer.line("if offsets[offsets.len() - 1] != data.len() {")
+    writer.enter()
+    writer.line(
+        "return std::result::Result::Err(pyo3::exceptions::PyValueError::new_err("
+        '"TextColumn final offset must equal the byte length"));'
+    )
+    writer.leave()
+    writer.line("}")
+    writer.line("for bounds in offsets.windows(2) {")
+    writer.enter()
+    writer.line("if bounds[0] > bounds[1] {")
+    writer.enter()
+    writer.line(
+        "return std::result::Result::Err(pyo3::exceptions::PyValueError::new_err("
+        '"TextColumn offsets must be monotonic"));'
+    )
+    writer.leave()
+    writer.line("}")
+    writer.line("if std::str::from_utf8(&data[bounds[0]..bounds[1]]).is_err() {")
+    writer.enter()
+    writer.line(
+        "return std::result::Result::Err(pyo3::exceptions::PyUnicodeError::new_err("
+        '"TextColumn segments must contain valid UTF-8"));'
+    )
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+    writer.line(
+        "std::result::Result::Ok(Self { value: std::option::Option::Some("
+        "__CwTextColumn { data, offsets }) })"
+    )
+    writer.leave()
+    writer.line("}")
+    writer.line("fn __len__(&self) -> PyResult<usize> {")
+    writer.enter()
+    writer.line("self.value.as_ref().map(__CwTextColumn::len).ok_or_else(|| {")
+    writer.enter()
+    writer.line(_native_move_error(""))
+    writer.leave()
+    writer.line("})")
+    writer.leave()
+    writer.line("}")
+    writer.line("fn to_python(&self) -> PyResult<(Vec<u8>, Vec<usize>)> {")
+    writer.enter()
+    writer.line("self.value.as_ref().map(|value| (")
+    writer.enter()
+    writer.line("value.data.clone(), value.offsets.clone()")
+    writer.leave()
+    writer.line(")).ok_or_else(|| {")
+    writer.enter()
+    writer.line(_native_move_error(""))
+    writer.leave()
+    writer.line("})")
+    writer.leave()
+    writer.line("}")
+    writer.line("fn is_moved(&self) -> bool { self.value.is_none() }")
+    writer.line("fn __repr__(&self) -> String {")
+    writer.enter()
+    writer.line("match &self.value {")
+    writer.enter()
+    writer.line(
+        f'std::option::Option::Some(value) => format!("{python_name}(rows={{}}, bytes={{}})", '
+        "value.len(), value.total_bytes()),"
+    )
+    writer.line(f'std::option::Option::None => String::from("{python_name}(<moved>)"),')
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
     writer.leave()
     writer.line("}")
 
@@ -1366,7 +2022,8 @@ def function_releases_gil(function: FunctionIR) -> bool:
     }:
         return False
     if any(
-        parameter.type_ref.ownership is not None for parameter in function.parameters
+        parameter.type_ref.ownership not in {None, "Shared"}
+        for parameter in function.parameters
     ):
         return False
     safe_names = {
@@ -1375,6 +2032,7 @@ def function_releases_gil(function: FunctionIR) -> bool:
         "i32",
         "i64",
         "i128",
+        "isize",
         "u8",
         "u16",
         "u32",
@@ -1390,6 +2048,7 @@ def function_releases_gil(function: FunctionIR) -> bool:
     return (
         all(
             parameter.type_ref.rust_name in safe_names
+            or parameter.type_ref.ownership == "Shared"
             for parameter in function.parameters
         )
         and function.return_type.rust_name in safe_names
@@ -1417,6 +2076,314 @@ def _owned_vector_types(ir: PackageIR) -> tuple[TypeRef, ...]:
     return tuple(values[key] for key in sorted(values))
 
 
+def _owned_text_column_type(ir: PackageIR) -> TypeRef | None:
+    for function in ir.functions:
+        if not function.exported:
+            continue
+        if any(
+            parameter.type_ref.ownership is not None
+            and parameter.type_ref.underlying.rust_name == "TextColumn"
+            for parameter in function.parameters
+        ):
+            return TypeRef("TextColumn")
+        if (
+            function.return_type.ownership == "Owned"
+            and function.return_type.underlying.rust_name == "TextColumn"
+        ):
+            return TypeRef("TextColumn")
+    return None
+
+
+def _shared_types(ir: PackageIR) -> tuple[TypeRef, ...]:
+    values = {
+        parameter.type_ref.underlying.render(): parameter.type_ref.underlying
+        for function in ir.functions
+        if function.exported
+        for parameter in function.parameters
+        if parameter.type_ref.ownership == "Shared"
+    }
+    return tuple(values[key] for key in sorted(values))
+
+
+def _write_shared_class(writer: _Writer, type_ref: TypeRef) -> None:
+    """Emit a frozen Python wrapper around ``Arc<T>`` for proven-safe payloads."""
+
+    python_name, rust_name = shared_class_names(type_ref)
+    _, owned_rust_name = owned_class_names(type_ref)
+    rendered = type_ref.render()
+    writer.line(f'#[pyclass(frozen, name = "{python_name}")]')
+    writer.line(f"struct {rust_name} {{ value: std::sync::Arc<{rendered}> }}")
+    writer.line("#[pymethods]")
+    writer.line(f"impl {rust_name} {{")
+    writer.enter()
+    writer.line("#[new]")
+    writer.line(
+        f"fn new(mut source: PyRefMut<'_, {owned_rust_name}>) -> PyResult<Self> {{"
+    )
+    writer.enter()
+    writer.line("let value = source.value.take().ok_or_else(|| {")
+    writer.enter()
+    writer.line(_native_move_error("", "cannot freeze a moved value"))
+    writer.leave()
+    writer.line("})?;")
+    writer.line("std::result::Result::Ok(Self { value: std::sync::Arc::new(value) })")
+    writer.leave()
+    writer.line("}")
+    writer.line(
+        f"fn snapshot(&self) -> {owned_rust_name} {{ {owned_rust_name} {{ "
+        "value: std::option::Option::Some((*self.value).clone()) } }"
+    )
+    if type_ref.rust_name in {"Vec", "TextColumn"}:
+        writer.line("fn __len__(&self) -> usize { self.value.len() }")
+    writer.line("fn is_moved(&self) -> bool { false }")
+    writer.line("fn __repr__(&self) -> String {")
+    writer.enter()
+    writer.line(
+        f'format!("{python_name}(shared, strong_count={{}})", '
+        "std::sync::Arc::strong_count(&self.value))"
+    )
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
+
+
+def _bulk_extractor_name(type_ref: TypeRef) -> str:
+    identity = f"{type_ref.display()}|{type_ref.render()}".encode()
+    return f"__cw_extract_{hashlib.sha256(identity).hexdigest()[:20]}"
+
+
+def _write_bulk_input_extractors(
+    writer: _Writer,
+    roots: tuple[TypeRef, ...],
+    structs_by_symbol: dict[str, StructIR],
+    enums_by_symbol: dict[str, EnumIR],
+) -> None:
+    """Emit one-call Python mapping -> native domain construction helpers."""
+
+    discovered: dict[str, TypeRef] = {}
+    pending = list(roots)
+    while pending:
+        type_ref = pending.pop()
+        name = _bulk_extractor_name(type_ref)
+        if name in discovered:
+            continue
+        discovered[name] = type_ref
+        pending.extend(type_ref.arguments)
+        struct = structs_by_symbol.get(type_ref.rust_name)
+        if struct is not None:
+            pending.extend(field.type_ref for field in struct.fields)
+        enum = enums_by_symbol.get(type_ref.rust_name)
+        if enum is not None:
+            pending.extend(
+                field.type_ref for variant in enum.variants for field in variant.fields
+            )
+
+    for name in sorted(discovered):
+        _write_bulk_input_extractor(
+            writer,
+            name,
+            discovered[name],
+            structs_by_symbol,
+            enums_by_symbol,
+        )
+        writer.line()
+
+
+def _write_bulk_input_extractor(
+    writer: _Writer,
+    name: str,
+    type_ref: TypeRef,
+    structs_by_symbol: dict[str, StructIR],
+    enums_by_symbol: dict[str, EnumIR],
+) -> None:
+    writer.line(
+        f"fn {name}(value: &Bound<'_, PyAny>, path: &str) "
+        f"-> PyResult<{type_ref.render()}> {{"
+    )
+    writer.enter()
+    struct = structs_by_symbol.get(type_ref.rust_name)
+    enum = enums_by_symbol.get(type_ref.rust_name)
+    if struct is not None:
+        _write_bulk_struct_extractor(writer, struct)
+    elif enum is not None:
+        _write_bulk_handle_extractor(writer, enum.type_ref)
+    elif type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        child = type_ref.arguments[0]
+        writer.line("if value.is_none() {")
+        writer.enter()
+        writer.line("std::result::Result::Ok(std::option::Option::None)")
+        writer.leave()
+        writer.line("} else {")
+        writer.enter()
+        writer.line(
+            "std::result::Result::Ok(std::option::Option::Some("
+            f"{_bulk_extractor_name(child)}(value, path)?))"
+        )
+        writer.leave()
+        writer.line("}")
+    elif type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
+        _write_bulk_sequence_extractor(writer, type_ref.arguments[0], array_length=None)
+    elif type_ref.rust_name == "Array" and len(type_ref.arguments) == 1:
+        _write_bulk_sequence_extractor(
+            writer,
+            type_ref.arguments[0],
+            array_length=type_ref.const_value,
+        )
+    elif type_ref.rust_name == "Tuple" and type_ref.arguments:
+        writer.line(
+            "let tuple = value.cast::<pyo3::types::PyTuple>().map_err(|_| "
+            "pyo3::exceptions::PyTypeError::new_err(format!("
+            '"{}: expected tuple", path)))?;'
+        )
+        writer.line(f"if tuple.len() != {len(type_ref.arguments)} {{")
+        writer.enter()
+        writer.line(
+            "return std::result::Result::Err("
+            "pyo3::exceptions::PyValueError::new_err(format!("
+            f'"{{}}: expected {len(type_ref.arguments)} tuple items", path)));'
+        )
+        writer.leave()
+        writer.line("}")
+        tuple_values: list[str] = []
+        for index, child in enumerate(type_ref.arguments):
+            local = f"__cw_tuple_{index}"
+            writer.line(f"let {local} = tuple.get_item({index})?;")
+            tuple_values.append(
+                f"{_bulk_extractor_name(child)}(&{local}, "
+                f'&format!("{{}}[{index}]", path))?'
+            )
+        suffix = "," if len(tuple_values) == 1 else ""
+        writer.line(
+            "std::result::Result::Ok((" + ", ".join(tuple_values) + suffix + "))"
+        )
+    elif type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        key, item = type_ref.arguments
+        writer.line(
+            "let mapping = value.cast::<pyo3::types::PyDict>().map_err(|_| "
+            "pyo3::exceptions::PyTypeError::new_err(format!("
+            '"{}: expected mapping", path)))?;'
+        )
+        writer.line(
+            "let mut output = std::collections::HashMap::with_capacity(mapping.len());"
+        )
+        writer.line("for (__cw_key, __cw_value) in mapping.iter() {")
+        writer.enter()
+        writer.line(
+            f"let __cw_native_key = {_bulk_extractor_name(key)}("
+            '&__cw_key, &format!("{} mapping key", path))?;'
+        )
+        writer.line(
+            f"let __cw_native_value = {_bulk_extractor_name(item)}("
+            '&__cw_value, &format!("{} mapping value", path))?;'
+        )
+        writer.line("output.insert(__cw_native_key, __cw_native_value);")
+        writer.leave()
+        writer.line("}")
+        writer.line("std::result::Result::Ok(output)")
+    else:
+        writer.line(
+            f"value.extract::<{type_ref.render()}>().map_err(|error| "
+            "pyo3::exceptions::PyTypeError::new_err(format!("
+            '"{}: {}", path, error)))'
+        )
+    writer.leave()
+    writer.line("}")
+
+
+def _write_bulk_handle_extractor(writer: _Writer, type_ref: TypeRef) -> None:
+    _, domain_class = owned_class_names(type_ref)
+    writer.line(
+        f"if let std::result::Result::Ok(handle) = value.extract::<PyRef<'_, {domain_class}>>() {{"
+    )
+    writer.enter()
+    writer.line("let stored = handle.value.as_ref().ok_or_else(|| {")
+    writer.enter()
+    writer.line(_native_move_error(""))
+    writer.leave()
+    writer.line("})?;")
+    writer.line("return std::result::Result::Ok(stored.clone());")
+    writer.leave()
+    writer.line("}")
+    writer.line(
+        "std::result::Result::Err(pyo3::exceptions::PyTypeError::new_err("
+        f'format!("{{}}: expected {type_ref.display()} handle", path)))'
+    )
+
+
+def _write_bulk_struct_extractor(writer: _Writer, struct: StructIR) -> None:
+    _, domain_class = owned_class_names(struct.type_ref)
+    writer.line(
+        f"if let std::result::Result::Ok(handle) = value.extract::<PyRef<'_, {domain_class}>>() {{"
+    )
+    writer.enter()
+    writer.line("let stored = handle.value.as_ref().ok_or_else(|| {")
+    writer.enter()
+    writer.line(_native_move_error(""))
+    writer.leave()
+    writer.line("})?;")
+    writer.line("return std::result::Result::Ok(stored.clone());")
+    writer.leave()
+    writer.line("}")
+    writer.line(
+        "let mapping = value.cast::<pyo3::types::PyDict>().map_err(|_| "
+        "pyo3::exceptions::PyTypeError::new_err(format!("
+        f'"{{}}: expected {struct.qualified_name} handle or mapping", path)))?;'
+    )
+    field_values: list[str] = []
+    for index, field in enumerate(struct.fields):
+        raw = f"__cw_raw_field_{index}"
+        native = f"__cw_native_field_{index}"
+        writer.line(
+            f"let {raw} = mapping.get_item({json.dumps(field.name)})?.ok_or_else(|| "
+            "pyo3::exceptions::PyTypeError::new_err(format!("
+            f'"{{}}: missing field {field.name}", path)))?;'
+        )
+        writer.line(
+            f"let {native} = {_bulk_extractor_name(field.type_ref)}("
+            f'&{raw}, &format!("{{}}.{field.name}", path))?;'
+        )
+        field_values.append(f"{field.rust_name}: {native}")
+    writer.line(
+        f"std::result::Result::Ok({struct.symbol} {{ " + ", ".join(field_values) + " })"
+    )
+
+
+def _write_bulk_sequence_extractor(
+    writer: _Writer,
+    child: TypeRef,
+    *,
+    array_length: int | None,
+) -> None:
+    writer.line("let mut output = Vec::with_capacity(value.len()?);")
+    writer.line("for (index, item) in value.try_iter()?.enumerate() {")
+    writer.enter()
+    writer.line("let item = item?;")
+    writer.line(
+        f"output.push({_bulk_extractor_name(child)}("
+        '&item, &format!("{}[{}]", path, index))?);'
+    )
+    writer.leave()
+    writer.line("}")
+    if array_length is None:
+        writer.line("std::result::Result::Ok(output)")
+        return
+    writer.line(f"if output.len() != {array_length} {{")
+    writer.enter()
+    writer.line(
+        "return std::result::Result::Err("
+        "pyo3::exceptions::PyValueError::new_err(format!("
+        f'"{{}}: expected {array_length} items", path)));'
+    )
+    writer.leave()
+    writer.line("}")
+    writer.line(
+        "output.try_into().map_err(|_| "
+        "pyo3::exceptions::PyValueError::new_err(format!("
+        f'"{{}}: expected {array_length} items", path)))'
+    )
+
+
 def _write_owned_vector_class(
     writer: _Writer,
     vector_type: TypeRef,
@@ -1425,10 +2392,7 @@ def _write_owned_vector_class(
     python_name, rust_name = owned_class_names(vector_type)
     rendered = vector_type.render()
     element_type = vector_type.arguments[0]
-    domain_type = domains_by_symbol.get(element_type.rust_name)
-    domain_class = (
-        owned_class_names(domain_type)[1] if domain_type is not None else None
-    )
+    contains_domain = _contains_domain(element_type, domains_by_symbol)
     writer.line(f'#[pyclass(name = "{python_name}")]')
     writer.line(f"struct {rust_name} {{")
     writer.enter()
@@ -1440,30 +2404,27 @@ def _write_owned_vector_class(
     writer.line(f"impl {rust_name} {{")
     writer.enter()
     writer.line("#[new]")
-    if domain_class is None:
+    if not contains_domain:
         writer.line(f"fn new(value: {rendered}) -> Self {{")
         writer.enter()
         writer.line("Self { value: std::option::Option::Some(value) }")
         writer.leave()
         writer.line("}")
     else:
-        writer.line(
-            f"fn new(value: Vec<PyRef<'_, {domain_class}>>) -> PyResult<Self> {{"
-        )
+        writer.line("fn new(value: &Bound<'_, PyAny>) -> PyResult<Self> {")
         writer.enter()
         constructor_names = EmissionNames.reserving("value")
         values = constructor_names.temporary("owned_values")
         item = constructor_names.temporary("owned_item")
-        item_value = constructor_names.temporary("owned_item_value")
-        writer.line(f"let mut {values} = Vec::with_capacity(value.len());")
-        writer.line(f"for {item} in value {{")
+        index = constructor_names.temporary("owned_index")
+        writer.line(f"let mut {values} = Vec::with_capacity(value.len()?);")
+        writer.line(f"for ({index}, {item}) in value.try_iter()?.enumerate() {{")
         writer.enter()
-        writer.line(f"let {item_value} = {item}.value.as_ref().ok_or_else(|| {{")
-        writer.enter()
-        writer.line(_native_move_error(""))
-        writer.leave()
-        writer.line("})?;")
-        writer.line(f"{values}.push({item_value}.clone());")
+        writer.line(f"let {item} = {item}?;")
+        writer.line(
+            f"{values}.push({_bulk_extractor_name(element_type)}("
+            f'&{item}, &format!("vector element {{}}", {index}))?);'
+        )
         writer.leave()
         writer.line("}")
         writer.line(
@@ -1483,7 +2444,7 @@ def _write_owned_vector_class(
     writer.leave()
     writer.line("}")
     writer.line()
-    if domain_class is None:
+    if not contains_domain:
         writer.line(f"fn to_python(&self) -> PyResult<{rendered}> {{")
         writer.enter()
         writer.line("self.value.as_ref().cloned().ok_or_else(|| {")
@@ -1496,9 +2457,9 @@ def _write_owned_vector_class(
     else:
         to_python_names = EmissionNames.reserving("self", "py")
         values = to_python_names.temporary("stored_values")
-        item = to_python_names.temporary("stored_item")
         writer.line(
-            f"fn to_python(&self, py: Python<'_>) -> PyResult<Vec<Py<{domain_class}>>> {{"
+            "fn to_python(&self, py: Python<'_>) -> "
+            f"PyResult<{_domain_output_type(vector_type, domains_by_symbol)}> {{"
         )
         writer.enter()
         writer.line(f"let {values} = self.value.as_ref().ok_or_else(|| {{")
@@ -1506,14 +2467,14 @@ def _write_owned_vector_class(
         writer.line(_native_move_error(""))
         writer.leave()
         writer.line("})?;")
-        writer.line(f"{values}.iter().cloned().map(|{item}| {{")
-        writer.enter()
         writer.line(
-            f"Py::new(py, {domain_class} {{ "
-            f"value: std::option::Option::Some({item}) }})"
+            _domain_output_conversion(
+                values,
+                vector_type,
+                domains_by_symbol,
+                to_python_names,
+            )
         )
-        writer.leave()
-        writer.line("}).collect()")
         writer.leave()
         writer.line("}")
     writer.line()
@@ -1546,6 +2507,9 @@ def _wrapper_parameter(parameter: ParameterIR) -> str:
     if ownership is None:
         return f"{parameter.rust_name}: {parameter.type_ref.render()}"
     vector = parameter.type_ref.underlying
+    if ownership == "Shared":
+        _, rust_class = shared_class_names(vector)
+        return f"{parameter.rust_name}: PyRef<'_, {rust_class}>"
     _, rust_class = owned_class_names(vector)
     if ownership == "Ref":
         return f"{parameter.rust_name}: PyRef<'_, {rust_class}>"
@@ -1601,6 +2565,13 @@ def _write_wrapper_extraction(
         assert extracted_name is None
         return
     assert extracted_name is not None
+    if ownership == "Shared":
+        writer.line(
+            f"let {extracted_name} = {parameter.rust_name}.value.clone();",
+            parameter.span,
+            "shared_ownership_boundary",
+        )
+        return
     access = {
         "Owned": "take()",
         "Ref": "as_ref()",
@@ -1621,7 +2592,7 @@ def _write_wrapper_ownership_preflight(
     writer: _Writer,
     parameter: ParameterIR,
 ) -> None:
-    if parameter.type_ref.ownership is None:
+    if parameter.type_ref.ownership in {None, "Shared"}:
         return
     writer.line(
         (

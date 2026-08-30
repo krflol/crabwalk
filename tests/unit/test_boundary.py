@@ -87,6 +87,19 @@ def test_nested_tuple_and_option_use_the_same_recursive_codec() -> None:
     assert normalize_boundary_output((7, [97, 98, 99]), type_ref) == (7, b"abc")
 
 
+def test_hashmap_input_validates_recursive_keys_values_and_paths() -> None:
+    string_map = TypeRef("HashMap", (TypeRef("String"), TypeRef("u64")))
+    bytes_map = TypeRef(
+        "HashMap",
+        (TypeRef("Vec", (TypeRef("u8"),)), TypeRef("u64")),
+    )
+
+    assert validate_boundary_input({"active": 3}, string_map) == {"active": 3}
+    assert validate_boundary_input({b"active": 3}, bytes_map) == {b"active": 3}
+    with pytest.raises(TypeError, match="mapping value for key 'active'"):
+        validate_boundary_input({"active": True}, string_map)
+
+
 @pytest.mark.parametrize(
     "type_ref",
     (

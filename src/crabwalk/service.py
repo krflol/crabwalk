@@ -27,7 +27,7 @@ from crabwalk.build.cache import (
     write_json,
     write_text,
 )
-from crabwalk.build.cargo import CargoBuildFailure, CargoBuilder
+from crabwalk.build.cargo import CargoBuildCancelled, CargoBuildFailure, CargoBuilder
 from crabwalk.build.fingerprint import build_fingerprint
 from crabwalk.build.loader import load_extension
 from crabwalk.compiler.cargo_emission import cargo_dependency_specification
@@ -104,6 +104,7 @@ class CompilationService:
         offline: bool = False,
         project: str | Path | None = None,
         progress: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> CompilationResult:
         report = progress or (lambda _phase: None)
         last_replan: _DependencyLockReplan | None = None
@@ -118,6 +119,7 @@ class CompilationService:
                     offline=offline,
                     project=project,
                     progress=progress,
+                    cancelled=cancelled,
                 )
             except _DependencyLockReplan as replan:
                 last_replan = replan
@@ -148,6 +150,7 @@ class CompilationService:
         offline: bool = False,
         project: str | Path | None = None,
         progress: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> CompilationResult:
         report = progress or (lambda _phase: None)
         report("Analyzing Python source")
@@ -213,6 +216,7 @@ class CompilationService:
                 state_root,
                 offline=offline,
                 cargo_package_identity=cargo_package_identity,
+                cancelled=cancelled,
             )
         dependency_lock_hash = (
             sha256_file(dependency_lock) if dependency_lock.is_file() else None
@@ -312,14 +316,25 @@ class CompilationService:
             if mode == "check":
                 report("Checking generated Rust with Cargo")
                 try:
-                    outcome = self.cargo.run(
-                        generated_dir,
-                        target_dir,
-                        extension_name,
-                        "check",
-                        locked=effective_locked,
-                        offline=offline,
-                    )
+                    if cancelled is None:
+                        outcome = self.cargo.run(
+                            generated_dir,
+                            target_dir,
+                            extension_name,
+                            "check",
+                            locked=effective_locked,
+                            offline=offline,
+                        )
+                    else:
+                        outcome = self.cargo.run(
+                            generated_dir,
+                            target_dir,
+                            extension_name,
+                            "check",
+                            locked=effective_locked,
+                            offline=offline,
+                            cancelled=cancelled,
+                        )
                     command = outcome.command
                     _persist_dependency_lock(ir, generated_dir, dependency_lock)
                     dependency_lock_changed = _lock_hash_changed(
@@ -327,6 +342,8 @@ class CompilationService:
                         dependency_lock,
                         dependency_lock_hash,
                     )
+                except CargoBuildCancelled as error:
+                    raise _cancelled_diagnostic(ir, error) from error
                 except CargoBuildFailure as error:
                     raise _cargo_diagnostics(error, source_map, ir) from error
             elif mode == "build":
@@ -337,14 +354,25 @@ class CompilationService:
                     else "Compiling the Rust extension"
                 )
                 try:
-                    outcome = self.cargo.run(
-                        generated_dir,
-                        target_dir,
-                        extension_name,
-                        "build",
-                        locked=effective_locked,
-                        offline=offline,
-                    )
+                    if cancelled is None:
+                        outcome = self.cargo.run(
+                            generated_dir,
+                            target_dir,
+                            extension_name,
+                            "build",
+                            locked=effective_locked,
+                            offline=offline,
+                        )
+                    else:
+                        outcome = self.cargo.run(
+                            generated_dir,
+                            target_dir,
+                            extension_name,
+                            "build",
+                            locked=effective_locked,
+                            offline=offline,
+                            cancelled=cancelled,
+                        )
                     command = outcome.command
                     _persist_dependency_lock(ir, generated_dir, dependency_lock)
                     dependency_lock_changed = _lock_hash_changed(
@@ -352,6 +380,8 @@ class CompilationService:
                         dependency_lock,
                         dependency_lock_hash,
                     )
+                except CargoBuildCancelled as error:
+                    raise _cancelled_diagnostic(ir, error) from error
                 except CargoBuildFailure as error:
                     raise _cargo_diagnostics(error, source_map, ir) from error
                 if dependency_lock_changed:
@@ -409,6 +439,7 @@ class CompilationService:
         *,
         offline: bool,
         cargo_package_identity: str,
+        cancelled: Callable[[], bool] | None,
     ) -> None:
         manifest_key = _dependency_manifest_key(ir)
         bootstrap_dir = (
@@ -430,10 +461,34 @@ class CompilationService:
             write_text(bootstrap_dir / "build.rs", generated.build_rs)
             write_text(bootstrap_dir / "src" / "lib.rs", generated.rust_source)
             try:
-                self.cargo.generate_lockfile(bootstrap_dir, offline=offline)
+                if cancelled is None:
+                    self.cargo.generate_lockfile(bootstrap_dir, offline=offline)
+                else:
+                    self.cargo.generate_lockfile(
+                        bootstrap_dir,
+                        offline=offline,
+                        cancelled=cancelled,
+                    )
+            except CargoBuildCancelled as error:
+                raise _cancelled_diagnostic(ir, error) from error
             except CargoBuildFailure as error:
                 raise _dependency_diagnostics(error, ir) from error
             _persist_dependency_lock(ir, bootstrap_dir, destination)
+
+
+def _cancelled_diagnostic(
+    ir: PackageIR,
+    error: CargoBuildCancelled,
+) -> CrabwalkCompilationError:
+    return CrabwalkCompilationError(
+        Diagnostic(
+            "CRAB309",
+            "Compilation cancelled",
+            f"Terminated running command: {' '.join(error.command)}",
+            _primary_span(ir),
+            "Retry when the caller is ready to compile this source revision.",
+        )
+    )
 
 
 def _publish_cargo_artifact(

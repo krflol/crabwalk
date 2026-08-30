@@ -78,6 +78,10 @@ _INTEGER_RANGES = {
     "i32": (-(1 << 31), (1 << 31) - 1),
     "i64": (-(1 << 63), (1 << 63) - 1),
     "i128": (-(1 << 127), (1 << 127) - 1),
+    "isize": (
+        -(1 << (struct_module.calcsize("P") * 8 - 1)),
+        (1 << (struct_module.calcsize("P") * 8 - 1)) - 1,
+    ),
     "u8": (0, (1 << 8) - 1),
     "u16": (0, (1 << 16) - 1),
     "u32": (0, (1 << 32) - 1),
@@ -96,6 +100,7 @@ def boundary_codec(type_ref: TypeRef) -> BoundaryCodec:
             "Owned": OwnershipPolicy.MOVE,
             "Ref": OwnershipPolicy.SHARED_BORROW,
             "Mut": OwnershipPolicy.MUTABLE_BORROW,
+            "Shared": OwnershipPolicy.SHARED_BORROW,
         }[ownership]
         return BoundaryCodec(
             type_ref,
@@ -160,6 +165,14 @@ def boundary_codec(type_ref: TypeRef) -> BoundaryCodec:
             OutputPolicy.NONE,
             AllocationKind.NONE,
             OwnershipPolicy.COPY,
+        )
+    if not type_ref.arguments and type_ref.python_name is not None:
+        return BoundaryCodec(
+            type_ref,
+            InputPolicy.RUST_HANDLE,
+            OutputPolicy.RUST_HANDLE,
+            AllocationKind.OWNED_HANDLE,
+            OwnershipPolicy.CLONE,
         )
     if type_ref.rust_name == "Buffer" and len(type_ref.arguments) == 1:
         element = type_ref.arguments[0]
@@ -263,7 +276,7 @@ def validate_boundary_input(value: object, type_ref: TypeRef) -> object:
                 raise type(error)(f"tuple item {index}: {error}") from error
         return tuple(converted)
     if codec.input_policy == InputPolicy.SEQUENCE:
-        if not isinstance(value, Sequence):
+        if not isinstance(value, Sequence) or isinstance(value, str):
             raise TypeError(f"expected a Python sequence, found {type(value).__name__}")
         if type_ref.rust_name == "Array" and len(value) != type_ref.const_value:
             raise ValueError(
@@ -283,9 +296,21 @@ def validate_boundary_input(value: object, type_ref: TypeRef) -> object:
             raise TypeError(f"expected a Python mapping, found {type(value).__name__}")
         converted_mapping: dict[object, object] = {}
         key_codec, value_codec = codec.children
-        for key, item in value.items():
-            converted_key = validate_boundary_input(key, key_codec.type_ref)
-            converted_value = validate_boundary_input(item, value_codec.type_ref)
+        for index, (key, item) in enumerate(value.items()):
+            try:
+                converted_key = validate_boundary_input(key, key_codec.type_ref)
+            except (OverflowError, TypeError, ValueError) as error:
+                raise type(error)(f"mapping key {index}: {error}") from error
+            if key_codec.output_policy == OutputPolicy.BYTES:
+                converted_key = bytes(cast(list[int], converted_key))
+            try:
+                converted_value = validate_boundary_input(item, value_codec.type_ref)
+            except (OverflowError, TypeError, ValueError) as error:
+                raise type(error)(f"mapping value for key {key!r}: {error}") from error
+            if converted_key in converted_mapping:
+                raise ValueError(
+                    f"mapping key {key!r} collides after Rust boundary conversion"
+                )
             converted_mapping[converted_key] = converted_value
         return converted_mapping
     if codec.input_policy == InputPolicy.BUFFER:
@@ -310,6 +335,7 @@ _BUFFER_ELEMENT_LAYOUT: dict[str, tuple[str, int]] = {
     "u32": ("unsigned", 4),
     "u64": ("unsigned", 8),
     "usize": ("unsigned", struct_module.calcsize("P")),
+    "isize": ("signed", struct_module.calcsize("P")),
     "f32": ("float", 4),
     "f64": ("float", 8),
 }
