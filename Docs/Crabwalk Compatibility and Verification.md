@@ -112,7 +112,7 @@ Windows x86-64, and rustc/Cargo 1.97.0:
 
 - **393 unit tests** passed;
 - **64 native integration tests** passed, for **457 tests total**;
-- Ruff formatting/lint passed across 195 Python files;
+- Ruff formatting/lint passed across 196 Python files;
 - mypy passed across all 47 configured core source modules, including frontend,
   runtime, Rust surface, CLI, loader, inspection, LSP, telemetry, and tooling;
 - the public PEP 561 consumer smoke passed Pyright with zero diagnostics;
