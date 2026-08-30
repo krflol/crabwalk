@@ -126,18 +126,23 @@ def function_inspection(function: FunctionIR) -> dict[str, object]:
         elif isinstance(value, CallIR):
             native_calls.append({"name": value.target, "source": value.span.to_dict()})
         elif isinstance(value, CrateCallIR):
-            native_calls.append(
-                {
-                    "name": "::".join(value.path),
-                    "adapter": value.adapter_name,
-                    "declared_effects": (
-                        [effect.value for effect in value.declared_effects]
-                        if value.declared_effects is not None
-                        else None
-                    ),
-                    "source": value.span.to_dict(),
-                }
-            )
+            payload: dict[str, object] = {
+                "name": (
+                    ".".join(value.path[1:])
+                    if value.path[:1] == ("__python__",)
+                    else "::".join(value.path)
+                ),
+                "adapter": value.adapter_name,
+                "declared_effects": (
+                    [effect.value for effect in value.declared_effects]
+                    if value.declared_effects is not None
+                    else None
+                ),
+                "source": value.span.to_dict(),
+            }
+            (
+                python_calls if value.path[:1] == ("__python__",) else native_calls
+            ).append(payload)
 
     parameters = [
         {
@@ -146,6 +151,8 @@ def function_inspection(function: FunctionIR) -> dict[str, object]:
             "rust_type": parameter.type_ref.render(),
             "mutable": parameter.mutable,
             "ownership": parameter.type_ref.ownership,
+            "has_default": parameter.has_default,
+            "default": parameter.default_value if parameter.has_default else None,
             "conversion": _input_conversion(parameter.type_ref),
         }
         for parameter in function.parameters
@@ -177,6 +184,26 @@ def function_inspection(function: FunctionIR) -> dict[str, object]:
         "gil": gil,
         "python_calls": python_calls,
         "native_calls": native_calls,
+        "boundary_telemetry": {
+            "runtime_api": "call_with_telemetry",
+            "timing_unit": "nanoseconds",
+            "phases": [
+                "input_validation",
+                "native",
+                "output_normalization",
+            ],
+            "counts": [
+                "input_values",
+                "output_values",
+                "boundary_crossings",
+                "python_container_allocations",
+                "native_container_allocations",
+                "native_domain_values",
+                "native_clones",
+                "bytes_copied",
+            ],
+            "count_semantics": "codec-modeled operations, not allocator samples",
+        },
     }
 
 
@@ -199,6 +226,12 @@ def _input_conversion(type_ref: TypeRef) -> dict[str, str]:
             "kind": "call-scoped mutable borrow",
             "cost": "no deep copy",
             "detail": "exclusive borrow of a Rust-owned handle",
+        }
+    if ownership == "Shared":
+        return {
+            "kind": "immutable Arc handle",
+            "cost": "constant-time Arc clone; no payload copy",
+            "detail": "Send + Sync shared ownership; eligible native calls may release the GIL",
         }
     if type_ref.rust_name == "Buffer":
         return {

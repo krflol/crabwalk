@@ -168,6 +168,14 @@ def direct_expression_effects(expression: ExpressionIR) -> frozenset[Effect]:
             effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
         if receiver == "File" and expression.method == "read_to_string":
             effects.add(Effect.BLOCKING)
+        if receiver == "PathBuf" and expression.method in {
+            "read_to_string",
+            "write_string",
+            "read_dir",
+            "metadata_len",
+            "exists",
+        }:
+            effects.add(Effect.BLOCKING)
         if receiver == "ThreadPool":
             effects.update({Effect.THREAD_SPAWN, Effect.BLOCKING, Effect.MAY_PANIC})
         if receiver == "ThreadHandle" and expression.method == "join":
@@ -177,10 +185,17 @@ def direct_expression_effects(expression: ExpressionIR) -> frozenset[Effect]:
         if receiver in {"Arc", "Mutex", "RefCell", "Sender"}:
             effects.add(Effect.MAY_PANIC)
         if (
-            receiver == "HashMap"
+            receiver in {"HashMap", "BTreeMap"}
             and expression.method == "add"
             and expression.receiver.type_ref.arguments[1].is_integer
         ):
+            effects.add(Effect.MAY_PANIC)
+        if receiver == "TextColumn" and expression.method in {"get", "contains_at"}:
+            effects.add(Effect.MAY_PANIC)
+        if receiver in {"Vec", "Slice"} and expression.method in {
+            "chunks",
+            "windows",
+        }:
             effects.add(Effect.MAY_PANIC)
         if expression.method in {"expect", "unwrap"}:
             effects.add(Effect.MAY_PANIC)
@@ -329,6 +344,8 @@ def statement_expressions(statement: StatementIR) -> tuple[ExpressionIR, ...]:
                 visit_expression(argument)
         elif isinstance(expression, TraitCallIR):
             visit_expression(expression.receiver)
+            for argument in expression.arguments:
+                visit_expression(argument)
         elif isinstance(expression, FunctionPointerTwiceIR):
             visit_expression(expression.argument)
         elif isinstance(expression, (NativePrintlnIR, PythonPrintIR)):
@@ -338,6 +355,8 @@ def statement_expressions(statement: StatementIR) -> tuple[ExpressionIR, ...]:
         elif isinstance(expression, PanicIR):
             visit_expression(expression.message)
         elif isinstance(expression, ClosureIR):
+            for value in expression.prefix:
+                visit_expression(value)
             visit_expression(expression.body)
 
     if isinstance(statement, ReturnIR) and statement.value is not None:

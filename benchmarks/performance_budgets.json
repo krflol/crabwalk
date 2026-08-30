@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "budgets": {
+    "cold_process_seconds_max": 600.0,
+    "warm_process_seconds_max": 180.0,
+    "construct_100k_seconds_max": 45.0,
+    "native_call_100k_seconds_max": 10.0,
+    "retained_rss_growth_100k_bytes_max": 1610612736,
+    "boundary_crossings_exact": 1,
+    "native_clones_exact": 0
+  }
+}

@@ -96,6 +96,41 @@ def test_compile_source_is_public() -> None:
     assert crabwalk.compile_source is compile_source
 
 
+@capability_contract("embedding.virtual-package", native=False)
+def test_compile_source_accepts_content_addressed_virtual_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler = _StaticCompiler()
+    monkeypatch.setattr(embedding, "default_service", compiler)
+    compiled = compile_source(
+        {
+            "__init__.py": "from .maths import increment\n",
+            "maths.py": """\
+from crabwalk import rust
+
+@rust.fn
+def increment(value: rust.u64) -> rust.u64:
+    return value + 1
+""",
+        },
+        module_name="embedded_recipe",
+        entry="maths.py",
+        cache_directory=tmp_path,
+    )
+
+    assert compiled.functions == ("maths.increment",)
+    assert compiled.function("maths.increment")(41) == 42
+    assert compiled.source_path.name == "maths.py"
+    assert compiled.source_path.parent.name.startswith("v_")
+    assert compiler.options["module_name"] == "embedded_recipe.maths"
+
+
+def test_compile_source_virtual_package_rejects_escaping_paths(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="contained relative"):
+        compile_source({"../outside.py": ""}, cache_directory=tmp_path)
+
+
 @capability_contract(
     "embedding.phase-cancellation",
     kind=ContractKind.NEGATIVE,

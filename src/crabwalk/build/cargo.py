@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -40,6 +43,14 @@ class CargoBuildFailure(Exception):
         super().__init__(f"Cargo command failed ({returncode}): {' '.join(command)}")
 
 
+class CargoBuildCancelled(Exception):
+    """Raised after Crabwalk has terminated a running Cargo process tree."""
+
+    def __init__(self, command: tuple[str, ...]) -> None:
+        self.command = command
+        super().__init__(f"Cargo command cancelled: {' '.join(command)}")
+
+
 class CargoBuilder:
     @staticmethod
     def command_for(
@@ -65,6 +76,7 @@ class CargoBuilder:
         project_dir: Path,
         *,
         offline: bool = False,
+        cancelled: Callable[[], bool] | None = None,
     ) -> CargoOutcome:
         command = (
             "cargo",
@@ -74,17 +86,11 @@ class CargoBuilder:
         environment = os.environ.copy()
         environment["CARGO_TERM_COLOR"] = "never"
         try:
-            process = subprocess.run(
-                command,
-                cwd=project_dir,
-                env=environment,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=600,
-                check=False,
+            process = _run_command(
+                command, project_dir, environment, cancelled=cancelled
             )
+        except CargoBuildCancelled:
+            raise
         except (OSError, subprocess.SubprocessError) as error:
             raise CargoBuildFailure(
                 command,
@@ -113,6 +119,7 @@ class CargoBuilder:
         *,
         locked: bool = False,
         offline: bool = False,
+        cancelled: Callable[[], bool] | None = None,
     ) -> CargoOutcome:
         target_dir.mkdir(parents=True, exist_ok=True)
         command = self.command_for(
@@ -130,17 +137,11 @@ class CargoBuilder:
         # invariant here rather than allowing an ambient `panic=abort` override.
         environment["CARGO_PROFILE_RELEASE_PANIC"] = "unwind"
         try:
-            process = subprocess.run(
-                command,
-                cwd=project_dir,
-                env=environment,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=600,
-                check=False,
+            process = _run_command(
+                command, project_dir, environment, cancelled=cancelled
             )
+        except CargoBuildCancelled:
+            raise
         except (OSError, subprocess.SubprocessError) as error:
             raise CargoBuildFailure(
                 command,
@@ -186,6 +187,97 @@ class CargoBuilder:
             artifact,
             artifact_fresh,
         )
+
+
+def _run_command(
+    command: tuple[str, ...],
+    project_dir: Path,
+    environment: dict[str, str],
+    *,
+    cancelled: Callable[[], bool] | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run Cargo, optionally polling a hard-cancellation callback.
+
+    The ordinary path deliberately retains ``subprocess.run`` so existing build
+    integrations and tests keep their simple contract. Embedders that provide a
+    callback receive a process-group-backed lifecycle: Crabwalk kills Cargo and
+    every rustc/build-script child before reporting cancellation.
+    """
+
+    if cancelled is None:
+        return subprocess.run(
+            command,
+            cwd=project_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            check=False,
+        )
+
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=project_dir,
+        env=environment,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=creationflags,
+        start_new_session=os.name != "nt",
+    )
+    started = time.monotonic()
+    while True:
+        if cancelled():
+            _terminate_process_tree(process)
+            process.communicate()
+            raise CargoBuildCancelled(command)
+        remaining = 600.0 - (time.monotonic() - started)
+        if remaining <= 0:
+            _terminate_process_tree(process)
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(command, 600, stdout, stderr)
+        try:
+            stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+            return subprocess.CompletedProcess(
+                command, process.returncode, stdout, stderr
+            )
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    """Terminate one exact Cargo process tree without touching unrelated work."""
+
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    else:
+        kill_process_group = getattr(os, "killpg", None)
+        if kill_process_group is None:
+            process.terminate()
+            return
+        try:
+            kill_process_group(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            try:
+                kill_process_group(process.pid, getattr(signal, "SIGKILL", 9))
+            except ProcessLookupError:
+                pass
 
 
 def _parse_messages(output: str) -> list[dict[str, Any]]:

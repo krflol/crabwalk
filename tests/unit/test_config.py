@@ -46,12 +46,25 @@ def test_configured_project_resolves_one_package_and_fingerprints_config(
     assert first.build_inputs is not None
     assert first.build_inputs["project_config_hash"] is not None
 
+    original = pyproject.read_text(encoding="utf-8")
     pyproject.write_text(
-        pyproject.read_text(encoding="utf-8") + "\n# fingerprint change\n",
+        "# packaging-only comment\n"
+        + original
+        + '\n[project]\nname = "configured-demo"\nversion = "2.0.0"\n',
         encoding="utf-8",
     )
-    second = default_service.compile_path(tmp_path, mode="expand")
-    assert first.fingerprint != second.fingerprint
+    packaging_edit = default_service.compile_path(tmp_path, mode="expand")
+    assert first.fingerprint == packaging_edit.fingerprint
+
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            'python-boundaries = "allow"',
+            'python-boundaries = "warn"',
+        ),
+        encoding="utf-8",
+    )
+    native_edit = default_service.compile_path(tmp_path, mode="expand")
+    assert packaging_edit.fingerprint != native_edit.fingerprint
 
 
 def test_config_can_deny_python_runtime_boundaries(tmp_path: Path) -> None:
@@ -126,3 +139,30 @@ def test_config_rejects_non_boolean_source_locked_policy(tmp_path: Path) -> None
 
     assert captured.value.diagnostics[0].code == "CRAB010"
     assert "source-locked" in captured.value.diagnostics[0].message
+
+
+def test_configured_namespace_package_is_analyzed_without_initializer(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "src" / "namespace_kernel"
+    package.mkdir(parents=True)
+    source = package / "maths.py"
+    source.write_text(
+        "from crabwalk import rust\n\n"
+        "@rust.fn\n"
+        "def double(value: rust.u64) -> rust.u64:\n"
+        "    return value * 2\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.crabwalk]\npackages = ["src/namespace_kernel"]\n',
+        encoding="utf-8",
+    )
+
+    result = default_service.compile_path(source, mode="expand")
+
+    assert result.ir.module_name == "namespace_kernel"
+    assert [function.qualified_name for function in result.ir.functions] == [
+        "namespace_kernel.maths.double"
+    ]
+    assert Path(result.ir.source_path) == package / "__init__.py"

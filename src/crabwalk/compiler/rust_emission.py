@@ -533,10 +533,33 @@ def _render_expression(
         suffix = "?" if expression.target in boundary_names else ""
         return f"__cw_native_{expression.target}({arguments}){suffix}"
     if isinstance(expression, CrateCallIR):
-        arguments = ", ".join(
+        rendered_arguments = [
             _render_expression(value, boundary_names, emission_names)
             for value in expression.arguments
-        )
+        ]
+        if expression.path[:1] == ("__python__",):
+            module_name, callable_name = expression.path[1:]
+            call_tuple = (
+                "()"
+                if not rendered_arguments
+                else "("
+                + ", ".join(rendered_arguments)
+                + ("," if len(rendered_arguments) == 1 else "")
+                + ")"
+            )
+            return (
+                "Python::attach(|py| -> PyResult<"
+                f"{expression.type_ref.render()}> {{ "
+                "let __cw_python_module = PyModule::import(py, "
+                f"{_rust_string_literal(module_name)})?; "
+                "let __cw_python_callable = __cw_python_module.getattr("
+                f"{_rust_string_literal(callable_name)})?; "
+                "let __cw_python_result = __cw_python_callable.call1("
+                f"{call_tuple})?; "
+                f"__cw_python_result.extract::<{expression.type_ref.render()}>() "
+                "})?"
+            )
+        arguments = ", ".join(rendered_arguments)
         return f"{'::'.join(expression.path)}({arguments})"
     if isinstance(expression, ConstructorIR):
         values = ", ".join(
@@ -549,6 +572,24 @@ def _render_expression(
             return f"vec![{values}]"
         if expression.constructor == "HashMap":
             return "std::collections::HashMap::new()"
+        if expression.constructor == "HashSet":
+            return "std::collections::HashSet::new()"
+        if expression.constructor == "BTreeMap":
+            return "std::collections::BTreeMap::new()"
+        if expression.constructor == "BTreeSet":
+            return "std::collections::BTreeSet::new()"
+        if expression.constructor == "PathBuf":
+            return f"std::path::PathBuf::from({values})"
+        if expression.constructor == "CheckedCast":
+            target = expression.type_ref.arguments[0].render()
+            value = _render_expression(
+                expression.arguments[0], boundary_names, emission_names
+            )
+            error = emission_names.temporary("cast_error")
+            return (
+                f"<{target} as std::convert::TryFrom<_>>::try_from({value})"
+                f".map_err(|{error}| {error}.to_string())"
+            )
         if expression.constructor == "Box":
             return f"Box::new({values})"
         if expression.constructor == "Rc":
@@ -752,6 +793,46 @@ def _render_expression(
                     else rendered_receiver
                 )
                 return f"{rendered_arguments[0]}.join({separator})"
+        if semantic_receiver.is_numeric and expression.method == "format_fixed":
+            return f'format!("{{:.1$}}", {rendered_receiver}, {rendered_arguments[0]})'
+        if semantic_receiver.rust_name == "PathBuf":
+            if expression.method == "to_string":
+                return f"{rendered_receiver}.to_string_lossy().into_owned()"
+            if expression.method == "read_to_string":
+                file = emission_names.temporary("input_file")
+                reader = emission_names.temporary("buffered_reader")
+                contents = emission_names.temporary("file_contents")
+                return (
+                    f"std::fs::File::open(&{rendered_receiver}).and_then(|{file}| {{ "
+                    f"let mut {reader} = std::io::BufReader::new({file}); "
+                    f"let mut {contents} = String::new(); "
+                    f"std::io::Read::read_to_string(&mut {reader}, &mut {contents})"
+                    f".map(|_| {contents}) }})"
+                )
+            if expression.method == "write_string":
+                file = emission_names.temporary("output_file")
+                writer = emission_names.temporary("buffered_writer")
+                return (
+                    f"std::fs::File::create(&{rendered_receiver}).and_then(|{file}| {{ "
+                    f"let mut {writer} = std::io::BufWriter::new({file}); "
+                    f"std::io::Write::write_all(&mut {writer}, "
+                    f"{rendered_arguments[0]}.as_bytes())?; "
+                    f"std::io::Write::flush(&mut {writer}) }})"
+                )
+            if expression.method == "read_dir":
+                entries = emission_names.temporary("directory_entries")
+                entry = emission_names.temporary("directory_entry")
+                return (
+                    f"std::fs::read_dir(&{rendered_receiver}).and_then(|{entries}| "
+                    f"{entries}.map(|{entry}| {entry}.map(|value| value.path()))"
+                    ".collect::<std::io::Result<Vec<_>>>())"
+                )
+            if expression.method == "metadata_len":
+                metadata = emission_names.temporary("metadata")
+                return (
+                    f"std::fs::metadata(&{rendered_receiver})"
+                    f".map(|{metadata}| {metadata}.len())"
+                )
         if expression.receiver.type_ref.rust_name == "Arc":
             if expression.method == "strong_count":
                 return f"std::sync::Arc::strong_count(&{rendered_receiver})"
@@ -846,7 +927,7 @@ def _render_expression(
                     f"std::io::Read::read_to_string(&mut {rendered_receiver}, "
                     f"&mut {contents}).map(|_| {contents}) }}"
                 )
-        if expression.receiver.type_ref.rust_name == "HashMap":
+        if expression.receiver.type_ref.rust_name in {"HashMap", "BTreeMap"}:
             if expression.method in {"contains_key", "remove", "get", "get_mut"}:
                 lookup = (
                     rendered_arguments[0]
@@ -879,6 +960,16 @@ def _render_expression(
                     f".or_insert({_numeric_zero(value_type)}) "
                     f"+= {rendered_arguments[1]}; }}"
                 )
+        if expression.receiver.type_ref.rust_name in {"HashSet", "BTreeSet"}:
+            if expression.method in {"contains", "remove"}:
+                lookup = (
+                    rendered_arguments[0]
+                    if expression.arguments[0].type_ref == STR
+                    else f"&{rendered_arguments[0]}"
+                )
+                return f"{rendered_receiver}.{expression.method}({lookup})"
+            if expression.method == "iter_ref":
+                return f"{rendered_receiver}.iter()"
         if (
             expression.receiver.type_ref.rust_name == "Vec"
             and expression.method == "iter"
@@ -889,6 +980,25 @@ def _render_expression(
             and expression.method == "iter_ref"
         ):
             return f"{rendered_receiver}.iter()"
+        if (
+            expression.receiver.type_ref.rust_name == "Slice"
+            and expression.method == "iter"
+        ):
+            return f"{rendered_receiver}.iter().copied()"
+        if (
+            expression.receiver.type_ref.rust_name == "Slice"
+            and expression.method == "iter_ref"
+        ):
+            return f"{rendered_receiver}.iter()"
+        if (
+            expression.receiver.type_ref.rust_name == "Vec"
+            and expression.method == "into_utf8"
+        ):
+            error = emission_names.temporary("utf8_error")
+            return (
+                f"String::from_utf8({rendered_receiver})"
+                f".map_err(|{error}| {error}.to_string())"
+            )
         if (
             expression.receiver.type_ref.rust_name == "Vec"
             and expression.method == "split_at_mut_sum"
@@ -917,6 +1027,8 @@ def _render_expression(
             "ParallelIterator",
             "ParallelIteratorRef",
         }:
+            if expression.method == "sum":
+                return f"{rendered_receiver}.sum::<{expression.type_ref.render()}>()"
             if expression.method == "collect_vec":
                 return f"{rendered_receiver}.collect::<Vec<_>>()"
             if expression.method == "collect_map":
@@ -931,12 +1043,31 @@ def _render_expression(
         arguments = ", ".join(rendered_arguments)
         return f"{rendered_receiver}.{expression.method}({arguments})"
     if isinstance(expression, TraitCallIR):
-        receiver = _render_expression(
-            expression.receiver, boundary_names, emission_names
+        if expression.required_receiver == "owned":
+            receiver = _render_expression(
+                expression.receiver, boundary_names, emission_names
+            )
+        else:
+            place = _render_place_expression(
+                expression.receiver, boundary_names, emission_names
+            )
+            receiver = (
+                f"&mut {place}"
+                if expression.required_receiver == "mutable"
+                else f"&{place}"
+            )
+        arguments = ", ".join(
+            (
+                receiver,
+                *(
+                    _render_expression(value, boundary_names, emission_names)
+                    for value in expression.arguments
+                ),
+            )
         )
         return (
             f"<{expression.concrete_type.render()} as "
-            f"{expression.trait_symbol}>::{expression.method}(&{receiver})"
+            f"{expression.trait_symbol}>::{expression.method}({arguments})"
         )
     if isinstance(expression, FunctionPointerTwiceIR):
         argument = _render_expression(
@@ -984,20 +1115,29 @@ def _render_expression(
         )
     if isinstance(expression, ClosureIR):
         body = _render_expression(expression.body, boundary_names, emission_names)
+        prefix = " ".join(
+            f"{_render_expression(value, boundary_names, emission_names)};"
+            for value in expression.prefix
+        )
+        rendered_body = f"{{ {prefix} {body} }}" if prefix else body
+        capture = "move " if expression.capture_mode == "move" else ""
         if expression.parameter is None:
-            return f"move || {body}"
+            return f"{capture}|| {rendered_body}"
         closure_parameter = expression.rust_parameter
         assert closure_parameter is not None
         second_parameter = expression.rust_second_parameter
         if second_parameter is not None:
-            return f"|{closure_parameter}, {second_parameter}| {body}"
+            return f"{capture}|{closure_parameter}, {second_parameter}| {rendered_body}"
         if expression.borrowed_parameter:
             item = emission_names.temporary("closure_item")
             projection = (
                 item if expression.parameter_projection == "borrow" else f"*{item}"
             )
-            return f"|{item}| {{ let {closure_parameter} = {projection}; {body} }}"
-        return f"|{closure_parameter}| {body}"
+            return (
+                f"{capture}|{item}| {{ let {closure_parameter} = {projection}; "
+                f"{prefix} {body} }}"
+            )
+        return f"{capture}|{closure_parameter}| {rendered_body}"
     raise AssertionError(f"unhandled expression IR: {type(expression).__name__}")
 
 

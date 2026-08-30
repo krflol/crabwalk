@@ -193,6 +193,14 @@ class CrabwalkPanicError(CrabwalkError, RuntimeError):
         super().__init__(message)
 
 
+@dataclass(frozen=True, slots=True)
+class CrabwalkRustErrorSource:
+    """One typed native cause retained from a structured Rust error chain."""
+
+    rust_type: str
+    message: str
+
+
 class CrabwalkRustError(CrabwalkError, RuntimeError):
     """An exported Rust ``Result`` contained ``Err``."""
 
@@ -202,10 +210,16 @@ class CrabwalkRustError(CrabwalkError, RuntimeError):
         message: str,
         *,
         call_site: str | None = None,
+        variant: str | None = None,
+        fields: dict[str, str] | None = None,
+        source_chain: tuple[CrabwalkRustErrorSource, ...] = (),
     ) -> None:
         self.rust_type = rust_type
         self.rust_message = message
         self.call_site = call_site
+        self.variant = variant
+        self.fields = dict(fields or {})
+        self.source_chain = source_chain
         super().__init__(f"{rust_type}: {message}")
 
 

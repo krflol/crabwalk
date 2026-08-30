@@ -1,11 +1,8 @@
 from pathlib import Path
 
-import pytest
-
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_project_path
 from crabwalk.compiler.ir import BinaryIR, CallIR, ReturnIR
-from crabwalk.diagnostics import CrabwalkCompilationError
 
 
 def _write_package(root: Path) -> tuple[Path, Path, Path]:
@@ -116,7 +113,7 @@ def test_package_graph_resolves_imports_reexports_and_module_calls(
     assert 'regex = { version = "1" }' in generated.cargo_toml
 
 
-def test_package_graph_rejects_cycles_with_a_source_spanned_diagnostic(
+def test_package_graph_resolves_reachable_declaration_cycles_to_a_fixed_point(
     tmp_path: Path,
 ) -> None:
     package = tmp_path / "cycle_pkg"
@@ -145,21 +142,27 @@ def second(value: rust.u64) -> rust.u64:
         encoding="utf-8",
     )
 
-    with pytest.raises(CrabwalkCompilationError) as captured:
-        analyze_project_path(package)
+    ir = analyze_project_path(package)
 
-    diagnostic = captured.value.diagnostics[0]
-    assert diagnostic.code == "CRAB204"
-    assert "cycle_pkg.a -> cycle_pkg.b -> cycle_pkg.a" in diagnostic.message
-    assert diagnostic.span is not None
+    assert {function.qualified_name for function in ir.functions} == {
+        "cycle_pkg.a.first",
+        "cycle_pkg.b.second",
+    }
 
 
-def test_package_graph_rejects_star_imports_instead_of_approximating_python(
+def test_package_graph_applies_public_name_star_imports(
     tmp_path: Path,
 ) -> None:
     package = tmp_path / "star_pkg"
     package.mkdir()
-    (package / "__init__.py").write_text("from .values import *\n", encoding="utf-8")
+    (package / "__init__.py").write_text(
+        "from .values import *\n"
+        "from crabwalk import rust\n\n"
+        "@rust.fn\n"
+        "def root_value() -> rust.u64:\n"
+        "    return value()\n",
+        encoding="utf-8",
+    )
     (package / "values.py").write_text(
         """\
 from crabwalk import rust
@@ -171,13 +174,15 @@ def value() -> rust.u64:
         encoding="utf-8",
     )
 
-    with pytest.raises(CrabwalkCompilationError) as captured:
-        analyze_project_path(package)
+    ir = analyze_project_path(package)
 
-    assert captured.value.diagnostics[0].code == "CRAB205"
+    assert {function.qualified_name for function in ir.functions} == {
+        "star_pkg.root_value",
+        "star_pkg.values.value",
+    }
 
 
-def test_package_cycle_includes_parent_initializer_for_child_import(
+def test_parent_initializer_cycle_uses_static_declaration_resolution(
     tmp_path: Path,
 ) -> None:
     package = tmp_path / "initializer_cycle"
@@ -185,7 +190,11 @@ def test_package_cycle_includes_parent_initializer_for_child_import(
     child.mkdir(parents=True)
     (package / "__init__.py").write_text("from . import x\n", encoding="utf-8")
     (package / "x.py").write_text(
-        "from .a import b\nsome_symbol = 1\n",
+        "from crabwalk import rust\n"
+        "from .a import b\n\n"
+        "@rust.fn\n"
+        "def some_symbol(value: rust.u64) -> rust.u64:\n"
+        "    return value + 1\n",
         encoding="utf-8",
     )
     (child / "__init__.py").write_text(
@@ -194,13 +203,11 @@ def test_package_cycle_includes_parent_initializer_for_child_import(
     )
     (child / "b.py").write_text("", encoding="utf-8")
 
-    with pytest.raises(CrabwalkCompilationError) as captured:
-        analyze_project_path(package)
+    ir = analyze_project_path(package)
 
-    diagnostic = captured.value.diagnostics[0]
-    assert diagnostic.code == "CRAB204"
-    assert "initializer_cycle.x" in diagnostic.message
-    assert "initializer_cycle.a" in diagnostic.message
+    assert [function.qualified_name for function in ir.functions] == [
+        "initializer_cycle.x.some_symbol"
+    ]
 
 
 def test_unreachable_python_only_cycle_and_syntax_error_do_not_block_native_graph(

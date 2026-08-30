@@ -17,23 +17,23 @@ def require_nonzero(value: rust.u64) -> rust.Result[rust.u64, rust.String]:
 # Rust Book source (`?` propagation):
 # https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html#a-shortcut-for-propagating-errors-the--operator
 #
-# `rust.try_(...)` is the Python-valid spelling of postfix Rust `?`. This version
-# follows Listing 9-7 instead of substituting a synthetic validator:
-#
-# * `rust.File.open(path)` emits `std::fs::File::open(path)`.
-# * `File.read_to_string()` is a typed Crabwalk adapter around
-#   `std::io::Read::read_to_string`. It owns the destination `String` internally
-#   and returns `Result[String, IoError]`.
-# * Each `rust.try_` unwraps `Ok` or immediately returns the real `io::Error`.
-#
-# Crabwalk currently requires the operand and enclosing function to use the same
-# error type; it does not yet model arbitrary `From` conversions performed by `?`.
+# `rust.try_(...)` is the Python-valid spelling of postfix Rust `?`. The Book also
+# explains that `?` converts an error through `From` before returning it. `Io` is
+# therefore both an enum variant and a declared `From<std::io::Error>` conversion.
+@rust.error
+class UsernameError:
+    Io = rust.from_error(rust.IoError)
+
+
+# This lowers to the same control flow as Listing 9-7: open the file with `?`,
+# read it with `?`, then return `Ok(username)`. File.read_to_string owns its
+# temporary destination buffer, but emits the real std::io::Read call.
 @rust.fn
 def read_username_from_file(
     path: rust.Str,
-) -> rust.Result[rust.String, rust.IoError]:
-    username_file: rust.File = rust.try_(rust.File.open(path))
-    username: rust.String = rust.try_(username_file.read_to_string())
+) -> rust.Result[rust.String, UsernameError]:
+    username_file = rust.try_(rust.File.open(path))
+    username = rust.try_(username_file.read_to_string())
     return rust.Ok(username)
 
 

@@ -28,13 +28,22 @@ def has_rust_fn_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         (
             isinstance(item, ast.Attribute)
             and is_rust_attribute(item)
-            and item.attr in {"fn", "async_fn"}
+            and item.attr in {"fn", "async_fn", "python_adapter"}
         )
         or (
             isinstance(item, ast.Call)
             and isinstance(item.func, ast.Attribute)
             and is_rust_attribute(item.func)
-            and item.func.attr in {"generic", "method", "impl", "operator", "extern"}
+            and item.func.attr
+            in {
+                "generic",
+                "method",
+                "impl",
+                "operator",
+                "extern",
+                "extern_method",
+                "python_adapter",
+            }
         )
         for item in node.decorator_list
     )
@@ -57,7 +66,23 @@ def is_extern_declaration(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         and isinstance(node.decorator_list[0], ast.Call)
         and isinstance(node.decorator_list[0].func, ast.Attribute)
         and is_rust_attribute(node.decorator_list[0].func)
-        and node.decorator_list[0].func.attr == "extern"
+        and node.decorator_list[0].func.attr in {"extern", "extern_method"}
+    )
+
+
+def is_python_adapter_declaration(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    if len(node.decorator_list) != 1:
+        return False
+    decorator = node.decorator_list[0]
+    if isinstance(decorator, ast.Attribute):
+        return is_rust_attribute(decorator) and decorator.attr == "python_adapter"
+    return bool(
+        isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute)
+        and is_rust_attribute(decorator.func)
+        and decorator.func.attr == "python_adapter"
     )
 
 
@@ -83,13 +108,13 @@ def has_rust_enum_decorator(node: ast.ClassDef) -> bool:
         (
             isinstance(item, ast.Attribute)
             and is_rust_attribute(item)
-            and item.attr == "enum"
+            and item.attr in {"enum", "error"}
         )
         or (
             isinstance(item, ast.Call)
             and isinstance(item.func, ast.Attribute)
             and is_rust_attribute(item.func)
-            and item.func.attr == "enum"
+            and item.func.attr in {"enum", "error"}
         )
         for item in node.decorator_list
     )

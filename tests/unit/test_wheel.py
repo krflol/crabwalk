@@ -12,13 +12,21 @@ import pytest
 
 from crabwalk.compiler.frontend import analyze_project_path
 from crabwalk.diagnostics import CrabwalkCompilationError
+from crabwalk.project_metadata import read_application_metadata
 from crabwalk.runtime import (
     _cargo_policy_metadata,
     _dependency_lock_hash_metadata,
     _load_prebuilt_compilation,
 )
 from crabwalk.service import CompilationResult
-from crabwalk import RUNTIME_ABI_VERSION, RUNTIME_DISTRIBUTION, __version__
+from crabwalk import (
+    GENERATED_WRAPPER_ABI_VERSION,
+    RUNTIME_ABI_VERSION,
+    RUNTIME_COMPATIBILITY_SPECIFIER,
+    RUNTIME_DISTRIBUTION,
+    RUNTIME_DISTRIBUTION_REQUIREMENT,
+    __version__,
+)
 from crabwalk._version import PREBUILT_MANIFEST_SCHEMA_VERSION
 from crabwalk.wheel import _package_entries, build_wheel
 
@@ -120,6 +128,13 @@ packages = ["sample_pkg"]
         assert manifest["artifact"] == native_name.removeprefix("sample_pkg/")
         assert manifest["extension_name"] == compilation.extension_name
         assert manifest["runtime_abi_version"] == RUNTIME_ABI_VERSION
+        assert (
+            manifest["generated_wrapper_abi_version"] == GENERATED_WRAPPER_ABI_VERSION
+        )
+        assert (
+            manifest["runtime_compatibility_specifier"]
+            == RUNTIME_COMPATIBILITY_SPECIFIER
+        )
         assert manifest["crabwalk_version"] == __version__
         assert manifest["schema_version"] == PREBUILT_MANIFEST_SCHEMA_VERSION
         assert manifest["cargo_policy"] == {"locked": False, "offline": False}
@@ -128,7 +143,7 @@ packages = ["sample_pkg"]
         metadata = archive.read("sample_project-1.2.3.dist-info/METADATA").decode(
             "utf-8"
         )
-        assert f"Requires-Dist: {RUNTIME_DISTRIBUTION}=={__version__}\n" in metadata
+        assert f"Requires-Dist: {RUNTIME_DISTRIBUTION_REQUIREMENT}\n" in metadata
 
         record_name = "sample_project-1.2.3.dist-info/RECORD"
         rows = list(csv.reader(io.StringIO(archive.read(record_name).decode())))
@@ -142,6 +157,69 @@ def test_project_and_generated_wheel_share_the_runtime_distribution_name() -> No
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert project["project"]["name"] == RUNTIME_DISTRIBUTION
+
+
+def test_one_distribution_wheel_can_contain_multiple_native_packages(
+    tmp_path: Path,
+) -> None:
+    packages = tuple(tmp_path / name for name in ("first_pkg", "second_pkg"))
+    results: dict[Path, CompilationResult] = {}
+    for index, package in enumerate(packages, start=1):
+        package.mkdir()
+        (package / "__init__.py").write_text(
+            "from crabwalk import rust\n\n"
+            "@rust.fn\n"
+            f"def value() -> rust.u64:\n    return {index}\n",
+            encoding="utf-8",
+        )
+        artifact = tmp_path / f"_native_{package.name}.pyd"
+        artifact.write_bytes(f"artifact-{index}".encode())
+        results[package] = CompilationResult(
+            ir=analyze_project_path(package, package.name),
+            fingerprint=(str(index) * 64),
+            extension_name=f"_native_{package.name}",
+            project_root=tmp_path,
+            generated_dir=tmp_path / f"generated-{index}",
+            artifact=artifact,
+            cache_hit=False,
+            module=None,
+            command=("cargo", "build"),
+            build_inputs={
+                "cargo_policy": {"locked": False, "offline": False},
+                "dependency_lock_hash": "c" * 64,
+            },
+        )
+    project = tmp_path / "pyproject.toml"
+    project.write_text(
+        "[project]\n"
+        'name = "multi-native"\n'
+        'version = "1.0.0"\n\n'
+        "[tool.crabwalk]\n"
+        'packages = ["first_pkg", "second_pkg"]\n',
+        encoding="utf-8",
+    )
+
+    class MultiService:
+        def compile_path(self, path: Path, **options: object) -> CompilationResult:
+            del options
+            return results[path]
+
+    wheel = build_wheel(
+        packages,
+        tmp_path / "dist",
+        project=project,
+        metadata=read_application_metadata(project),
+        service=MultiService(),  # type: ignore[arg-type]
+    )
+
+    assert len(wheel.compilations) == 2
+    with zipfile.ZipFile(wheel.path) as archive:
+        names = set(archive.namelist())
+        assert "first_pkg/_crabwalk_prebuilt.json" in names
+        assert "second_pkg/_crabwalk_prebuilt.json" in names
+        assert archive.read("multi_native-1.0.0.dist-info/top_level.txt") == (
+            b"first_pkg\nsecond_pkg\n"
+        )
 
 
 def test_wheel_rejects_non_importable_package_name(tmp_path: Path) -> None:
@@ -178,8 +256,22 @@ def test_package_data_is_allowlisted_and_sensitive_files_are_refused(
     assert captured.value.diagnostics[0].code == "CRAB507"
 
 
-def test_prebuilt_manifest_rejects_runtime_abi_before_native_loading(
+@pytest.mark.parametrize(
+    ("version_field", "incompatible_value", "expected_message"),
+    (
+        ("runtime_abi_version", RUNTIME_ABI_VERSION + 1, "runtime ABI"),
+        (
+            "generated_wrapper_abi_version",
+            GENERATED_WRAPPER_ABI_VERSION + 1,
+            "generated-wrapper ABI",
+        ),
+    ),
+)
+def test_prebuilt_manifest_rejects_incompatible_abi_before_native_loading(
     tmp_path: Path,
+    version_field: str,
+    incompatible_value: int,
+    expected_message: str,
 ) -> None:
     package = tmp_path / "abi_pkg"
     package.mkdir()
@@ -200,7 +292,9 @@ def value() -> rust.u64:
             {
                 "schema_version": PREBUILT_MANIFEST_SCHEMA_VERSION,
                 "crabwalk_version": __version__,
-                "runtime_abi_version": RUNTIME_ABI_VERSION + 1,
+                "runtime_abi_version": RUNTIME_ABI_VERSION,
+                "generated_wrapper_abi_version": GENERATED_WRAPPER_ABI_VERSION,
+                "runtime_compatibility_specifier": RUNTIME_COMPATIBILITY_SPECIFIER,
                 "module_name": "abi_pkg",
                 "compiler_input_hash": ir.compiler_input_hash,
                 "wheel_source_integrity_hash": ir.wheel_source_integrity_hash,
@@ -214,12 +308,16 @@ def value() -> rust.u64:
         ),
         encoding="utf-8",
     )
+    manifest_path = package / "_crabwalk_prebuilt.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest[version_field] = incompatible_value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(CrabwalkCompilationError) as captured:
         _load_prebuilt_compilation(source, "abi_pkg")
 
     assert captured.value.diagnostics[0].code == "CRAB405"
-    assert "runtime ABI" in captured.value.diagnostics[0].message
+    assert expected_message in captured.value.diagnostics[0].message
 
 
 def test_prebuilt_manifest_restores_locked_cargo_provenance(
@@ -248,8 +346,12 @@ def value() -> rust.u64:
         json.dumps(
             {
                 "schema_version": PREBUILT_MANIFEST_SCHEMA_VERSION,
-                "crabwalk_version": __version__,
+                # Generator provenance may differ across compatible 1.1 patch
+                # releases. ABI fields, not exact patch identity, gate loading.
+                "crabwalk_version": "1.1.99",
                 "runtime_abi_version": RUNTIME_ABI_VERSION,
+                "generated_wrapper_abi_version": GENERATED_WRAPPER_ABI_VERSION,
+                "runtime_compatibility_specifier": RUNTIME_COMPATIBILITY_SPECIFIER,
                 "module_name": "locked_pkg",
                 "compiler_input_hash": ir.compiler_input_hash,
                 "wheel_source_integrity_hash": ir.wheel_source_integrity_hash,

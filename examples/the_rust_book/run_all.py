@@ -9,6 +9,7 @@ body is compiled together into one Rust extension, while this small host program
 checks the values crossing the Python/Rust boundary.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from crabwalk import CrabwalkPanicError, CrabwalkRustError, rust
@@ -37,6 +38,7 @@ from .ch08_collections import (
     joined_languages,
     normalize_fields,
     normalize_greeting,
+    supplied_team_score,
     team_scores,
     total_team_score,
     vector_total,
@@ -55,6 +57,7 @@ from .ch10_generics_traits_lifetimes import (
     largest_character,
     largest_number,
     longest_owned,
+    trait_argument_demo,
 )
 from .ch11_automated_tests import (
     add_two,
@@ -70,6 +73,7 @@ from .ch12_minigrep import (
 )
 from .ch13_closures_iterators import (
     Shoe,
+    explicitly_moved_transform,
     indexed_parallel_values,
     matching_line_count,
     normalize_active_rows,
@@ -80,7 +84,13 @@ from .ch13_closures_iterators import (
 )
 from .ch14_cargo import contains_number
 from .ch15_smart_pointers import boxed_value, interior_mutation, rc_counts
-from .ch16_concurrency import channel_value, moved_vector_length, shared_counter
+from .ch16_concurrency import (
+    SharedReading,
+    channel_value,
+    moved_vector_length,
+    shared_counter,
+    shared_reading_total,
+)
 from .ch17_async_await import (
     run_async_channel,
     run_async_pipeline,
@@ -206,6 +216,7 @@ def main() -> None:
     assert joined_languages() == "Rust + Python + Crabwalk"
     assert team_scores() == {"Blue": 25, "Yellow": 50}
     assert total_team_score() == 75
+    assert supplied_team_score({"Blue": 25, "Yellow": 50}) == 75
     assert blue_team_score() == 25
     assert word_frequencies("hello world wonderful world") == {
         "hello": 1,
@@ -227,9 +238,10 @@ def main() -> None:
     try:
         read_username_from_file(str(Path(__file__).with_name("missing-username.txt")))
     except CrabwalkRustError as error:
-        assert error.rust_type == "rust.IoError"
+        assert error.variant == "Io"
+        assert error.source_chain[0].rust_type == "rust.IoError"
     else:  # pragma: no cover - this is a failure message for manual runs
-        raise AssertionError("a missing file must cross as rust.IoError")
+        raise AssertionError("a missing file must cross as UsernameError.Io")
 
     for operation in (
         lambda: require_nonzero(0),
@@ -253,6 +265,7 @@ def main() -> None:
     assert largest_number() == 100
     assert largest_character() == "y"
     assert longest_owned("abcd", "xyz") == "abcd"
+    assert trait_argument_demo(10, 7) == 17
 
     assert add_two(2) == 4
     assert can_hold_dimensions(8, 7, 5, 1) is True
@@ -275,6 +288,7 @@ def main() -> None:
 
     assert transformed(4, 2) == [4, 5, 6]
     assert shifted_sum(3) == 15
+    assert explicitly_moved_transform(10) == [11, 12, 13]
     assert matching_line_count("Rust", poem) == 1
 
     shoes = rust.Vec[Shoe](
@@ -320,6 +334,14 @@ def main() -> None:
     assert moved_vector_length() == 3
     assert channel_value() == 42
     assert shared_counter() == 1
+    owned_readings = rust.Vec[SharedReading]([{"value": 2}, {"value": 3}])
+    shared_readings = owned_readings.freeze()
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        shared_totals = list(
+            executor.map(lambda _: shared_reading_total(shared_readings), range(8))
+        )
+    assert shared_totals == [5] * 8
+    assert owned_readings.moved is True
 
     assert run_async_pipeline(5) == 20
     assert run_concurrent_sum() == 7

@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-23
+updated: 2026-08-30
 tags:
   - project/crabwalk
   - docs/security
@@ -94,7 +94,9 @@ reports it through explicit `finish()`. Its `Drop` path closes and joins without
 propagating a join panic, including while an outer native function is unwinding.
 
 Safe generated Rust does not eliminate ABI, compiler, dependency, or handwritten
-runtime bugs. The native test matrix remains a release requirement.
+runtime bugs. The native test matrix remains a release requirement. The release
+workflow also runs the atomic counter, guarded C precondition, and non-panicking
+thread-join contract through a pinned nightly Miri fixture.
 
 ## Installed artifacts
 
@@ -106,10 +108,12 @@ performed under the fingerprint lock and retains a per-process reader lease for
 the mapped lifetime; pruning uses a separate global lock, nonblocking entry locks,
 access markers refreshed after publication/validation/load, and post-lock
 revalidation. Prebuilt wheel
-artifacts additionally bind the Python source, package identity, exact Crabwalk
-runtime, and runtime ABI. Artifact paths are resolved inside the installed package
-before loading. Wheel construction rejects package symlinks and common credential
-or private-key names.
+artifacts additionally bind the Python source, package identity, compiler
+provenance, runtime ABI, generated-wrapper ABI, compatibility range, and manifest
+schema. Compatible patch runtimes may load an older generator artifact only when
+those protocol identities still match. Artifact paths are resolved inside the
+installed package before loading. Wheel construction rejects package symlinks and
+common credential or private-key names.
 
 Arbitrary build scripts can consume inputs Cargo and Crabwalk cannot infer. Declare
 those with `[tool.crabwalk].extra-files` and `extra-env`. Cargo is re-invoked for
@@ -134,46 +138,52 @@ index, dependency, and provenance policies.
 ## Current limitations
 
 - CPython only; interpreter-specific wheels; free-threaded CPython is not advertised.
-- Regular packages only; namespace packages and multiple configured top-level
-  packages in one distribution are not supported.
-- Internal package import cycles and `import *` are rejected in the reachable
-  native compiler graph rather than approximated. Use explicit imports and an
-  acyclic compiler-visible graph; unrelated Python-only modules remain outside it.
-- No general Python calls, objects, reflection, exceptions-as-control-flow,
-  generators, or dynamic imports inside `@rust.fn`. Closures are accepted only in
-  statically typed iterator/thread/async/pool positions.
-- `compile_source` is currently a single-module, content-addressed embedding API.
-  It does not make Cargo dependencies safe for untrusted execution, and its
-  cancellation callback is cooperative between phases rather than a running-Cargo
-  preemption mechanism.
-- No defaults, keyword calls, variadics, arbitrary crate reflection, inline Rust,
-  arbitrary macros, raw address dereference, unions, user-authored unsafe traits, or
-  general FFI declarations. Methods, generics, object-safe traits, focused Add/UFCS,
-  and narrow unsafe intrinsics are supported as documented.
-- No implicit complex/container graph conversion.
+- Standalone filesystem auto-discovery begins from a regular package or module.
+  Namespace packages and multiple top-level packages require explicit
+  `[tool.crabwalk].packages`; the PEP 517 backend emits one native artifact per
+  configured top-level package.
+- Reachable declaration cycles are resolved to a fixed point. `import *` requires
+  either literal static `__all__` or the compiler-visible leading-underscore rule;
+  dynamic `__all__` and import-time mutation remain unsupported.
+- No arbitrary Python objects, reflection, generators, dynamic imports, or
+  exceptions-as-control-flow inside `@rust.fn`. Synchronous Python calls require a
+  typed `@rust.python_adapter` and remain forbidden in native closures, methods,
+  workers, and async helpers whose signatures cannot carry `PyResult`.
+- `compile_source` accepts one source or a virtual multi-module mapping and can
+  terminate an active Cargo process tree, but it does not sandbox trusted build
+  execution or preempt already-entered native user code.
+- Exported calls support positional/keyword arguments and lossless literal
+  defaults. Positional-only, keyword-only, variadic, and mutable/dynamic defaults
+  remain unsupported. There is still no arbitrary crate reflection, inline Rust,
+  arbitrary macros, raw address dereference, unions, user-authored unsafe traits,
+  or general FFI declarations.
 - `rust.Buffer[T]` is input-only and limited to read-only, one-dimensional,
   C-contiguous, native-endian primitive numeric storage. It retains the GIL and
   cannot be nested, retained, mutated, returned, or used directly with Rayon.
   Zero-length exporters use a canonical empty Rust slice after format and shape
   validation; pointer alignment remains mandatory for every non-empty buffer.
-- Owned/borrowed values cannot be returned or transferred through `async_call`.
-- Direct nested domain fields and enum payloads have fingerprint-bound Python
-  constructors/getters and explicit deep-copy conversion. Container-wrapped nested
-  domain fields are not yet part of that codec.
+- Borrowed values cannot be returned or transferred through `async_call`. Explicit
+  `Owned[Domain]`, `Owned[Vec[T]]`, and `Owned[TextColumn]` returns produce
+  move-aware handles. Recursive mappings/sequences cross only through supported,
+  explicitly allocating codecs.
+- Ordinary ownership handles are thread-affine. `Shared[T]` is limited to immutable
+  compiler-approved `Send + Sync` payloads, uses `Arc<T>`, and exposes no mutable
+  operation or retained borrow.
 - Native `@rust.async_fn` uses a small std-only teaching executor, not Tokio.
   `rust.async_call` remains a separate Python executor bridge; cancellation does not
   stop Rust work already running.
 - Rayon is exposed through typed `Vec.par_iter()` adapters when the package
   explicitly declares Rayon. Copy and borrowed non-`Copy` items compose through
-  the documented adapters, including filter/map/collect and reduction. Broader
-  `Send`/`Sync` Python-wrapper transfer and arbitrary Rayon API reflection are not
-  exposed.
+  the documented adapters, including filter/map/collect and reduction. Immutable
+  `Shared[T]` is the only cross-thread Python handle; mutable sharing and arbitrary
+  Rayon API reflection are not exposed.
 - `TcpListener`, `TcpStream`, and `ThreadPool` provide a bounded loopback teaching
   slice, not a production server, TLS stack, general HTTP parser, or persistent
   externally controlled background service.
-- The wheel command is a focused mixed-wheel builder, not a general metadata-aware
-  PEP 517 backend. It packages Python/type files by default; other package data
-  requires an explicit `wheel-include` pattern.
+- The direct wheel command remains a focused single-package builder. The PEP 517
+  backend merges static PEP 621 metadata and multiple packages, but does not yet
+  implement editable PEP 660 application builds or arbitrary dynamic metadata.
+  Non-Python package data still requires an explicit `wheel-include` pattern.
 - Cross-platform CI must pass before a release is promoted; local evidence alone is
   not a portability claim.
 

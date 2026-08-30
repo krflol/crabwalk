@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from .ir import TypeRef
+from .types import ErrorDomainType
 
 OWNED_VECTOR_ELEMENTS = frozenset(
     {
@@ -20,6 +21,7 @@ OWNED_VECTOR_ELEMENTS = frozenset(
         "i32",
         "i64",
         "i128",
+        "isize",
         "u8",
         "u16",
         "u32",
@@ -48,6 +50,7 @@ BUFFER_ELEMENTS = frozenset(
         "u32",
         "u64",
         "usize",
+        "isize",
         "f32",
         "f64",
     }
@@ -69,6 +72,7 @@ class PythonKind(StrEnum):
     BUFFER = "buffer"
     DICT = "dict"
     CONTROL = "control"
+    DOMAIN = "domain"
     UNSUPPORTED = "unsupported"
 
 
@@ -98,6 +102,7 @@ def boundary_shape(
     type_ref: TypeRef,
     *,
     position: BoundaryPosition = BoundaryPosition.NESTED,
+    error_symbols: set[str] | frozenset[str] = frozenset(),
 ) -> BoundaryShape:
     """Describe whether one Rust value has a lossless Python representation."""
 
@@ -115,6 +120,11 @@ def boundary_shape(
         return BoundaryShape(True, False, PythonKind.SCALAR, True, True, False)
     if type_ref.arguments == () and type_ref.rust_name == "Unit":
         return BoundaryShape(True, True, PythonKind.NONE, True, True, True)
+    if type_ref.arguments == () and type_ref.python_name is not None:
+        # Compilation-bound domain values cross as generated native handles or
+        # explicitly validated mappings. They are lossless but intentionally not
+        # Python mapping keys.
+        return BoundaryShape(False, False, PythonKind.DOMAIN, False, True, False)
 
     if type_ref.rust_name == "Buffer" and len(type_ref.arguments) == 1:
         element = type_ref.arguments[0]
@@ -191,10 +201,7 @@ def boundary_shape(
         )
         valid_key = key.hashable and key.injective
         return BoundaryShape(
-            # Crabwalk does not currently expose an implicit Python-to-HashMap
-            # boundary. In particular, normalizing byte-vector keys into lists
-            # would make an intermediate Python mapping unrepresentable.
-            False,
+            key.input_supported and value.input_supported and valid_key,
             key.output_supported and value.output_supported and valid_key,
             PythonKind.DICT,
             False,
@@ -212,7 +219,7 @@ def boundary_shape(
             position == BoundaryPosition.TOP_LEVEL
             and success_shape.output_supported
             and success_shape.injective
-            and rust_error_display_supported(error)
+            and rust_error_display_supported(error, error_symbols=error_symbols)
         )
         return BoundaryShape(
             False,
@@ -236,16 +243,27 @@ def struct_field_type_supported(
     visible_domain_symbols: set[str] | None = None,
 ) -> bool:
     visible_domain_symbols = visible_domain_symbols or set()
+    if isinstance(type_ref, ErrorDomainType):
+        # Error enums may retain non-Clone sources and are native control values,
+        # not ordinary Python-owned domain payloads.
+        return False
     if type_ref.rust_name in OWNED_VECTOR_ELEMENTS and not type_ref.arguments:
         return True
     if type_ref.rust_name in visible_domain_symbols and not type_ref.arguments:
         return True
     if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
-        return struct_field_type_supported(type_ref.arguments[0], set())
+        return struct_field_type_supported(
+            type_ref.arguments[0], visible_domain_symbols
+        )
     if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
         child = type_ref.arguments[0]
         return _lossless_option_child(child) and struct_field_type_supported(
-            child, set()
+            child, visible_domain_symbols
+        )
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        return all(
+            struct_field_type_supported(value, visible_domain_symbols)
+            for value in type_ref.arguments
         )
     return False
 
@@ -270,18 +288,43 @@ def owned_vector_element_supported(
     if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
         child = type_ref.arguments[0]
         return _lossless_option_child(child) and owned_vector_element_supported(
-            child, domain_symbols, allow_domain=False
+            child, domain_symbols, allow_domain=allow_domain
         )
     if type_ref.rust_name == "Tuple" and type_ref.arguments:
         return all(
-            owned_vector_element_supported(value, domain_symbols, allow_domain=False)
+            owned_vector_element_supported(
+                value, domain_symbols, allow_domain=allow_domain
+            )
             for value in type_ref.arguments
         )
     if type_ref.rust_name == "Vec" and len(type_ref.arguments) == 1:
         return owned_vector_element_supported(
-            type_ref.arguments[0], domain_symbols, allow_domain=False
+            type_ref.arguments[0], domain_symbols, allow_domain=allow_domain
         )
     return False
+
+
+def shareable_handle_type_supported(
+    type_ref: TypeRef,
+    domain_symbols: set[str],
+) -> bool:
+    """Whether an owned wrapper can be consumed into an immutable Arc handle."""
+
+    if type_ref.rust_name == "TextColumn" and not type_ref.arguments:
+        return True
+    if type_ref.rust_name in domain_symbols and not type_ref.arguments:
+        # Domain field validation admits only recursively immutable, Clone,
+        # Send + Sync standard values and other generated domains.
+        return True
+    return (
+        type_ref.rust_name == "Vec"
+        and len(type_ref.arguments) == 1
+        and owned_vector_element_supported(
+            type_ref.arguments[0],
+            domain_symbols,
+            allow_domain=True,
+        )
+    )
 
 
 def python_parameter_boundary_supported(
@@ -312,13 +355,23 @@ def python_parameter_boundary_supported(
             )
             for value in type_ref.arguments
         )
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        return boundary_shape(
+            type_ref,
+            position=position,
+        ).input_supported
     return False
 
 
-def python_return_boundary_supported(type_ref: TypeRef) -> bool:
+def python_return_boundary_supported(
+    type_ref: TypeRef,
+    *,
+    error_symbols: set[str] | frozenset[str] = frozenset(),
+) -> bool:
     return boundary_shape(
         type_ref,
         position=BoundaryPosition.TOP_LEVEL,
+        error_symbols=error_symbols,
     ).output_supported
 
 
@@ -329,8 +382,12 @@ def python_mapping_key_supported(type_ref: TypeRef) -> bool:
     return shape.output_supported and shape.hashable and shape.injective
 
 
-def rust_error_display_supported(type_ref: TypeRef) -> bool:
-    return (
-        type_ref.rust_name in {*OWNED_VECTOR_ELEMENTS, "Str", "IoError"}
+def rust_error_display_supported(
+    type_ref: TypeRef,
+    *,
+    error_symbols: set[str] | frozenset[str] = frozenset(),
+) -> bool:
+    return isinstance(type_ref, ErrorDomainType) or (
+        type_ref.rust_name in {*OWNED_VECTOR_ELEMENTS, "Str", "IoError", *error_symbols}
         and not type_ref.arguments
     )

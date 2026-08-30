@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import re
+import sys
 from typing import Literal
 
 from ..ir import TypeRef
@@ -28,7 +29,9 @@ def integer_fits(value: int, type_ref: TypeRef) -> bool:
     """Return whether a literal is representable by one semantic integer type."""
 
     if type_ref.rust_name == "usize":
-        return 0 <= value <= (1 << 64) - 1
+        return 0 <= value <= (2 * sys.maxsize) + 1
+    if type_ref.rust_name == "isize":
+        return -sys.maxsize - 1 <= value <= sys.maxsize
     match = re.fullmatch(r"([iu])(8|16|32|64|128)", type_ref.rust_name)
     if match is None:
         return False

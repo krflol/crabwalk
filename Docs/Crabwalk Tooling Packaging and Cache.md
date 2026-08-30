@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-23
+updated: 2026-08-30
 tags:
   - project/crabwalk
   - docs/tooling
@@ -22,10 +22,14 @@ Rust/Cargo/source-map files, and optionally invokes Cargo.
 | `doctor` | interpreter/ABI/header/rustc/Cargo/linker readiness probe |
 | `expand PATH` | deterministic generated project, no Cargo compilation |
 | `check PATH` | `cargo check --release` with mapped diagnostics |
+| `check PATH --watch` | polling incremental check loop with the same locks/diagnostics |
 | `build PATH` | verified content-addressed native artifact |
 | `inspect PATH [--json]` | IR effects, conversions, calls, GIL, cache, dependencies, fingerprint inputs |
 | `show PATH SYMBOL` | annotated native function and Python ABI wrapper |
 | `wheel PACKAGE` | interpreter/platform wheel containing sources and native artifact |
+| `explain CRAB_CODE [--json]` | stable diagnostic explanation and suggested next action |
+| `export-rust PATH DESTINATION` | deterministic standalone copy of the generated Cargo project |
+| `lsp` | bounded stdio LSP server for source diagnostics |
 | `cache status PATH` | hit/miss/corruption status and expected artifact |
 | `cache prune` | scoped age/size cleanup with dry-run support |
 
@@ -58,8 +62,8 @@ plans fails as `CRAB308` instead of recursing indefinitely.
 The cache key includes:
 
 - reachable native compiler-input hash and module identity;
-- the exact bytes of the discovered `pyproject.toml` whenever it contains a
-  `[tool.crabwalk]` table;
+- a canonical hash of native-relevant `[tool.crabwalk]` settings (packages,
+  boundary policy, source lock policy, extra files, and extra environment);
 - Crabwalk implementation, IR, codegen, and fingerprint schema versions;
 - CPython implementation/version/extension ABI;
 - project-resolved rustc/Cargo executable and toolchain-selector state;
@@ -73,14 +77,11 @@ The cache key includes:
   linker/compiler choices, SDK deployment settings, and `PATH`;
 - declared `[tool.crabwalk].extra-files` trees and `extra-env` values.
 
-Project-configuration hashing is intentionally conservative in the current 1.x
-contract. Crabwalk hashes the complete `pyproject.toml`, not only the
-`[tool.crabwalk]` table. Changing Python-only dependencies, packaging metadata,
-or even comments therefore selects a new native fingerprint and cache namespace,
-even when the reachable compiler-input hash and generated Rust are unchanged.
-This is cache invalidation, not evidence that compilation occurred; build,
-initialization, and cache-validation time should still be reported separately.
-Native-relevant project-metadata scoping is not currently supported.
+Python-only dependencies, PEP 621 metadata, wheel data patterns, and comments do
+not change the native fingerprint. Changing a native-relevant setting does. Wheel
+source-integrity hashing remains separate and still covers every shipped Python
+source, so avoiding an unnecessary native rebuild does not weaken installed-wheel
+tamper detection.
 
 Raw environment values are not written to inspect metadata. Cache manifests bind
 the fingerprint, extension initialization name, exact filename, and SHA-256 of the
@@ -149,7 +150,7 @@ with `--locked`. Set `source-locked = true` to require locked source imports and
 reuse the corresponding complete fingerprint. `crabwalk inspect` and each compiled
 function's `__crabwalk__["cargo_policy"]` expose the effective locked/offline state.
 
-## Building a user wheel
+## Building a user wheel directly
 
 ```powershell
 crabwalk wheel src\my_package `
@@ -159,8 +160,8 @@ crabwalk wheel src\my_package `
   --output-dir dist
 ```
 
-The current command targets a regular top-level package and the running CPython
-ABI/platform. `--project` accepts either a project directory or its
+The direct command targets one regular or configured namespace top-level package
+and the running CPython ABI/platform. `--project` accepts either a project directory or its
 `pyproject.toml`; when that configuration declares exactly one package, the project
 path itself may be used as the positional input. As with neighboring commands,
 `--project` selects configuration and containment policy without rebasing a relative
@@ -170,11 +171,11 @@ positional path. The command:
 2. copies `.py`, `.pyi`, and `py.typed` plus explicitly configured `wheel-include`
    package data, while rejecting symlinks and common secret/private-key names;
 3. embeds the extension beneath `_crabwalk_native/`;
-4. embeds `_crabwalk_prebuilt.json` with source/artifact hashes, exact Crabwalk
-   version, runtime ABI version, effective Cargo locked/offline policy, and the
-   dependency-lock SHA-256;
+4. embeds `_crabwalk_prebuilt.json` with source/artifact hashes, compiler
+   provenance, runtime/generated-wrapper ABI versions, compatibility range,
+   effective Cargo policy, and the dependency-lock SHA-256;
 5. writes deterministic wheel metadata and a hashed `RECORD`;
-6. declares the exact `crabwalk-lang` runtime version as a dependency.
+6. declares the compatible Crabwalk runtime line as a dependency.
 
 Normal pip installation resolves that dependency by distribution name. The import
 package and CLI remain `crabwalk`; application wheels generated by Crabwalk 1.0.0
@@ -182,8 +183,10 @@ must be rebuilt because their metadata named the pre-rename `crabwalk` project.
 
 On import, the installed runtime re-analyzes source without executing it. It
 verifies both the reachable compiler-input hash and a separate integrity hash for
-every shipped `.py`/`.pyi` file, then checks the manifest schema, runtime ABI,
-exact Crabwalk version, contained artifact path, binary hash, and extension name.
+every shipped `.py`/`.pyi` file, then checks the manifest schema, runtime and
+generated-wrapper ABIs, contained artifact path, binary hash, and extension name.
+Generator version is retained as provenance; compatible patch runtimes may load the
+artifact without forcing a rebuild.
 Any mismatch raises `CRAB405`; it never silently invokes Cargo from an installed
 wheel.
 
@@ -193,6 +196,42 @@ build facts with `origin: "prebuilt"`, and
 therefore remain auditable without Cargo or the original build directory.
 
 Wheels are interpreter-specific (`cpXY-cpXY-platform`), not `abi3`. Build one per
-supported CPython/platform combination. This is a focused mixed-wheel command
-rather than a general PEP 517 backend: distribution metadata/dependency merging beyond the
-required Crabwalk runtime is still the packager's responsibility.
+supported CPython/platform combination.
+
+## PEP 517 application backend
+
+For an ordinary Python distribution, configure:
+
+```toml
+[build-system]
+requires = ["crabwalk-lang>=1.1,<1.2"]
+build-backend = "crabwalk.build_backend"
+```
+
+The backend supports `python -m build`, `pip wheel .`, `pip install .`, metadata
+preparation, and deterministic sdists. It merges static PEP 621 dependencies,
+optional dependencies, scripts, arbitrary entry-point groups, classifiers,
+authors/maintainers, URLs, readme, license expression/files, and allowed package
+data with Crabwalk's runtime requirement and embedded artifacts. Every configured
+top-level regular or namespace package gets its own extension/manifest inside one
+wheel. A clean acceptance test installs that multi-package wheel through normal
+dependency resolution and runs both native modules with Cargo/rustc absent.
+
+Dynamic project name/version metadata is rejected because the native distribution
+identity must be reproducible. Editable PEP 660 builds are not yet supplied by the
+application backend; use an editable Crabwalk runtime checkout and source imports
+during development.
+
+## Diagnostics, watch, and editor integration
+
+`expand`, `check`, and `build` accept `--diagnostic-format json`, whose envelope is
+versioned independently from the human renderer. `crabwalk explain CRAB_CODE`
+describes a diagnostic without running a build. `check --watch` polls the reachable
+source/config inputs and reruns the same static/Cargo check path after changes.
+`crabwalk lsp` implements initialize/shutdown plus open/change diagnostics over
+stdio; it intentionally does not yet advertise completion or refactoring.
+
+`export-rust` copies the exact deterministic generated crate plus an export
+manifest into an empty destination. This is the supported extraction/debugging
+path; it refuses to merge into a non-empty tree where stale handwritten files
+could make the result ambiguous.

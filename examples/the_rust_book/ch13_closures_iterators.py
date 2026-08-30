@@ -43,6 +43,24 @@ def shifted_sum(offset: rust.u64) -> rust.u64:
     return values.iter().map(lambda value: value + offset).sum()
 
 
+# Rust Book source (`move` capture):
+# https://doc.rust-lang.org/book/ch13-01-closures.html#moving-captured-values-out-of-closures-and-the-fn-traits
+#
+# The wrapper spells out the Rust call trait and capture policy. The adapter still
+# has an anonymous concrete Rust type, so it is stored through ordinary inference.
+@rust.fn
+def explicitly_moved_transform(offset: rust.u64) -> rust.Vec[rust.u64]:
+    values: rust.Vec[rust.u64] = rust.Vec([1, 2, 3])
+    mapped = values.iter().map(
+        rust.closure(
+            lambda value: value + offset,
+            kind="fn",
+            capture="move",
+        )
+    )
+    return mapped.collect_vec()
+
+
 # Rust Book source (rewriting minigrep with iterator adapters):
 # https://doc.rust-lang.org/book/ch13-03-improving-our-io-project.html#clarifying-code-with-iterator-adapters
 #

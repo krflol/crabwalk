@@ -44,4 +44,4 @@ def test_lambdas_and_iterator_adapters_lower_to_typed_rust(tmp_path: Path) -> No
         generated.rust_source,
     )
     assert ".collect::<Vec<_>>()" in generated.rust_source
-    assert ".sum()" in generated.rust_source
+    assert ".sum::<u64>()" in generated.rust_source

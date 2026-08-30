@@ -14,17 +14,21 @@ import sysconfig
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from collections.abc import Sequence
 from typing import NoReturn
 
 from crabwalk._version import (
+    GENERATED_WRAPPER_ABI_VERSION,
     PREBUILT_MANIFEST_SCHEMA_VERSION,
     RUNTIME_ABI_VERSION,
-    RUNTIME_DISTRIBUTION,
+    RUNTIME_COMPATIBILITY_SPECIFIER,
+    RUNTIME_DISTRIBUTION_REQUIREMENT,
     __version__,
 )
 from crabwalk.build.cache import sha256_file
 from crabwalk.config import discover_project_config
 from crabwalk.diagnostics import CrabwalkCompilationError, Diagnostic
+from crabwalk.project_metadata import ApplicationMetadata
 from crabwalk.service import CompilationResult, CompilationService, default_service
 
 _NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
@@ -40,10 +44,11 @@ class WheelResult:
     distribution_name: str
     version: str
     tag: str
+    compilations: tuple[CompilationResult, ...] = ()
 
 
 def build_wheel(
-    package: str | Path,
+    package: str | Path | Sequence[str | Path],
     output_directory: str | Path = "dist",
     *,
     distribution_name: str | None = None,
@@ -52,16 +57,51 @@ def build_wheel(
     locked: bool = False,
     offline: bool = False,
     service: CompilationService | None = None,
+    metadata: ApplicationMetadata | None = None,
 ) -> WheelResult:
-    """Compile a regular Python package and place its native artifact in a wheel."""
+    """Compile one or more Python packages into one platform wheel."""
 
-    requested_path = Path(package).resolve()
-    config = discover_project_config(requested_path, project)
-    source_path = (
-        config.resolve_entry(requested_path) if config is not None else requested_path
+    requested_paths = (
+        (Path(package).resolve(),)
+        if isinstance(package, (str, Path))
+        else tuple(Path(value).resolve() for value in package)
     )
-    package_root = _regular_package_root(source_path)
-    name = distribution_name or package_root.name
+    if not requested_paths:
+        _fail("CRAB500", "Wheel input is empty", "Pass at least one package.")
+    config = discover_project_config(requested_paths[0], project)
+    source_paths = tuple(
+        config.resolve_entry(path) if config is not None else path
+        for path in requested_paths
+    )
+    package_roots = tuple(_regular_package_root(path) for path in source_paths)
+    if len({root.name for root in package_roots}) != len(package_roots):
+        _fail(
+            "CRAB500",
+            "Wheel package names collide",
+            "Each configured top-level package must have a distinct import name.",
+        )
+    if metadata is not None:
+        if distribution_name is not None and distribution_name != metadata.name:
+            _fail(
+                "CRAB510",
+                "Conflicting distribution metadata",
+                "The backend project name differs from the requested wheel name.",
+            )
+        if version != "0.0.0" and version != metadata.version:
+            _fail(
+                "CRAB510",
+                "Conflicting distribution metadata",
+                "The backend project version differs from the requested wheel version.",
+            )
+        distribution_name = metadata.name
+        version = metadata.version
+    if len(package_roots) > 1 and metadata is None:
+        _fail(
+            "CRAB500",
+            "Multiple packages need distribution metadata",
+            "Build through a [project] and [tool.crabwalk] configuration.",
+        )
+    name = distribution_name or package_roots[0].name
     _validate_metadata(name, version)
     if sys.implementation.name != "cpython":
         _fail(
@@ -71,22 +111,26 @@ def build_wheel(
         )
 
     compiler = service or default_service
-    compilation = compiler.compile_path(
-        package_root,
-        module_name=package_root.name,
-        mode="build",
-        load=False,
-        locked=locked,
-        offline=offline,
-        project=project,
-    )
-    artifact = compilation.artifact
-    if artifact is None or not artifact.is_file():
-        _fail(
-            "CRAB502",
-            "Native wheel artifact is missing",
-            "The package compilation completed without a loadable extension artifact.",
+    compilations = tuple(
+        compiler.compile_path(
+            package_root,
+            module_name=package_root.name,
+            mode="build",
+            load=False,
+            locked=locked,
+            offline=offline,
+            project=project,
         )
+        for package_root in package_roots
+    )
+    for compilation in compilations:
+        artifact = compilation.artifact
+        if artifact is None or not artifact.is_file():
+            _fail(
+                "CRAB502",
+                "Native wheel artifact is missing",
+                "A package compilation completed without a loadable extension artifact.",
+            )
 
     python_tag, abi_tag, platform_tag = _wheel_tags()
     tag = f"{python_tag}-{abi_tag}-{platform_tag}"
@@ -99,20 +143,50 @@ def build_wheel(
     temporary = output_root / f".{wheel_name}.{os.getpid()}.tmp"
 
     wheel_include = config.wheel_include if config is not None else ()
-    entries = _package_entries(package_root, wheel_include)
-    package_prefix = PurePosixPath(package_root.name)
-    artifact_entry = package_prefix / _NATIVE_DIRECTORY / artifact.name
-    manifest_entry = package_prefix / _PREBUILT_MANIFEST
-    manifest = _prebuilt_manifest(
-        compilation, artifact_entry.relative_to(package_prefix)
-    )
-    entries[str(artifact_entry)] = artifact.read_bytes()
-    entries[str(manifest_entry)] = manifest
+    entries: dict[str, bytes] = {}
+    for package_root, compilation in zip(package_roots, compilations, strict=True):
+        package_entries = _package_entries(package_root, wheel_include)
+        overlap = set(entries) & set(package_entries)
+        if overlap:
+            _fail(
+                "CRAB500",
+                "Wheel package entries collide",
+                min(overlap),
+            )
+        entries.update(package_entries)
+        artifact = compilation.artifact
+        assert artifact is not None
+        package_prefix = PurePosixPath(package_root.name)
+        artifact_entry = package_prefix / _NATIVE_DIRECTORY / artifact.name
+        manifest_entry = package_prefix / _PREBUILT_MANIFEST
+        entries[str(artifact_entry)] = artifact.read_bytes()
+        entries[str(manifest_entry)] = _prebuilt_manifest(
+            compilation, artifact_entry.relative_to(package_prefix)
+        )
 
     dist_info = PurePosixPath(f"{normalized_name}-{normalized_version}.dist-info")
-    entries[str(dist_info / "METADATA")] = _metadata(name, version)
+    entries[str(dist_info / "METADATA")] = (
+        metadata.core_metadata(RUNTIME_DISTRIBUTION_REQUIREMENT)
+        if metadata is not None
+        else _metadata(name, version)
+    )
     entries[str(dist_info / "WHEEL")] = _wheel_metadata(tag)
-    entries[str(dist_info / "top_level.txt")] = f"{package_root.name}\n".encode()
+    entries[str(dist_info / "top_level.txt")] = "".join(
+        f"{root.name}\n" for root in package_roots
+    ).encode()
+    if metadata is not None:
+        entry_points = metadata.entry_points_text()
+        if entry_points is not None:
+            entries[str(dist_info / "entry_points.txt")] = entry_points
+        for relative, payload in metadata.license_files:
+            license_path = PurePosixPath(relative)
+            if license_path.is_absolute() or ".." in license_path.parts:
+                _fail(
+                    "CRAB510",
+                    "Unsafe license-file path",
+                    relative,
+                )
+            entries[str(dist_info / "licenses" / license_path)] = payload
     record_name = str(dist_info / "RECORD")
     entries[record_name] = _record(entries, record_name)
 
@@ -121,20 +195,29 @@ def build_wheel(
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
-    return WheelResult(destination, compilation, name, version, tag)
+    return WheelResult(
+        destination,
+        compilations[0],
+        name,
+        version,
+        tag,
+        compilations,
+    )
 
 
 def _regular_package_root(path: Path) -> Path:
     directory = path if path.is_dir() else path.parent
     if not (directory / "__init__.py").is_file():
-        _fail(
-            "CRAB500",
-            "Wheel input is not a regular Python package",
-            f"{path} is not inside a package containing __init__.py.",
-            "Pass the package directory or one of its Python source files.",
-        )
-    while (directory.parent / "__init__.py").is_file():
-        directory = directory.parent
+        if not path.is_dir() or not any(path.rglob("*.py")):
+            _fail(
+                "CRAB500",
+                "Wheel input is not a Python package",
+                f"{path} is not a package directory with Python sources.",
+                "Pass a regular or configured namespace package directory.",
+            )
+    else:
+        while (directory.parent / "__init__.py").is_file():
+            directory = directory.parent
     if not directory.name.isidentifier() or keyword.iskeyword(directory.name):
         _fail(
             "CRAB505",
@@ -246,6 +329,8 @@ def _prebuilt_manifest(
         "schema_version": PREBUILT_MANIFEST_SCHEMA_VERSION,
         "crabwalk_version": __version__,
         "runtime_abi_version": RUNTIME_ABI_VERSION,
+        "generated_wrapper_abi_version": GENERATED_WRAPPER_ABI_VERSION,
+        "runtime_compatibility_specifier": RUNTIME_COMPATIBILITY_SPECIFIER,
         "module_name": compilation.ir.module_name,
         "source_hash": compilation.ir.source_hash,
         "compiler_input_hash": compilation.ir.compiler_input_hash,
@@ -280,7 +365,7 @@ def _metadata(name: str, version: str) -> bytes:
         f"Version: {version}\n"
         "Summary: A Python package with native functions compiled by Crabwalk\n"
         "Requires-Python: >=3.11\n"
-        f"Requires-Dist: {RUNTIME_DISTRIBUTION}=={__version__}\n"
+        f"Requires-Dist: {RUNTIME_DISTRIBUTION_REQUIREMENT}\n"
         "\n"
     ).encode("utf-8")
 

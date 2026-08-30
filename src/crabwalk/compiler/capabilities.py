@@ -82,41 +82,57 @@ CAPABILITIES: tuple[Capability, ...] = (
         "source-embedding",
         "Non-executing source embedding",
         Maturity.BOUNDED,
-        "content-addressed source compilation and direct native callable binding",
-        "native top-level side-effect rejection-by-nonexecution and callable test",
+        "content-addressed single-source/virtual-package compilation and direct native callable binding",
+        "native cross-module non-execution, callable binding, and process cancellation tests",
         (
-            "single-module source snapshots; Cargo dependencies remain a trusted "
-            "build boundary; cancellation is phase-cooperative"
+            "Cargo dependencies remain a trusted build boundary; virtual mappings "
+            "are regularized into immutable package snapshots"
         ),
         (
             "embedding.nonexecuting-source-callable",
             "embedding.phase-cancellation",
+            "embedding.virtual-package",
         ),
     ),
     Capability(
         "ownership",
         "Ownership boundary",
         Maturity.COMPOSITIONAL,
-        "Owned/Ref/Mut, move state, borrows, reload and fingerprint identity",
+        "Owned/Ref/Mut plus immutable Shared, move state, borrows, reload and fingerprint identity",
         "multi-argument, alias, reload, thread, domain, and vector tests",
-        "handles are thread-affine; no retained cross-call borrows",
+        "ordinary handles are thread-affine; Shared is immutable Send + Sync only; no retained cross-call borrows",
         (
             "ownership.failure-atomic",
             "ownership.reload-fingerprint",
             "ownership.domain-schema",
+            "ownership.shared-send-sync",
         ),
     ),
     Capability(
         "build-cache",
         "Cargo build and cache",
-        Maturity.COMPOSITIONAL,
-        "locks, complete modeled fingerprints, hashing, leases, atomic publish",
-        "dependency, corruption, replan, prune, race, and wheel tests",
+        Maturity.PRODUCTION,
+        "locks, complete modeled fingerprints, hashing, leases, atomic publish, cancellation, and release budgets",
+        "dependency, corruption, replan, prune, race, cancellation, wheel, and versioned performance gates",
         "trusted build scripts may require declared extra inputs",
         (
             "cache.corruption-repair",
             "cache.concurrent-publication",
             "cache.prune-load-lease",
+            "build.hard-cancellation",
+            "build.performance-budgets",
+        ),
+    ),
+    Capability(
+        "application-packaging",
+        "Application packaging",
+        Maturity.BOUNDED,
+        "PEP 517 wheel/sdist metadata merging with regular, namespace, and multiple top-level packages",
+        "clean dependency-resolving install of a native multi-package wheel without a Rust toolchain",
+        "platform wheels remain CPython-specific and must be built per supported target",
+        (
+            "packaging.metadata-sdist",
+            "packaging.pep517-multi-package",
         ),
     ),
     Capability(
@@ -161,6 +177,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         "allocating explicit input; direct recursive domain cycles are invalid Rust",
         (
             "structured.vector-domain-input",
+            "structured.hashmap-input",
             "structured.nested-domain-roundtrip",
             "structured.owned-domain-return",
         ),
@@ -187,6 +204,18 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
+        "text-column-boundary",
+        "Owned UTF-8 text column boundary",
+        Maturity.BOUNDED,
+        "one-crossing bytes+offset construction with immutable native row access",
+        "native UTF-8 lifecycle, malformed-layout rejection, and telemetry tests",
+        "owned contiguous UTF-8 only; no writable or retained Python borrow",
+        (
+            "text-column.owned-native",
+            "text-column.invalid-layout",
+        ),
+    ),
+    Capability(
         "collections",
         "String, HashMap, Option/Result",
         Maturity.COMPOSITIONAL,
@@ -202,6 +231,21 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
+        "native-etl",
+        "Native standard-library ETL",
+        Maturity.BOUNDED,
+        (
+            "checked casts, isize, slices/chunks/windows, ordered/hash collections, "
+            "sorting, numeric formatting, UTF-8 bytes, PathBuf, and buffered I/O"
+        ),
+        "native parse-validate-group-sort-format-emit application acceptance",
+        "finite UTF-8/path surface; no arbitrary filesystem traversal policy",
+        (
+            "etl.native-standard-library",
+            "etl.ordered-grouping",
+        ),
+    ),
+    Capability(
         "filesystem-results",
         "Native filesystem results",
         Maturity.PROOF,
@@ -209,6 +253,18 @@ CAPABILITIES: tuple[Capability, ...] = (
         "native success, open-error, and read-error Result propagation test",
         "read-only whole-file teaching surface; no general path or filesystem API",
         ("filesystem.result-propagation",),
+    ),
+    Capability(
+        "structured-errors",
+        "Structured native errors",
+        Maturity.BOUNDED,
+        "declared From conversions, custom error enums, fields, and cause chains",
+        "native file, parse, and validation errors through one application error",
+        "error payloads are displayable scalar/string/io/error values; no arbitrary Error trait discovery",
+        (
+            "errors.from-structured",
+            "errors.undeclared-from-rejected",
+        ),
     ),
     Capability(
         "crate-adapters",
@@ -220,18 +276,36 @@ CAPABILITIES: tuple[Capability, ...] = (
         (
             "crate.typed-value",
             "crate.typed-callback",
+            "crate.builder-method-error",
+        ),
+    ),
+    Capability(
+        "python-adapters",
+        "Typed Python-call adapters",
+        Maturity.BOUNDED,
+        "static Python signatures, explicit effects, PyErr propagation, and checked return extraction",
+        "native success/exception/invalid-return plus closure-placement diagnostics",
+        "synchronous calls only; rejected in native closures, methods, workers, and async helpers",
+        (
+            "python-adapter.success-errors",
+            "python-adapter.invalid-placement",
         ),
     ),
     Capability(
         "traits-generics",
         "Traits, generics, operators",
         Maturity.BOUNDED,
-        "generic helpers, shared no-argument traits, Add implementations",
-        "Rust Book and focused native conformance tests",
-        "not a general Rust trait or operator declaration language",
+        (
+            "per-parameter generic bounds; typed trait arguments; ref/mut/owned "
+            "receivers; generic and associated outputs; arithmetic operators"
+        ),
+        "focused lowering and native compositional conformance tests",
+        "finite safe trait/operator surface; no unsafe traits or specialization",
         (
             "traits.dynamic-dispatch",
             "generics.concrete-export",
+            "traits.arguments-receivers-associated",
+            "closures.capture-contracts",
         ),
     ),
     Capability(
@@ -260,6 +334,28 @@ CAPABILITIES: tuple[Capability, ...] = (
         "subprocess panic/unsafe and exact code-generation tests",
         "not general inline Rust, FFI, unsafe, macro, or pointer support",
         ("advanced.audited-intrinsics",),
+    ),
+    Capability(
+        "python-call-ergonomics",
+        "Exported Python call ergonomics",
+        Maturity.BOUNDED,
+        "positional-or-keyword calls and lossless literal defaults",
+        "native external and compiled-internal keyword/default contract",
+        "no positional-only, keyword-only, or variadic signatures",
+        ("calls.keywords-defaults", "calls.invalid-default"),
+    ),
+    Capability(
+        "developer-tooling",
+        "Watch, diagnostics, LSP, and Rust export",
+        Maturity.BOUNDED,
+        "versioned JSON diagnostics, stdio LSP, explain, watch, and deterministic crate export",
+        "framing/schema/export/watch CLI contract tests",
+        "LSP performs static Crabwalk analysis; watch uses polling; no completion/refactoring server",
+        (
+            "tooling.diagnostics-explain-lsp",
+            "tooling.export-rust",
+            "tooling.watch",
+        ),
     ),
 )
 

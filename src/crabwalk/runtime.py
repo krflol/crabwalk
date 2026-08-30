@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import inspect
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NoReturn
 
 from crabwalk._version import (
+    GENERATED_WRAPPER_ABI_VERSION,
     PREBUILT_MANIFEST_SCHEMA_VERSION,
     RUNTIME_ABI_VERSION,
-    __version__,
 )
 from crabwalk.boundary import (
     AllocationKind,
@@ -26,8 +27,8 @@ from crabwalk.boundary import (
 from crabwalk.build.cache import read_json, sha256_file
 from crabwalk.build.loader import load_extension
 from crabwalk.compiler.codegen import function_releases_gil
-from crabwalk.compiler.ir import FunctionIR, TypeRef
-from crabwalk.compiler.naming import owned_class_names
+from crabwalk.compiler.ir import FunctionIR, ParameterIR, TypeRef
+from crabwalk.compiler.naming import owned_class_names, shared_class_names
 from crabwalk.compiler.frontend import (
     analyze_project_path,
     project_source_anchor,
@@ -40,11 +41,14 @@ from crabwalk.diagnostics import (
     CrabwalkMoveError,
     CrabwalkPanicError,
     CrabwalkRustError,
+    CrabwalkRustErrorSource,
     CrabwalkThreadError,
     Diagnostic,
+    SourceSpan,
 )
 from crabwalk.progress import ImplicitBuildProgress
 from crabwalk.service import CompilationResult, default_service
+from crabwalk.telemetry import BoundaryTelemetry
 from crabwalk.native_exceptions import (
     NATIVE_BORROW_ERROR,
     NATIVE_MOVE_ERROR,
@@ -91,6 +95,14 @@ class _OwnedTypeRegistration:
 
 
 @dataclass(frozen=True, slots=True)
+class _SharedTypeRegistration:
+    native_type: type[Any]
+    fingerprint: str
+    type_ref: TypeRef
+    owned: _OwnedTypeRegistration
+
+
+@dataclass(frozen=True, slots=True)
 class _BorrowContext:
     ownership: str
     parameter: str
@@ -104,8 +116,19 @@ class _BorrowContext:
         )
 
 
+@dataclass(slots=True)
+class _BoundaryCounts:
+    values: int = 0
+    python_container_allocations: int = 0
+    native_container_allocations: int = 0
+    native_domain_values: int = 0
+    native_clones: int = 0
+    bytes_copied: int = 0
+
+
 _owned_types_by_module: dict[tuple[str, str], _OwnedTypeRegistration] = {}
 _owned_types_by_compilation: dict[tuple[str, str], _OwnedTypeRegistration] = {}
+_shared_types_by_compilation: dict[tuple[str, str], _SharedTypeRegistration] = {}
 
 
 class _RustOwnedValue:
@@ -124,12 +147,28 @@ class _RustOwnedValue:
         "_thread_id",
         "_definition_site",
         "_borrow_contexts",
+        "_boundary_telemetry",
     )
+    _native: Any
+    _registration: _OwnedTypeRegistration
+    _type_key: str
+    _move_site: str | None
+    _field_names: tuple[str, ...]
+    _field_types: dict[str, TypeRef]
+    _enum_variants: dict[str, tuple[str, ...]]
+    _enum_variant_types: dict[str, dict[str, TypeRef]]
+    _fingerprint: str
+    _thread_id: int
+    _definition_site: str
+    _borrow_contexts: tuple[_BorrowContext, ...]
+    _boundary_telemetry: BoundaryTelemetry | None
 
     def __init__(
         self,
         native: object,
         registration: _OwnedTypeRegistration,
+        *,
+        telemetry: BoundaryTelemetry | None = None,
     ) -> None:
         fields = dict(registration.fields)
         variants = {name: dict(values) for name, values in registration.variants}
@@ -159,6 +198,7 @@ class _RustOwnedValue:
         object.__setattr__(self, "_thread_id", threading.get_ident())
         object.__setattr__(self, "_definition_site", _call_location())
         object.__setattr__(self, "_borrow_contexts", ())
+        object.__setattr__(self, "_boundary_telemetry", telemetry)
 
     @property
     def rust_type(self) -> str:
@@ -171,6 +211,42 @@ class _RustOwnedValue:
         self._check_thread()
         self._check_borrow_access("shared")
         return bool(self._native.is_moved())
+
+    @property
+    def boundary_telemetry(self) -> BoundaryTelemetry | None:
+        """Report the explicit construction boundary that created this handle."""
+
+        self._check_thread()
+        return self._boundary_telemetry
+
+    def freeze(self) -> "_RustSharedValue":
+        """Consume this handle into an immutable, cross-thread ``Arc`` handle."""
+
+        self._check_thread()
+        self._check_borrow_access("mutable")
+        if self.moved:
+            _raise_move_error(
+                "value",
+                self,
+                parameter_site=self._definition_site,
+                call_site=_call_location(),
+            )
+        with _owned_registry_lock:
+            registration = _shared_types_by_compilation.get(
+                (self._fingerprint, self._type_key)
+            )
+        if registration is None:
+            raise TypeError(
+                f"{self._registration.type_ref.display()} has no generated shared "
+                "wrapper in this compilation; declare a rust.Shared[...] parameter "
+                "for the immutable target type"
+            )
+        try:
+            native = registration.native_type(self._native)
+        except RuntimeError as error:
+            _raise_translated_runtime_error(error, self)
+        self._record_move("freeze()", _call_location(), self._definition_site)
+        return _RustSharedValue(native, registration.owned)
 
     def to_python(self) -> object:
         self._check_thread()
@@ -193,23 +269,19 @@ class _RustOwnedValue:
             value = self._native.to_python()
         except RuntimeError as error:
             _raise_translated_runtime_error(error, self)
+        if self._registration.type_ref.rust_name == "TextColumn":
+            data, offsets = value
+            return {"data": bytes(data), "offsets": list(offsets)}
         if (
             self._registration.type_ref.rust_name == "Vec"
-            and self._registration.type_ref.arguments[0].python_name is not None
+            and _type_contains_compiled_domain(self._registration.type_ref.arguments[0])
         ):
-            element_type = self._registration.type_ref.arguments[0]
-            with _owned_registry_lock:
-                element_registration = _owned_types_by_compilation.get(
-                    (self._fingerprint, element_type.render())
-                )
-            if element_registration is None:
-                raise RuntimeError(
-                    f"missing compiled domain registration for {element_type.display()}"
-                )
-            return [
-                _RustOwnedValue(item, element_registration).to_python()
-                for item in value
-            ]
+            return _normalize_compiled_boundary_output(
+                value,
+                self._registration.type_ref,
+                self._fingerprint,
+                deep=True,
+            )
         if self._field_names:
             return {
                 name: _normalize_compiled_boundary_output(
@@ -315,6 +387,42 @@ class _RustOwnedValue:
             _raise_borrow_error(conflicts, self)
 
 
+class _RustSharedValue(_RustOwnedValue):
+    """An immutable ``Arc<T>`` handle whose generated payload is Send + Sync."""
+
+    def _check_thread(self) -> None:
+        return
+
+    @property
+    def moved(self) -> bool:
+        return False
+
+    def freeze(self) -> "_RustSharedValue":
+        return self
+
+    def to_python(self) -> object:
+        self._check_borrow_access("shared")
+        try:
+            snapshot = self._native.snapshot()
+        except RuntimeError as error:
+            _raise_translated_runtime_error(error, self)
+        return _RustOwnedValue(snapshot, self._registration).to_python()
+
+    def __getattr__(self, name: str) -> object:
+        if name not in self._field_names:
+            raise AttributeError(name)
+        try:
+            snapshot = self._native.snapshot()
+        except RuntimeError as error:
+            _raise_translated_runtime_error(error, self)
+        return getattr(_RustOwnedValue(snapshot, self._registration), name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name in self._field_names:
+            raise AttributeError("shared Crabwalk values are immutable")
+        object.__setattr__(self, name, value)
+
+
 def _resolve_owned_registration(
     rust_type: object,
     type_key: str,
@@ -365,14 +473,19 @@ def _resolve_owned_registration(
     return None
 
 
-def _runtime_type_ref(rust_type: object) -> object:
+def _runtime_type_ref(rust_type: object) -> TypeRef:
     """Translate a runtime marker only far enough to derive its owned class name."""
 
     from crabwalk.compiler.ir import TypeRef
+    from crabwalk.compiler.types import ErrorDomainType
     from crabwalk.rust import RustType
 
     if not isinstance(rust_type, RustType):
         raise TypeError("expected a Crabwalk Rust type")
+    if rust_type.is_error:
+        if rust_type.arguments or rust_type.python_name is None:
+            raise TypeError("compiled error markers require one qualified identity")
+        return ErrorDomainType(rust_type.name, rust_type.python_name)
     return TypeRef(
         rust_type.name,
         tuple(_runtime_type_ref(value) for value in rust_type.arguments),
@@ -408,8 +521,23 @@ def construct_rust_value(
             "@rust.fn ownership parameter or @rust.struct declaration for this "
             "concrete type before constructing it."
         )
+    validation_started = time.perf_counter_ns()
     try:
-        if rust_type.name == "Vec" and len(rust_type.arguments) == 1:
+        if rust_type.name == "TextColumn":
+            if keywords:
+                names = ", ".join(sorted(keywords))
+                raise TypeError(
+                    f"{rust_type!r} does not accept keyword arguments: {names}"
+                )
+            if len(values) != 2:
+                raise TypeError(
+                    f"{rust_type!r} expects data and offsets; got {len(values)} arguments"
+                )
+            data, offsets = _validated_text_column_input(values[0], values[1])
+            validation_finished = time.perf_counter_ns()
+            native_started = validation_finished
+            native = registration.native_type(data, offsets)
+        elif rust_type.name == "Vec" and len(rust_type.arguments) == 1:
             if keywords:
                 names = ", ".join(sorted(keywords))
                 raise TypeError(
@@ -421,6 +549,8 @@ def construct_rust_value(
                     f"{len(values)} arguments"
                 )
             converted = _validated_owned_vector_input(values[0], registration)
+            validation_finished = time.perf_counter_ns()
+            native_started = validation_finished
             native = registration.native_type(converted)
         else:
             converted_values, converted_keywords = _validated_domain_arguments(
@@ -429,6 +559,8 @@ def construct_rust_value(
                 registration.fields,
                 registration.fingerprint,
             )
+            validation_finished = time.perf_counter_ns()
+            native_started = validation_finished
             native = registration.native_type(
                 *_ordered_domain_arguments(
                     converted_values,
@@ -438,7 +570,86 @@ def construct_rust_value(
             )
     except (OverflowError, TypeError, ValueError) as error:
         raise type(error)(f"cannot construct {rust_type!r}: {error}") from error
-    return _RustOwnedValue(native, registration)
+    native_finished = time.perf_counter_ns()
+    telemetry_value: object
+    if rust_type.name == "TextColumn":
+        telemetry_value = {"data": values[0], "offsets": values[1]}
+    elif rust_type.name == "Vec" and len(rust_type.arguments) == 1:
+        telemetry_value = values[0]
+    else:
+        ordered_source = _ordered_domain_arguments(
+            values,
+            keywords,
+            registration.fields,
+        )
+        telemetry_value = {
+            name: item for (name, _), item in zip(registration.fields, ordered_source)
+        }
+    counts = _modeled_boundary_counts(
+        telemetry_value,
+        registration.type_ref,
+        registration.fingerprint,
+        direction="input",
+    )
+    telemetry = BoundaryTelemetry(
+        operation=f"construct {registration.type_ref.display()}",
+        input_validation_ns=validation_finished - validation_started,
+        native_ns=native_finished - native_started,
+        output_normalization_ns=0,
+        input_values=counts.values,
+        output_values=0,
+        boundary_crossings=1,
+        python_container_allocations=counts.python_container_allocations,
+        native_container_allocations=counts.native_container_allocations,
+        native_domain_values=counts.native_domain_values,
+        native_clones=counts.native_clones,
+        bytes_copied=counts.bytes_copied,
+    )
+    return _RustOwnedValue(native, registration, telemetry=telemetry)
+
+
+def _validated_text_column_input(
+    data_value: object,
+    offsets_value: object,
+) -> tuple[bytes, list[int]]:
+    """Validate the public bytes+offsets representation before native copying."""
+
+    if isinstance(data_value, bytes):
+        data = data_value
+    elif isinstance(data_value, (bytearray, memoryview)):
+        data = bytes(data_value)
+    else:
+        raise TypeError(
+            f"TextColumn data must be bytes-like, found {type(data_value).__name__}"
+        )
+    if not isinstance(offsets_value, Sequence) or isinstance(
+        offsets_value, (str, bytes, bytearray)
+    ):
+        raise TypeError(
+            "TextColumn offsets must be a sequence of exact non-negative integers"
+        )
+    offsets: list[int] = []
+    for index, value in enumerate(offsets_value):
+        try:
+            offset = validate_primitive(value, "usize")
+        except (OverflowError, TypeError, ValueError) as error:
+            raise type(error)(f"offset {index}: {error}") from error
+        assert isinstance(offset, int)
+        offsets.append(offset)
+    if not offsets or offsets[0] != 0:
+        raise ValueError("TextColumn offsets must start at zero")
+    if offsets[-1] != len(data):
+        raise ValueError("TextColumn final offset must equal the byte length")
+    for index, (start, end) in enumerate(zip(offsets, offsets[1:])):
+        if start > end:
+            raise ValueError(f"TextColumn offsets are not monotonic at row {index}")
+        try:
+            data[start:end].decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise UnicodeError(
+                f"TextColumn row {index} is not valid UTF-8: {error}"
+            ) from error
+    return data, offsets
 
 
 def _validated_owned_vector_input(
@@ -446,54 +657,22 @@ def _validated_owned_vector_input(
     registration: _OwnedTypeRegistration,
 ) -> list[object]:
     element_type = registration.type_ref.arguments[0]
-    if element_type.python_name is None:
+    if not _type_contains_compiled_domain(element_type):
         converted = validate_boundary_input(value, registration.type_ref)
         assert isinstance(converted, list)
         return converted
-    if not isinstance(value, Sequence):
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise TypeError(f"expected a Python sequence, found {type(value).__name__}")
-    with _owned_registry_lock:
-        element_registration = _owned_types_by_compilation.get(
-            (registration.fingerprint, element_type.render())
-        )
-    if element_registration is None:
-        raise RuntimeError(
-            f"missing compiled domain registration for {element_type.display()}"
-        )
     converted_values: list[object] = []
     for index, item in enumerate(value):
-        if isinstance(item, _RustOwnedValue):
-            item._check_thread()
-            if item.moved:
-                raise CrabwalkMoveError(
-                    f"vector element {index} is an already-moved Rust value"
-                )
-            if item._fingerprint != registration.fingerprint or (
-                item._type_key != element_type.render()
-            ):
-                raise TypeError(
-                    f"vector element {index} belongs to a different compiled type"
-                )
-            converted_values.append(item._native)
-            continue
-        if isinstance(item, Mapping):
-            positional, keywords = _validated_domain_arguments(
-                (),
-                dict(item),
-                element_registration.fields,
+        converted_values.append(
+            _validate_compiled_boundary_input(
+                item,
+                element_type,
                 registration.fingerprint,
+                context=f"vector element {index}",
+                materialize_domains=False,
             )
-            native = element_registration.native_type(
-                *_ordered_domain_arguments(
-                    positional,
-                    keywords,
-                    element_registration.fields,
-                )
-            )
-            converted_values.append(native)
-            continue
-        raise TypeError(
-            f"vector element {index}: expected {element_type.display()} handle or mapping"
         )
     return converted_values
 
@@ -507,6 +686,8 @@ def _validated_domain_arguments(
     keywords: dict[str, object],
     fields: tuple[tuple[str, TypeRef], ...],
     fingerprint: str,
+    *,
+    materialize_domains: bool = True,
 ) -> tuple[tuple[object, ...], dict[str, object]]:
     if len(values) > len(fields):
         raise TypeError(f"expected at most {len(fields)} positional arguments")
@@ -530,6 +711,7 @@ def _validated_domain_arguments(
             fields[index][1],
             fingerprint,
             context=f"field '{fields[index][0]}'",
+            materialize_domains=materialize_domains,
         )
         for index, value in enumerate(values)
     )
@@ -539,6 +721,7 @@ def _validated_domain_arguments(
             field_types[name],
             fingerprint,
             context=f"field '{name}'",
+            materialize_domains=materialize_domains,
         )
         for name, value in keywords.items()
     }
@@ -566,14 +749,208 @@ def _compiled_domain_registration(
         return _owned_types_by_compilation.get((fingerprint, type_ref.render()))
 
 
+def _modeled_boundary_counts(
+    value: object,
+    type_ref: TypeRef,
+    fingerprint: str,
+    *,
+    direction: str,
+    counts: _BoundaryCounts | None = None,
+) -> _BoundaryCounts:
+    """Count codec-defined work without pretending to sample the allocator."""
+
+    result = counts or _BoundaryCounts()
+    result.values += 1
+    if type_ref.rust_name == "TextColumn":
+        result.python_container_allocations += 1
+        if direction == "input":
+            result.native_container_allocations += 2
+        if isinstance(value, Mapping):
+            data = value.get("data")
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                result.bytes_copied += len(data)
+            offsets = value.get("offsets")
+            if isinstance(offsets, Sequence):
+                result.values += len(offsets)
+        return result
+    registration = _compiled_domain_registration(fingerprint, type_ref)
+    if registration is not None:
+        if direction == "input":
+            if isinstance(value, _RustOwnedValue):
+                result.native_clones += 1
+                return result
+            result.native_domain_values += 1
+            result.python_container_allocations += 1
+        elif isinstance(value, Mapping):
+            result.python_container_allocations += 1
+        if isinstance(value, Mapping):
+            for name, child in registration.fields:
+                if name in value:
+                    _modeled_boundary_counts(
+                        value[name],
+                        child,
+                        fingerprint,
+                        direction=direction,
+                        counts=result,
+                    )
+        return result
+
+    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        if value is not None:
+            _modeled_boundary_counts(
+                value,
+                type_ref.arguments[0],
+                fingerprint,
+                direction=direction,
+                counts=result,
+            )
+        return result
+
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        result.python_container_allocations += 1
+        if isinstance(value, Sequence):
+            for item, child in zip(value, type_ref.arguments):
+                _modeled_boundary_counts(
+                    item,
+                    child,
+                    fingerprint,
+                    direction=direction,
+                    counts=result,
+                )
+        return result
+
+    if type_ref.rust_name in {"Vec", "Array"} and len(type_ref.arguments) == 1:
+        result.python_container_allocations += 1
+        if direction == "input":
+            result.native_container_allocations += 1
+        child = type_ref.arguments[0]
+        if isinstance(value, Sequence) and not isinstance(value, str):
+            for item in value:
+                _modeled_boundary_counts(
+                    item,
+                    child,
+                    fingerprint,
+                    direction=direction,
+                    counts=result,
+                )
+        if child.rust_name == "u8" and isinstance(value, (bytes, bytearray)):
+            result.bytes_copied += len(value)
+        return result
+
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        result.python_container_allocations += 1
+        if direction == "input":
+            result.native_container_allocations += 1
+        if isinstance(value, Mapping):
+            key_type, value_type = type_ref.arguments
+            for key, item in value.items():
+                _modeled_boundary_counts(
+                    key,
+                    key_type,
+                    fingerprint,
+                    direction=direction,
+                    counts=result,
+                )
+                _modeled_boundary_counts(
+                    item,
+                    value_type,
+                    fingerprint,
+                    direction=direction,
+                    counts=result,
+                )
+        return result
+
+    if type_ref.rust_name in {"String", "Str"} and isinstance(value, str):
+        result.bytes_copied += len(value.encode("utf-8"))
+        if direction == "input" and type_ref.rust_name == "String":
+            result.native_container_allocations += 1
+    return result
+
+
 def _validate_compiled_boundary_input(
     value: object,
     type_ref: TypeRef,
     fingerprint: str,
     *,
     context: str,
+    materialize_domains: bool = True,
 ) -> object:
     """Validate one boundary value, including compilation-bound domain values."""
+
+    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        if value is None:
+            return None
+        return _validate_compiled_boundary_input(
+            value,
+            type_ref.arguments[0],
+            fingerprint,
+            context=context,
+            materialize_domains=materialize_domains,
+        )
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        if type(value) is not tuple:
+            raise TypeError(f"{context}: expected tuple, found {type(value).__name__}")
+        if len(value) != len(type_ref.arguments):
+            raise ValueError(
+                f"{context}: expected {len(type_ref.arguments)} tuple items, "
+                f"found {len(value)}"
+            )
+        return tuple(
+            _validate_compiled_boundary_input(
+                item,
+                child,
+                fingerprint,
+                context=f"{context} tuple item {index}",
+                materialize_domains=materialize_domains,
+            )
+            for index, (item, child) in enumerate(zip(value, type_ref.arguments))
+        )
+    if type_ref.rust_name in {"Vec", "Array"} and len(type_ref.arguments) == 1:
+        if not _type_contains_compiled_domain(type_ref.arguments[0]):
+            return validate_boundary_input(value, type_ref)
+        if not isinstance(value, Sequence) or isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            raise TypeError(
+                f"{context}: expected a Python sequence, found {type(value).__name__}"
+            )
+        if type_ref.rust_name == "Array" and len(value) != type_ref.const_value:
+            raise ValueError(
+                f"{context}: expected {type_ref.const_value} items, found {len(value)}"
+            )
+        return [
+            _validate_compiled_boundary_input(
+                item,
+                type_ref.arguments[0],
+                fingerprint,
+                context=f"{context} element {index}",
+                materialize_domains=materialize_domains,
+            )
+            for index, item in enumerate(value)
+        ]
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        if not isinstance(value, Mapping):
+            raise TypeError(
+                f"{context}: expected a Python mapping, found {type(value).__name__}"
+            )
+        key_type, value_type = type_ref.arguments
+        converted: dict[object, object] = {}
+        for index, (key, item) in enumerate(value.items()):
+            converted_key = _validate_compiled_boundary_input(
+                key,
+                key_type,
+                fingerprint,
+                context=f"{context} mapping key {index}",
+                materialize_domains=materialize_domains,
+            )
+            converted[converted_key] = _validate_compiled_boundary_input(
+                item,
+                value_type,
+                fingerprint,
+                context=f"{context} mapping value for key {key!r}",
+                materialize_domains=materialize_domains,
+            )
+        return converted
 
     registration = _compiled_domain_registration(fingerprint, type_ref)
     if registration is None:
@@ -599,7 +976,15 @@ def _validate_compiled_boundary_input(
             dict(value),
             registration.fields,
             fingerprint,
+            materialize_domains=materialize_domains,
         )
+        if not materialize_domains:
+            ordered = _ordered_domain_arguments(
+                positional,
+                keywords,
+                registration.fields,
+            )
+            return {name: item for (name, _), item in zip(registration.fields, ordered)}
         return registration.native_type(
             *_ordered_domain_arguments(positional, keywords, registration.fields)
         )
@@ -619,6 +1004,60 @@ def _normalize_compiled_boundary_output(
 ) -> object:
     """Normalize native output while preserving compiled domain identity."""
 
+    if type_ref.rust_name == "Option" and len(type_ref.arguments) == 1:
+        if value is None:
+            return None
+        return _normalize_compiled_boundary_output(
+            value,
+            type_ref.arguments[0],
+            fingerprint,
+            deep=deep,
+        )
+    if type_ref.rust_name == "Tuple" and type_ref.arguments:
+        if type(value) is not tuple or len(value) != len(type_ref.arguments):
+            raise TypeError("native tuple output did not match its compiled codec")
+        return tuple(
+            _normalize_compiled_boundary_output(
+                item,
+                child,
+                fingerprint,
+                deep=deep,
+            )
+            for item, child in zip(value, type_ref.arguments)
+        )
+    if type_ref.rust_name in {"Vec", "Array"} and len(type_ref.arguments) == 1:
+        if not _type_contains_compiled_domain(type_ref.arguments[0]):
+            return normalize_boundary_output(value, type_ref)
+        if not isinstance(value, (list, tuple)):
+            raise TypeError("native vector output did not produce a sequence")
+        return [
+            _normalize_compiled_boundary_output(
+                item,
+                type_ref.arguments[0],
+                fingerprint,
+                deep=deep,
+            )
+            for item in value
+        ]
+    if type_ref.rust_name == "HashMap" and len(type_ref.arguments) == 2:
+        if not isinstance(value, Mapping):
+            raise TypeError("native map output did not produce a mapping")
+        key_type, value_type = type_ref.arguments
+        return {
+            _normalize_compiled_boundary_output(
+                key,
+                key_type,
+                fingerprint,
+                deep=deep,
+            ): _normalize_compiled_boundary_output(
+                item,
+                value_type,
+                fingerprint,
+                deep=deep,
+            )
+            for key, item in value.items()
+        }
+
     registration = _compiled_domain_registration(fingerprint, type_ref)
     if registration is None:
         if type_ref.python_name is not None:
@@ -628,6 +1067,12 @@ def _normalize_compiled_boundary_output(
         return normalize_boundary_output(value, type_ref)
     wrapped = _RustOwnedValue(value, registration)
     return wrapped.to_python() if deep else wrapped
+
+
+def _type_contains_compiled_domain(type_ref: TypeRef) -> bool:
+    return type_ref.python_name is not None or any(
+        _type_contains_compiled_domain(value) for value in type_ref.arguments
+    )
 
 
 def construct_rust_variant(
@@ -767,6 +1212,11 @@ class RustFunction:
                     inspect.Parameter(
                         parameter.name,
                         inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        default=(
+                            parameter.default_value
+                            if parameter.has_default
+                            else inspect.Parameter.empty
+                        ),
                         annotation=parameter.type_ref.display(),
                     )
                     for parameter in function_ir.parameters
@@ -791,18 +1241,38 @@ class RustFunction:
         self._effects = function_ir.effects
 
     def __call__(self, *args: object, **kwargs: object) -> object:
-        if kwargs:
-            names = ", ".join(sorted(kwargs))
-            raise TypeError(
-                f"{self.__qualname__} accepts positional arguments only; got {names}"
-            )
-        if len(args) != len(self._parameters):
-            raise TypeError(
-                f"{self.__qualname__} expects {len(self._parameters)} positional "
-                f"argument(s); got {len(args)}"
-            )
-        native_args = list(args)
-        owned_arguments: list[tuple[object, _RustOwnedValue]] = []
+        result, _ = self._invoke(args, kwargs, telemetry=False)
+        return result
+
+    def call_with_telemetry(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[object, BoundaryTelemetry]:
+        """Call native code and return phase/cardinality boundary evidence."""
+
+        result, report = self._invoke(args, kwargs, telemetry=True)
+        assert report is not None
+        return result, report
+
+    def _invoke(
+        self,
+        args: tuple[object, ...],
+        kwargs: dict[str, object],
+        *,
+        telemetry: bool,
+    ) -> tuple[object, BoundaryTelemetry | None]:
+        validation_started = time.perf_counter_ns()
+        try:
+            bound = self.__signature__.bind(*args, **kwargs)
+        except TypeError as error:
+            raise TypeError(f"{self.__qualname__}: {error}") from error
+        bound.apply_defaults()
+        bound_values = tuple(
+            bound.arguments[parameter.name] for parameter in self._parameters
+        )
+        native_args = list(bound_values)
+        owned_arguments: list[tuple[ParameterIR, _RustOwnedValue]] = []
         for index, parameter in enumerate(self._parameters):
             if parameter.type_ref.ownership is None:
                 try:
@@ -821,6 +1291,17 @@ class RustFunction:
                     f"a Rust-owned {parameter.type_ref.underlying.display()} value; "
                     "construct it with its generated Rust type marker"
                 )
+            if parameter.type_ref.ownership == "Shared":
+                if not isinstance(value, _RustSharedValue):
+                    raise TypeError(
+                        f"argument '{parameter.name}' to {self.__qualname__} requires "
+                        "an immutable shared handle; call value.freeze() first"
+                    )
+            elif isinstance(value, _RustSharedValue):
+                raise TypeError(
+                    f"argument '{parameter.name}' to {self.__qualname__} requires "
+                    f"rust.{parameter.type_ref.ownership}, not rust.Shared"
+                )
             value._check_thread()
             expected_key = parameter.type_ref.underlying.render()
             if value._type_key != expected_key:
@@ -828,7 +1309,12 @@ class RustFunction:
                     f"argument '{parameter.name}' to {self.__qualname__} expects "
                     f"{expected_key}, found {value._type_key}"
                 )
-            python_name, _ = owned_class_names(parameter.type_ref.underlying)
+            class_names = (
+                shared_class_names(parameter.type_ref.underlying)
+                if parameter.type_ref.ownership == "Shared"
+                else owned_class_names(parameter.type_ref.underlying)
+            )
+            python_name, _ = class_names
             module = self._compilation.module
             expected_native_type = getattr(module, python_name) if module else None
             if expected_native_type is None or not isinstance(
@@ -855,7 +1341,7 @@ class RustFunction:
                     call_site=call_location,
                 )
 
-        aliases: dict[int, list[tuple[object, _RustOwnedValue]]] = {}
+        aliases: dict[int, list[tuple[ParameterIR, _RustOwnedValue]]] = {}
         for parameter, value in owned_arguments:
             aliases.setdefault(id(value), []).append((parameter, value))
         for alias_group in aliases.values():
@@ -895,6 +1381,8 @@ class RustFunction:
                 "_borrow_contexts",
                 (*value._borrow_contexts, context),
             )
+        validation_finished = time.perf_counter_ns()
+        native_started = validation_finished
         try:
             result = self._native(*native_args)
         except RuntimeError as error:
@@ -914,6 +1402,9 @@ class RustFunction:
                         call_location,
                         _span_location(parameter.span),
                     )
+        native_finished = time.perf_counter_ns()
+        output_started = native_finished
+        normalized: object
         if self._return_type.ownership == "Owned":
             underlying = self._return_type.underlying
             with _owned_registry_lock:
@@ -924,8 +1415,49 @@ class RustFunction:
                 raise RuntimeError(
                     f"missing owned return registration for {underlying.display()}"
                 )
-            return _RustOwnedValue(result, registration)
-        return normalize_boundary_output(result, self._return_type)
+            normalized = _RustOwnedValue(result, registration)
+        else:
+            normalized = normalize_boundary_output(result, self._return_type)
+        output_finished = time.perf_counter_ns()
+        if not telemetry:
+            return normalized, None
+
+        counts = _BoundaryCounts()
+        for argument, parameter in zip(bound_values, self._parameters):
+            if parameter.type_ref.ownership is not None:
+                counts.values += 1
+                continue
+            _modeled_boundary_counts(
+                argument,
+                parameter.type_ref,
+                self._compilation.fingerprint,
+                direction="input",
+                counts=counts,
+            )
+        output_counts = _modeled_boundary_counts(
+            normalized,
+            self._return_type.underlying,
+            self._compilation.fingerprint,
+            direction="output",
+        )
+        report = BoundaryTelemetry(
+            operation=f"call {self.__module__}.{self.__qualname__}",
+            input_validation_ns=validation_finished - validation_started,
+            native_ns=native_finished - native_started,
+            output_normalization_ns=output_finished - output_started,
+            input_values=counts.values,
+            output_values=output_counts.values,
+            boundary_crossings=1,
+            python_container_allocations=(
+                counts.python_container_allocations
+                + output_counts.python_container_allocations
+            ),
+            native_container_allocations=counts.native_container_allocations,
+            native_domain_values=counts.native_domain_values,
+            native_clones=counts.native_clones,
+            bytes_copied=counts.bytes_copied + output_counts.bytes_copied,
+        )
+        return normalized, report
 
     def __repr__(self) -> str:
         fingerprint = self._compilation.fingerprint[:12]
@@ -955,6 +1487,16 @@ class RustFunction:
             "async_eligible": self._releases_gil,
             "effects": self._effects,
             "parameter_boundaries": parameter_boundaries,
+            "boundary_telemetry": {
+                "call_api": "call_with_telemetry",
+                "timing_unit": "nanoseconds",
+                "counts": "codec-modeled",
+                "phases": (
+                    "input_validation",
+                    "native",
+                    "output_normalization",
+                ),
+            },
             "cargo_policy": _cargo_policy_metadata(self._compilation),
             "dependency_lock_hash": _dependency_lock_hash_metadata(self._compilation),
         }
@@ -1170,6 +1712,7 @@ def compile_enum(original: type[object]) -> object:
         python_name=f"{original.__module__}.{original.__qualname__}",
         variants=tuple(value.name for value in enum_ir.variants),
         compilation_fingerprint=cached.fingerprint,
+        is_error=enum_ir.is_error,
     )
 
 
@@ -1315,6 +1858,8 @@ def _load_prebuilt_compilation(
         "wheel_source_integrity_hash": str,
         "crabwalk_version": str,
         "runtime_abi_version": int,
+        "generated_wrapper_abi_version": int,
+        "runtime_compatibility_specifier": str,
         "cargo_policy": dict,
         "dependency_lock_hash": str,
     }
@@ -1329,21 +1874,24 @@ def _load_prebuilt_compilation(
         or not isinstance(cargo_policy, dict)
         or not isinstance(cargo_policy.get("locked"), bool)
         or not isinstance(cargo_policy.get("offline"), bool)
+        or not isinstance(dependency_lock_hash, str)
         or len(dependency_lock_hash) != 64
         or any(
             character not in "0123456789abcdef" for character in dependency_lock_hash
         )
     ):
         _invalid_prebuilt(ir, "The embedded manifest has an unsupported schema.")
+    assert isinstance(cargo_policy, dict)
+    assert isinstance(dependency_lock_hash, str)
     if manifest["runtime_abi_version"] != RUNTIME_ABI_VERSION:
         _invalid_prebuilt(
             ir,
             "The embedded native artifact uses a different Crabwalk runtime ABI.",
         )
-    if manifest["crabwalk_version"] != __version__:
+    if manifest["generated_wrapper_abi_version"] != GENERATED_WRAPPER_ABI_VERSION:
         _invalid_prebuilt(
             ir,
-            "The embedded native artifact was generated by a different Crabwalk version.",
+            "The embedded native artifact uses a different generated-wrapper ABI.",
         )
     if manifest["compiler_input_hash"] != ir.compiler_input_hash:
         _invalid_prebuilt(
@@ -1407,7 +1955,7 @@ def _load_prebuilt_compilation(
     )
 
 
-def _invalid_prebuilt(ir: object, message: str) -> Any:
+def _invalid_prebuilt(ir: object, message: str) -> NoReturn:
     from crabwalk.compiler.ir import PackageIR
 
     span = _ir_primary_span(ir) if isinstance(ir, PackageIR) else None
@@ -1422,7 +1970,7 @@ def _invalid_prebuilt(ir: object, message: str) -> Any:
     )
 
 
-def _ir_primary_span(ir: object) -> object:
+def _ir_primary_span(ir: object) -> SourceSpan | None:
     from crabwalk.compiler.ir import PackageIR
 
     if not isinstance(ir, PackageIR):
@@ -1462,10 +2010,23 @@ def _register_owned_types(compilation: CompilationResult) -> None:
         (struct.module_name, struct.type_ref) for struct in compilation.ir.structs
     )
     concrete_types.update(
-        (enum.module_name, enum.type_ref) for enum in compilation.ir.enums
+        (enum.module_name, enum.type_ref)
+        for enum in compilation.ir.enums
+        if not enum.is_error
     )
     structs = {struct.type_ref.render(): struct for struct in compilation.ir.structs}
-    enums = {enum.type_ref.render(): enum for enum in compilation.ir.enums}
+    enums = {
+        enum.type_ref.render(): enum
+        for enum in compilation.ir.enums
+        if not enum.is_error
+    }
+    shared_types = {
+        parameter.type_ref.underlying.render(): parameter.type_ref.underlying
+        for function in compilation.ir.functions
+        if function.exported
+        for parameter in function.parameters
+        if parameter.type_ref.ownership == "Shared"
+    }
     with _owned_registry_lock:
         for module_name, type_ref in concrete_types:
             python_name, _ = owned_class_names(type_ref)
@@ -1500,6 +2061,17 @@ def _register_owned_types(compilation: CompilationResult) -> None:
             _owned_types_by_module[(module_name, type_key)] = registration
             _owned_types_by_compilation[(compilation.fingerprint, type_key)] = (
                 registration
+            )
+        for type_key, type_ref in shared_types.items():
+            python_name, _ = shared_class_names(type_ref)
+            owned = _owned_types_by_compilation[(compilation.fingerprint, type_key)]
+            _shared_types_by_compilation[(compilation.fingerprint, type_key)] = (
+                _SharedTypeRegistration(
+                    getattr(module, python_name),
+                    compilation.fingerprint,
+                    type_ref,
+                    owned,
+                )
             )
 
 
@@ -1549,10 +2121,10 @@ def _raise_translated_runtime_error(
     error: RuntimeError,
     value: _RustOwnedValue | None = None,
     *,
-    owned_arguments: tuple[tuple[object, _RustOwnedValue], ...] = (),
+    owned_arguments: tuple[tuple[ParameterIR, _RustOwnedValue], ...] = (),
     native_module: object | None = None,
     call_site: str | None = None,
-) -> Any:
+) -> NoReturn:
     if native_module is None and value is not None:
         native_module = value._registration.native_module
 
@@ -1563,10 +2135,19 @@ def _raise_translated_runtime_error(
     if _is_native_exception(error, native_module, NATIVE_RUST_RESULT_ERROR):
         rust_type = _native_error_argument(error, 0, "unknown")
         rust_message = _native_error_argument(error, 1, str(error))
+        variant = _native_error_optional_argument(error, 2)
+        fields = dict(_native_error_pairs(error, 3))
+        sources = tuple(
+            CrabwalkRustErrorSource(source_type, source_message)
+            for source_type, source_message in _native_error_pairs(error, 4)
+        )
         raise CrabwalkRustError(
             rust_type,
             rust_message,
             call_site=call_site,
+            variant=variant,
+            fields=fields,
+            source_chain=sources,
         ) from error
 
     if _is_native_exception(error, native_module, NATIVE_BORROW_ERROR):
@@ -1620,6 +2201,30 @@ def _native_error_argument(error: BaseException, index: int, fallback: str) -> s
     return fallback
 
 
+def _native_error_optional_argument(error: BaseException, index: int) -> str | None:
+    if index < len(error.args) and isinstance(error.args[index], str):
+        return error.args[index]
+    return None
+
+
+def _native_error_pairs(
+    error: BaseException,
+    index: int,
+) -> tuple[tuple[str, str], ...]:
+    if index >= len(error.args) or not isinstance(error.args[index], (list, tuple)):
+        return ()
+    result: list[tuple[str, str]] = []
+    for value in error.args[index]:
+        if (
+            isinstance(value, (list, tuple))
+            and len(value) == 2
+            and isinstance(value[0], str)
+            and isinstance(value[1], str)
+        ):
+            result.append((value[0], value[1]))
+    return tuple(result)
+
+
 def _raise_move_error(
     parameter: str,
     value: _RustOwnedValue | None,
@@ -1627,7 +2232,7 @@ def _raise_move_error(
     parameter_site: str | None = None,
     call_site: str | None = None,
     cause: BaseException | None = None,
-) -> Any:
+) -> NoReturn:
     detail = f"{parameter} was moved" if parameter else "value was moved"
     definition_site = value._definition_site if value is not None else None
     move_site = value._move_site if value is not None else None
@@ -1655,7 +2260,7 @@ def _raise_move_error(
 def _raise_borrow_error(
     contexts: tuple[_BorrowContext, ...],
     value: _RustOwnedValue,
-) -> Any:
+) -> NoReturn:
     details = ["conflicting call-scoped Rust borrow"]
     details.append(f"value created at {value._definition_site}")
     details.extend(context.render() for context in contexts)

@@ -84,6 +84,14 @@ def total_team_score() -> rust.u64:
     return scores.values().copied().sum()
 
 
+# The same map type can be an explicit Python input boundary. Crabwalk validates
+# every key/value recursively and constructs one native HashMap for the call; this
+# is not a Python dictionary lookup hidden inside the compiled body.
+@rust.fn
+def supplied_team_score(scores: rust.HashMap[rust.String, rust.u64]) -> rust.u64:
+    return scores.values().copied().sum()
+
+
 @rust.fn
 def blue_team_score() -> rust.u64:
     scores: rust.HashMap[rust.String, rust.u64] = rust.HashMap()

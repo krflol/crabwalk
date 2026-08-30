@@ -4,10 +4,74 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-30
+
+### Added
+
+- `crabwalk.build_backend` is a metadata-aware PEP 517 backend. It builds
+  deterministic sdists and CPython wheels, merges static PEP 621 metadata,
+  dependencies/extras, scripts and entry points, readme/license/package data, and
+  embeds one verified extension per configured regular or namespace package.
+- Runtime, generated-wrapper, manifest, IR, and codegen identities are separated.
+  Application wheels depend on a compatible 1.1 runtime line and retain the exact
+  generator version as provenance instead of requiring every patch rebuild.
+- Recursive domain codecs now support domain leaves inside `Vec`, `Option`, and
+  tuples; explicit `HashMap` mapping input and owned domain/vector returns complete
+  structured application boundaries. The native bulk extractor builds 100k nested
+  rows in one crossing with phase/cardinality/allocation/clone telemetry.
+- `rust.TextColumn` packs immutable UTF-8 rows as bytes plus offsets, and
+  `rust.Shared[T]` exposes immutable `Arc<T>` handles only for compiler-approved
+  `Send + Sync` payloads. Shared handles are readable across Python/Rayon threads
+  and retain compilation identity across reload/GC.
+- Typed `@rust.python_adapter`, `rust.extern_type`, `@rust.extern`, and
+  `@rust.extern_method` contracts cover synchronous Python calls and multi-step
+  Cargo builder/method/callback/error APIs without inferred intermediate values.
+- `@rust.error` and `rust.from_error(...)` declare structured native application
+  errors and explicit Rust `From` conversions used by `rust.try_`. Exported
+  failures now retain their variant, displayable fields, and typed cause chain on
+  `CrabwalkRustError`.
+- Traits now support typed arguments, mutable/owned receivers, method generics and
+  associated outputs; the finite operator surface includes subtraction and other
+  arithmetic traits; explicit closure contracts describe call trait, move capture,
+  and block-like expression bodies.
+- Native ETL support now includes `PathBuf`, buffered read/write, checked casts,
+  `isize`, slices/chunks/windows, ordered maps/sets, sorting/deduplication, UTF-8
+  bytes, and bounded numeric formatting. A complete parse/validate/group/sort/
+  format/emit workload runs inside one native call.
+- `compile_source` accepts content-addressed virtual multi-module packages and can
+  terminate an active Cargo process tree. Package binding resolves declaration
+  cycles to a fixed point and supports static `import *`/`__all__` semantics.
+- Developer tooling adds versioned JSON diagnostics, `check --watch`, `explain`, a
+  bounded stdio diagnostic LSP, and deterministic `export-rust` extraction.
+- The distribution is PEP 561 typed (`py.typed`); mypy now covers 47 core source
+  modules and Pyright checks the public consumer surface. Semantic Rust type
+  spelling is extracted into a backend renderer.
+- Release gates add pinned Miri safety models and versioned cold/warm 10/1k/100k
+  timing, retained-RSS, crossing, and clone budgets whose report ships with the
+  release inventory.
+- The Rust Book Chapter 9 example now follows the real file-I/O `?` path while
+  demonstrating the Book's `From` conversion semantics instead of documenting an
+  identical-error-type limitation.
+
 ### Changed
 
-- Post-release development builds identify themselves as `1.0.11.dev0`, keeping
-  `main` distinct from the immutable 1.0.10 artifacts.
+- Native fingerprints hash canonical build-relevant Crabwalk configuration rather
+  than unrelated PEP 621 metadata or comments. Installed-wheel source integrity
+  remains a separate complete source identity.
+- Exported functions accept positional/keyword arguments and lossless literal
+  defaults. Compiler-owned local/type identities, pattern captures, and Rust type
+  rendering remain distinct from source spellings.
+- Cargo cancellation is now process-tree terminating on Windows and POSIX rather
+  than phase-cooperative only. Progress continues to use the interactive TUI or
+  stable redirected phase lines.
+
+### Fixed
+
+- Iterator reductions now emit an explicit sum output type, including after reload
+  or when surrounding expressions remove rustc's contextual inference.
+- Ownership extraction remains failure-atomic for multi-argument calls, recursive
+  boundary representations remain injective, and structured native exceptions
+  preserve typed move/panic/Result details instead of message-prefix parsing.
 
 ## [1.0.10] - 2026-08-29
 

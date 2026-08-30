@@ -78,9 +78,16 @@ def builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
         "pop",
         "reserve",
         "split_at_mut_sum",
+        "sort",
+        "sort_unstable",
+        "sort_by_key",
+        "sort_unstable_by_key",
+        "dedup",
+        "reverse",
+        "truncate",
     }:
         return "mutable"
-    if receiver == "HashMap" and method in {
+    if receiver in {"HashMap", "BTreeMap"} and method in {
         "insert",
         "remove",
         "get_mut",
@@ -88,8 +95,17 @@ def builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
         "add",
     }:
         return "mutable"
+    if receiver in {"HashSet", "BTreeSet"} and method in {
+        "insert",
+        "remove",
+    }:
+        return "mutable"
     if receiver == "String" and method == "push_str":
         return "mutable"
+    if receiver == "String" and method == "into_bytes":
+        return "owned"
+    if receiver == "Vec" and method == "into_utf8":
+        return "owned"
     if receiver == "TcpStream" and method in {"write_get", "read_to_string"}:
         return "mutable"
     if receiver == "File" and method == "read_to_string":
@@ -138,6 +154,16 @@ def builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
         "err",
     }:
         return "owned"
-    if receiver in {"HashMap", "Vec"} and method == "into_iter":
+    if (
+        receiver
+        in {
+            "HashMap",
+            "BTreeMap",
+            "HashSet",
+            "BTreeSet",
+            "Vec",
+        }
+        and method == "into_iter"
+    ):
         return "owned"
     return "shared"

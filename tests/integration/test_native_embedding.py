@@ -81,3 +81,65 @@ print(compiled.functions)
     }
     assert lines[3] == "1"
     assert lines[4] == "('normalize',)"
+
+
+@capability_contract("embedding.virtual-package", native=True)
+def test_virtual_package_compiles_cross_module_calls_without_execution(
+    tmp_path: Path,
+) -> None:
+    runner = tmp_path / "run_virtual_embedding.py"
+    sentinel = tmp_path / "virtual-executed.txt"
+    sources = {
+        "__init__.py": (
+            f"from pathlib import Path\n"
+            f"Path({str(sentinel)!r}).write_text('executed')\n"
+            "from .kernel import triple\n"
+        ),
+        "kernel.py": """\
+from crabwalk import rust
+from .support import add_one
+
+@rust.fn
+def triple(value: rust.u64) -> rust.u64:
+    return add_one(value) * 3
+""",
+        "support.py": """\
+from crabwalk import rust
+
+@rust.fn
+def add_one(value: rust.u64) -> rust.u64:
+    return value + 1
+""",
+    }
+    runner.write_text(
+        f"""\
+from crabwalk import compile_source
+
+compiled = compile_source(
+    {sources!r},
+    module_name="virtual_recipe",
+    entry="kernel.py",
+    cache_directory={str(tmp_path / "cache")!r},
+)
+print(compiled.function("kernel.triple")(4))
+print({str(sentinel)!r})
+""",
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(root / "src")
+    environment["CRABWALK_PROGRESS"] = "never"
+    result = subprocess.run(
+        [sys.executable, "-u", str(runner)],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[0] == "15"
+    assert not sentinel.exists()

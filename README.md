@@ -96,10 +96,12 @@ The current compiler surface includes:
   `Vec`, `Option`, and `Result`, plus bounded `File`/`IoError` propagation;
 - locals, arithmetic, conditionals, loops, native calls, recursion, and semantic
   receiver/place capability checking;
-- one native extension per regular Python package, including imports/re-exports;
+- one native extension per regular or configured namespace package, including
+  fixed-point imports/re-exports and supported cyclic declaration graphs;
 - crates.io, path, and Git Cargo dependencies with persisted lock state;
 - `Owned`, `Ref`, and `Mut` handles with move/use-after-move and call-scoped
-  borrow enforcement;
+  borrow enforcement, plus immutable `Shared[T]`/`Arc<T>` handles for explicitly
+  shareable `Send + Sync` payloads;
 - Rust structs, unit/tuple/record enums, exhaustive `match`, and narrow derives;
 - general patterns and guards, inherent methods, trait objects, audited
   advanced/unsafe teaching intrinsics, a std-only future teaching executor, and a
@@ -108,8 +110,11 @@ The current compiler surface includes:
   errors, dispatch-aware typed effects, boundary-placement validation, and
   non-panicking worker teardown;
 - native Rayon iterators and an explicit `rust.async_call` Python async boundary;
-- verified artifact caching, inspection commands, and wheels with embedded native
-  extensions that need no Rust toolchain on the consumer machine.
+- checked recursive domain/container and `HashMap` boundaries, one-crossing
+  `TextColumn` storage, and phase/cardinality-aware boundary telemetry;
+- a metadata-aware PEP 517 application backend, verified artifact caching,
+  inspection/editor commands, and wheels with embedded native extensions that
+  need no Rust toolchain on the consumer machine.
 
 ## Requirements
 
@@ -136,10 +141,14 @@ For an editable checkout, replace the install command with
 ```text
 crabwalk expand PATH
 crabwalk check PATH [--locked] [--offline]
+crabwalk check PATH --watch
 crabwalk build PATH [--locked] [--offline]
 crabwalk inspect PATH [--json]
 crabwalk show PATH SYMBOL
 crabwalk wheel PACKAGE [--project PROJECT] --name DIST --version VERSION
+crabwalk explain CRAB_CODE [--json]
+crabwalk export-rust PATH DESTINATION
+crabwalk lsp
 crabwalk cache status PATH [--json]
 crabwalk cache prune [PROJECT] [--dry-run]
 ```
@@ -162,21 +171,19 @@ without importing or executing that Python module:
 ```python
 from crabwalk import compile_source
 
-compiled = compile_source(
-    editor_text,
-    filename="recipe.py",
-    progress=show_compile_phase,
-)
+compiled = compile_source(editor_text, filename="recipe.py", progress=show_compile_phase)
 transform = compiled.function("transform")
 ```
 
 `compile_source` stores a content-addressed UTF-8 snapshot for diagnostics and
 Cargo source maps, then binds `RustFunction` objects directly from the static IR
 and loaded extension. Top-level Python statements in the authored source are not
-executed. This is not a sandbox for Cargo dependencies, build scripts, proc macros,
-or linkers; apply an application-specific source/effect/crate policy before building
-untrusted input. Cancellation is cooperative between phases and cannot preempt an
-already-running Cargo process.
+executed. It also accepts a mapping of package-relative `.py` paths plus an `entry`
+for content-addressed multi-module embedding. This is not a sandbox for Cargo
+dependencies, build scripts, proc macros, or linkers; apply an application-specific
+source/effect/crate policy before building untrusted input. Cancellation is checked
+between phases and terminates an active Cargo process tree before returning
+`CRAB309`.
 
 When a `.py` file triggers an implicit first build, Crabwalk reports analysis,
 dependency, cache, Cargo, and extension-loading phases on stderr. Interactive
@@ -186,7 +193,8 @@ decorators bind symbols from that already-loaded result without replaying the
 meter. Set `CRABWALK_PROGRESS=never` to silence it (for example in CI), or
 `CRABWALK_PROGRESS=always` to force progress output.
 
-For bounded project discovery, a project may declare one or more regular packages:
+For bounded project discovery and PEP 517 packaging, a project may declare one or
+more regular or namespace packages:
 
 ```toml
 [tool.crabwalk]
@@ -197,6 +205,26 @@ extra-files = ["native/schema.proto"]
 extra-env = ["MY_NATIVE_MODE"]
 wheel-include = ["templates/**/*.html"]
 ```
+
+Applications can use Crabwalk as their build backend, preserving ordinary PEP 621
+metadata, dependencies, extras, entry points, package data, readme, and license
+files while embedding every configured native package:
+
+```toml
+[build-system]
+requires = ["crabwalk-lang>=1.1,<1.2"]
+build-backend = "crabwalk.build_backend"
+
+[project]
+name = "my-application"
+version = "1.0.0"
+dependencies = ["fastapi>=0.116"]
+```
+
+Then ordinary tooling works: `python -m build`, `pip wheel .`, and `pip install .`.
+Application wheels depend on the compatible 1.1 runtime line rather than an exact
+patch when the runtime ABI, generated-wrapper ABI, and manifest schema remain
+compatible.
 
 When exactly one package is configured, the project directory itself can be passed
 to build, inspection, and wheel commands. `--project PYPROJECT_OR_DIRECTORY`

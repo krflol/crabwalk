@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-22
+updated: 2026-08-30
 tags:
   - project/crabwalk
   - docs/ownership
@@ -43,6 +43,16 @@ Conversion errors name the failing element index and enforce exact primitive
 types/ranges before native construction. `Vec[u8]` is byte-oriented: construction
 accepts a checked byte sequence and `to_python()` returns Python `bytes`. Other
 supported vectors return a newly allocated Python list.
+
+The 1.1 bulk extractor accepts recursive shapes such as `Vec[Row]`,
+`Vec[Tuple[...]]`, `Vec[Option[T]]`, `Vec[Vec[T]]`, and nested domains from either
+compiled handles or checked Python mappings/sequences. It validates the complete
+shape in Python, then performs one native construction call rather than one PyO3
+call per row. `value.boundary_telemetry` reports validation/native time, modeled
+container/domain allocations, values, bytes copied, clones, and crossings;
+`function.call_with_telemetry(...)` returns the function result and the same
+phase-separated call record. These are explicit modeled boundary operations, not
+samples from the allocator.
 
 Construction is an explicit, allocating boundary proportional to the complete
 input shape; a native function's warm execution timing does not include that cost
@@ -124,11 +134,44 @@ All ownership arguments are validated before any `Owned` slot is taken. If a lat
 earlier valid handle remains live. Generated Rust repeats this preflight even though
 the Python wrapper normally provides the richer source-linked diagnostic first.
 
-Borrowed returns and retained Python-crossing lifetimes are rejected. Ownership
-handles are thread-affine: access from another Python thread raises
-`CrabwalkThreadError`, even when the underlying Rust type might implement `Send`.
-They are also excluded from `rust.async_call`. A future explicit `Send`/`Sync`
-surface may relax this only with matching lifecycle tests.
+Borrowed returns and retained Python-crossing lifetimes are rejected. Ordinary
+`Owned`/`Ref`/`Mut` handles are thread-affine: access from another Python thread
+raises `CrabwalkThreadError`. They are also excluded from `rust.async_call`.
+
+## Immutable shared handles
+
+`rust.Shared[T]` is the explicit exception to thread affinity. Calling `freeze()`
+on an eligible owned handle consumes it and returns a frozen Python handle backed
+by Rust `Arc<T>`; calling `freeze()` on that shared handle cheaply clones the Arc.
+Only compiler-proven immutable `Send + Sync` payloads are accepted. Mutation,
+`Rc`, `RefCell`, `Mut`, retained borrows, and other non-shareable shapes are
+rejected before rustc.
+
+```python
+@rust.fn
+def total(rows: rust.Shared[rust.Vec[Row]]) -> rust.u64:
+    return rows.par_iter().map(lambda row: row.value).sum()
+
+owned = rust.Vec[Row]([{"value": 1}, {"value": 2}])
+shared = owned.freeze()
+alias = shared.freeze()
+```
+
+The wrapper clones the Arc before an eligible GIL-detached call, so many Python
+threads and Rayon workers can read the same immutable allocation. The compilation
+fingerprint remains part of the handle identity; old handles survive reload/GC for
+old compiled functions and are rejected by a different compilation.
+
+## Owned UTF-8 text columns
+
+`rust.TextColumn(data, offsets)` packs many immutable strings into one owned
+`Vec[u8]` plus an offset table. Construction validates a zero start, monotonic
+in-range offsets, final byte length, and UTF-8 for every segment before crossing
+once into native storage. Native functions accept `Ref[TextColumn]`,
+`Owned[TextColumn]`, or `Shared[TextColumn]` and can use `len`, `get`,
+`contains_at`, and `total_bytes` without creating one Python string wrapper per
+row. `to_python()` deliberately returns `{"data": bytes, "offsets": list[int]}`
+so the packed representation remains observable.
 
 ## Structs
 
@@ -141,13 +184,13 @@ class User:
     name: rust.String
 ```
 
-Supported fields are primitives, `String`, recursively supported `Vec` or `Option`
-values whose leaves are boundary primitives, and directly nested domain values.
-Container-wrapped domain fields such as `Vec[Term]` and `Option[Term]` are not yet
-supported; use a direct nested domain, a top-level structured vector boundary, or
-parallel primitive vectors with an application-validated invariant. `Str` fields
-and ownership annotations are rejected because the required retained lifetime
-cannot be expressed. A generated struct marker creates a Rust-backed object:
+Supported fields are primitives, `String`, recursively supported `Vec`, `Option`,
+and tuple values, and nested generated structs/enums at any supported child
+position. For example, `Vec[Term]`, `Option[Metadata]`, and
+`Tuple[Term, Metadata]` may all be fields of one generated record. Direct recursive
+type cycles remain invalid Rust, and `Str` fields/ownership annotations are
+rejected because the required retained lifetime cannot be expressed. A generated
+struct marker creates a Rust-backed object:
 
 ```python
 user = User(id=42, name="Alice")
@@ -162,8 +205,9 @@ functions. For example, `User(id=True, name="Alice")` is rejected because a Pyth
 the matching output policy, including the `Vec[u8]` to `bytes` rule.
 
 Passing the object to a native function requires `rust.Ref[User]`,
-`rust.Mut[User]`, or `rust.Owned[User]`. Domain values are not implicitly copied
-through exported parameters or returns.
+`rust.Mut[User]`, `rust.Owned[User]`, or eligible immutable `rust.Shared[User]`.
+An exported factory can return `rust.Owned[User]`; the result is the same
+move-aware native handle, not an implicit dictionary copy.
 
 Domain declarations have a checked Python namespace contract. Fields cannot reuse
 owned-handle members such as `moved`, `rust_type`, `to_python`, or internal wrapper

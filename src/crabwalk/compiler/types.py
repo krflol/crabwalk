@@ -16,6 +16,7 @@ from typing import Literal
 class TypeKind(StrEnum):
     PRIMITIVE = "primitive"
     DOMAIN = "domain"
+    ERROR_DOMAIN = "error_domain"
     EXTERNAL = "external"
     GENERIC = "generic"
     LIFETIME_REFERENCE = "lifetime_reference"
@@ -38,6 +39,7 @@ _PRIMITIVE_NAMES = frozenset(
         "i32",
         "i64",
         "i128",
+        "isize",
         "u8",
         "u16",
         "u32",
@@ -59,6 +61,10 @@ _CONTAINER_ARITY: dict[str, int] = {
     "Closure": 2,
     "Future": 1,
     "HashMap": 2,
+    "HashSet": 1,
+    "BTreeMap": 2,
+    "BTreeSet": 1,
+    "Slice": 1,
     "Mutex": 1,
     "Option": 1,
     "Rc": 1,
@@ -144,6 +150,26 @@ class TypeRef(metaclass=_TypeRefMeta):
     __slots__ = ()
     kind: TypeKind
 
+    def __init__(
+        self,
+        rust_name: str,
+        arguments: tuple[TypeRef, ...] = (),
+        python_name: str | None = None,
+        const_value: int | None = None,
+        is_generic: bool = False,
+        is_lifetime: bool = False,
+    ) -> None:
+        """Describe the compatibility factory to static type checkers.
+
+        ``_TypeRefMeta.__call__`` handles direct ``TypeRef(...)`` construction and
+        returns one of the tagged variants before this initializer is reached.
+        Concrete dataclass variants generate their own initializers. Keeping the
+        public factory signature here makes that compatibility surface visible to
+        PEP 561 consumers.
+        """
+
+        del rust_name, arguments, python_name, const_value, is_generic, is_lifetime
+
     @property
     def rust_name(self) -> str:
         raise NotImplementedError
@@ -181,57 +207,11 @@ class TypeRef(metaclass=_TypeRefMeta):
         )
 
     def render(self) -> str:
-        if isinstance(self, OwnershipType):
-            rendered = self.inner.render()
-            if self.ownership_kind == "Owned":
-                return rendered
-            if self.ownership_kind == "Ref":
-                return f"&{rendered}"
-            return f"&mut {rendered}"
-        if isinstance(self, LifetimeReferenceType):
-            rendered = "str" if self.target.rust_name == "Str" else self.target.render()
-            return f"&'{self.rendered_lifetime} {rendered}"
-        if isinstance(self, PrimitiveType) and self.name == "Str":
-            return "&str"
-        if isinstance(self, UnitType):
-            return "()"
-        if isinstance(self, TupleType):
-            values = ", ".join(value.render() for value in self.items)
-            return f"({values}{',' if len(self.items) == 1 else ''})"
-        if isinstance(self, ArrayType):
-            return f"[{self.item.render()}; {self.length}]"
-        if isinstance(self, DynamicTraitType):
-            return f"dyn {self.trait_symbol}"
-        if isinstance(self, IteratorType):
-            item = self.exposed_item_type.render()
-            family = "ParallelIterator" if self.execution == "parallel" else "Iterator"
-            return f"{family}<Item = {item}>"
-        concrete_paths = {
-            "TcpListener": "std::net::TcpListener",
-            "TcpStream": "std::net::TcpStream",
-            "ThreadPool": "__CwThreadPool",
-            "File": "std::fs::File",
-            "IoError": "std::io::Error",
-        }
-        if self.rust_name == "Buffer":
-            return f"__CwBuffer<'_, {self.arguments[0].render()}>"
-        if self.rust_name in concrete_paths:
-            return concrete_paths[self.rust_name]
-        standard_paths = {
-            "Arc": "std::sync::Arc",
-            "HashMap": "std::collections::HashMap",
-            "Mutex": "std::sync::Mutex",
-            "Rc": "std::rc::Rc",
-            "Receiver": "std::sync::mpsc::Receiver",
-            "RefCell": "std::cell::RefCell",
-            "Sender": "std::sync::mpsc::Sender",
-            "ThreadHandle": "std::thread::JoinHandle",
-        }
-        name = standard_paths.get(self.rust_name, self.rust_name)
-        if not self.arguments:
-            return name
-        values = ", ".join(value.render() for value in self.arguments)
-        return f"{name}<{values}>"
+        """Render through the Rust backend compatibility entry point."""
+
+        from .type_rendering import render_rust_type
+
+        return render_rust_type(self)
 
     def display(self) -> str:
         if isinstance(self, LifetimeReferenceType):
@@ -284,6 +264,7 @@ class TypeRef(metaclass=_TypeRefMeta):
             "i32",
             "i64",
             "i128",
+            "isize",
             "u8",
             "u16",
             "u32",
@@ -332,6 +313,33 @@ class DomainType(TypeRef):
     @property
     def python_name(self) -> str:
         return self.qualified_name
+
+    def with_arguments(self, arguments: tuple[TypeRef, ...]) -> TypeRef:
+        if arguments:
+            raise ValueError("domain types cannot carry type arguments")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class ErrorDomainType(TypeRef):
+    """A generated enum that implements Rust's structured error contract."""
+
+    symbol: str
+    qualified_name: str
+    kind: TypeKind = TypeKind.ERROR_DOMAIN
+
+    @property
+    def rust_name(self) -> str:
+        return self.symbol
+
+    @property
+    def python_name(self) -> str:
+        return self.qualified_name
+
+    def with_arguments(self, arguments: tuple[TypeRef, ...]) -> TypeRef:
+        if arguments:
+            raise ValueError("error domain types cannot carry type arguments")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,7 +421,7 @@ class LifetimeReferenceType(TypeRef):
 
 @dataclass(frozen=True, slots=True)
 class OwnershipType(TypeRef):
-    ownership_kind: Literal["Owned", "Ref", "Mut"]
+    ownership_kind: Literal["Owned", "Ref", "Mut", "Shared"]
     inner: TypeRef
     kind: TypeKind = TypeKind.OWNERSHIP
 
@@ -614,7 +622,7 @@ def _legacy_type_ref(
         if len(arguments) != 1 or python_name is None or const_value is not None:
             raise ValueError("LifetimeRef requires one target and one lifetime name")
         return LifetimeReferenceType(python_name, arguments[0])
-    if rust_name in {"Owned", "Ref", "Mut"}:
+    if rust_name in {"Owned", "Ref", "Mut", "Shared"}:
         if len(arguments) != 1 or python_name is not None or const_value is not None:
             raise ValueError(f"{rust_name} requires exactly one inner type")
         return OwnershipType(rust_name, arguments[0])  # type: ignore[arg-type]

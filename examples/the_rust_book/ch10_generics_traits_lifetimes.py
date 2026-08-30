@@ -38,6 +38,35 @@ def largest_character() -> rust.char:
     return largest(characters)
 
 
+# Rust Book source (trait methods with parameters):
+# https://doc.rust-lang.org/book/ch10-02-traits.html#defining-a-trait
+#
+# `trait_method` makes the complete Rust signature explicit. This method takes an
+# `&mut self` receiver and a typed argument; Crabwalk validates the implementation
+# contract before rustc emits the ordinary trait and impl blocks.
+Adjust = rust.trait(
+    "Adjust",
+    bump=rust.trait_method(rust.u64, rust.u64, receiver="mut"),
+)
+
+
+@rust.struct
+class Gauge:
+    value: rust.u64
+
+
+@rust.impl(Adjust, Gauge, name="bump")
+def bump_gauge(gauge: rust.Mut[Gauge], amount: rust.u64) -> rust.u64:
+    gauge.value = gauge.value + amount
+    return gauge.value
+
+
+@rust.fn
+def trait_argument_demo(start: rust.u64, amount: rust.u64) -> rust.u64:
+    gauge: Gauge = Gauge(value=start)
+    return rust.trait_call(Adjust, gauge, "bump", amount)
+
+
 # Rust Book source:
 # https://doc.rust-lang.org/book/ch10-03-lifetime-syntax.html#generic-lifetimes-in-functions
 #

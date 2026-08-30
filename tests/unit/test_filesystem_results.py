@@ -14,12 +14,16 @@ from crabwalk.diagnostics import CrabwalkCompilationError
 FILESYSTEM_RESULT_SOURCE = """\
 from crabwalk import CrabwalkRustError, rust
 
+@rust.error
+class UsernameError:
+    Io = rust.from_error(rust.IoError)
+
 @rust.fn
 def read_username_from_file(
     path: rust.Str,
-) -> rust.Result[rust.String, rust.IoError]:
-    username_file: rust.File = rust.try_(rust.File.open(path))
-    username: rust.String = rust.try_(username_file.read_to_string())
+) -> rust.Result[rust.String, UsernameError]:
+    username_file = rust.try_(rust.File.open(path))
+    username = rust.try_(username_file.read_to_string())
     return rust.Ok(username)
 """
 
@@ -36,15 +40,17 @@ def test_file_io_result_propagation_lowers_to_native_question_mark(
     rust_source = generated.rust_source
 
     assert Effect.BLOCKING in function.effects
-    assert "-> Result<String, std::io::Error>" in rust_source
+    assert re.search(r"-> Result<String, cw_type_", rust_source)
+    assert "impl std::convert::From<std::io::Error>" in rust_source
     assert re.search(
-        r"let mut username_file: std::fs::File = "
+        r"let mut username_file(?:\: std::fs::File)? = "
         r"std::fs::File::open\(path\)\?;",
         rust_source,
     )
     assert "std::io::Read::read_to_string(&mut username_file" in rust_source
     assert re.search(r"\.map\(\|_\| __cw_tmp_\d+_[0-9a-f]+\) \}\?;", rust_source)
-    assert '"rust.IoError", error.to_string()' in rust_source
+    assert "error.__cw_variant()" in rust_source
+    assert "error.__cw_sources()" in rust_source
     assert "std::fs::File::open(path).unwrap()" not in rust_source
     assert "read_to_string(&mut username_file" in rust_source
     assert "read_to_string(&mut username_file).unwrap()" not in rust_source

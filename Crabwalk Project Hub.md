@@ -5,9 +5,9 @@ aliases:
 type: project
 project: Crabwalk
 status: active
-phase: 1.0.11 development
+phase: 1.1.0 release
 created: 2026-08-21
-updated: 2026-08-29
+updated: 2026-08-30
 tags:
   - project/crabwalk
   - status/active
@@ -18,7 +18,9 @@ tags:
 > [!abstract] Current outcome
 > Crabwalk is a published Apache-2.0 compiler/runtime that lowers an explicit,
 > source-spanned Python subset into inspectable Rust and CPython extensions.
-> Version 1.0.10 is published; development on `main` identifies as 1.0.11.dev0.
+> Version 1.1.0 delivers the packaging, structured-boundary, sharing, interop,
+> ETL, tooling, and lifecycle tranche. Its immutable tag is the source of every
+> tested, attested, and published release artifact.
 
 ## Sources of truth
 
@@ -36,7 +38,7 @@ tags:
 
 ## Implemented release surface
 
-- package-wide static analysis and source-spanned schema-v23 IR;
+- package-wide static analysis and source-spanned schema-v26 IR/codegen-v43;
 - deterministic Rust, PyO3, Cargo, source-map, and mixed-wheel generation;
 - typed effects, dispatch propagation, boundary-placement validation, and explicit
   opaque external-crate calls;
@@ -46,9 +48,17 @@ tags:
 - persisted complete Cargo locks and content-addressed, integrity-checked artifacts;
 - coordinated build/prune/load locks, mapped-artifact leases, and uncertainty-aware
   cache accounting;
-- `Owned`, `Ref`, and `Mut` handles with move, borrow, reload, GC, and thread checks;
+- `Owned`, `Ref`, and `Mut` handles with move, borrow, reload, GC, and thread checks,
+  plus immutable `Shared[T]` Arc handles for approved `Send + Sync` payloads;
 - structs, enums, patterns, methods, traits, generics, Rayon, native async, focused
   unsafe demonstrations, TCP, and a finite thread pool;
+- recursive nested domains, checked `HashMap` input, bulk 100k-row construction,
+  `TextColumn`, explicit boundary telemetry, and owned domain returns;
+- metadata-aware PEP 517 wheel/sdist builds for multiple regular/namespace packages;
+- typed Python and Cargo adapters, structured application errors/`From`, richer
+  traits/generics/operators/closures, and a complete native ETL acceptance path;
+- non-executing virtual-package embedding, hard Cargo cancellation, JSON
+  diagnostics, watch, explain, LSP, and deterministic Rust export;
 - a source-linked adaptation of all 21 Rust Book chapters and end-to-end native
   integration tests;
 - CPython 3.11–3.14 validation across Windows, Linux, and macOS.
@@ -62,8 +72,9 @@ tags:
    invariants have focused positive and negative tests.
 4. Ruff, mypy, byte compilation, unit tests, generated Rust formatting/Clippy,
    clean artifact installs, and the complete native suite are release gates.
-5. Every exact release tag reruns the nine-job Windows/Linux/macOS and Python
-   3.11-3.14 matrix before Trusted Publishing can reach PyPI.
+5. Every exact release tag reruns the complete Windows/Linux/macOS, Python
+   3.11–3.14, quality, Miri, and performance gates before Trusted Publishing can
+   reach PyPI.
 
 ## Guardrails
 
@@ -79,10 +90,10 @@ tags:
 
 ## Next architectural milestone
 
-Prioritize a real PEP 517 packaging backend that merges ordinary Python metadata,
-dependencies, entry points, package data, and Crabwalk's prebuilt native artifact.
-Continue extracting the semantic lowering and Rust-emission passes while replacing
-remaining string-based native error translation with structured exceptions.
+After 1.1.0, stabilize adoption rather than immediately expanding syntax: add PEP
+660 application-editable support, deepen editor services beyond diagnostics,
+continue extracting the stateful frontend/cross-boundary runtime, and use real
+application telemetry to tune bulk construction and output representations.
 
 Writable or strided buffers, retained cross-call borrows, general async runtimes,
 arbitrary FFI, and free-threaded CPython remain deferred until their ownership and

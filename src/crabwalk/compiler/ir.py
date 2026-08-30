@@ -89,6 +89,7 @@ class EnumVariantIR:
     tuple_style: bool
     span: SourceSpan
     binding: BindingIR | None = None
+    from_source: TypeRef | None = None
 
     @property
     def rust_name(self) -> str:
@@ -104,6 +105,7 @@ class EnumIR:
     derives: tuple[tuple[str, ...], ...]
     span: SourceSpan
     symbol_id: SymbolId | None = None
+    is_error: bool = False
 
     @property
     def qualified_name(self) -> str:
@@ -111,6 +113,8 @@ class EnumIR:
 
     @property
     def type_ref(self) -> TypeRef:
+        if self.is_error:
+            return _types.ErrorDomainType(self.symbol, self.qualified_name)
         return _types.DomainType(self.symbol, self.qualified_name)
 
 
@@ -119,6 +123,9 @@ class TraitMethodIR:
     name: str
     return_type: TypeRef
     span: SourceSpan
+    parameter_types: tuple[TypeRef, ...] = ()
+    receiver_ownership: Literal["Ref", "Mut", "Owned"] = "Ref"
+    type_parameters: tuple["TypeParameterIR", ...] = ()
     binding: BindingIR | None = None
 
     @property
@@ -151,6 +158,8 @@ class ParameterIR:
     span: SourceSpan
     mutable: bool = False
     binding: BindingIR | None = None
+    has_default: bool = False
+    default_value: object | None = None
 
     @property
     def rust_name(self) -> str:
@@ -305,6 +314,11 @@ class ConstructorIR:
         "String",
         "Vec",
         "HashMap",
+        "HashSet",
+        "BTreeMap",
+        "BTreeSet",
+        "PathBuf",
+        "CheckedCast",
         "Box",
         "Rc",
         "RefCell",
@@ -387,6 +401,8 @@ class TraitCallIR:
     type_ref: TypeRef
     span: SourceSpan
     target_symbol: str | None = None
+    arguments: tuple["ExpressionIR", ...] = ()
+    required_receiver: Literal["shared", "mutable", "owned"] = "shared"
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,6 +464,9 @@ class ClosureIR:
     second_parameter: str | None = None
     second_parameter_type: TypeRef | None = None
     second_parameter_binding: BindingIR | None = None
+    prefix: tuple["ExpressionIR", ...] = ()
+    capture_mode: Literal["borrow", "move"] = "borrow"
+    call_trait: Literal["inferred", "Fn", "FnMut", "FnOnce"] = "inferred"
 
     @property
     def rust_parameter(self) -> str | None:
