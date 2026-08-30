@@ -217,7 +217,11 @@ def _run_command(
             check=False,
         )
 
-    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    creationflags = (
+        int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        if os.name == "nt"
+        else 0
+    )
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
