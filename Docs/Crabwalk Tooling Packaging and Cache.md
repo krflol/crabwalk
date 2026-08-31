@@ -65,12 +65,14 @@ The cache key includes:
 - a canonical hash of native-relevant `[tool.crabwalk]` settings (packages,
   boundary policy, source lock policy, extra files, and extra environment);
 - Crabwalk implementation, IR, codegen, and fingerprint schema versions;
-- CPython implementation/version/extension ABI;
+- CPython implementation/version/extension ABI plus resolved executable, prefix,
+  and base-prefix identity;
 - project-resolved rustc/Cargo executable and toolchain-selector state;
 - the complete generated dependency specification, including the mandatory pinned
   PyO3 package, `extension-module` feature, macOS link-config build dependency,
   and internal alias;
-- Cargo lock content and complete regular-file path-dependency trees;
+- Cargo lock content and complete regular-file path-dependency trees; `.git`,
+  `.crabwalk`, and Cargo `target` directories are pruned before traversal;
 - release profile, overflow policy, and forced unwind panic strategy;
 - Cargo configuration content;
 - hashed build-affecting environment variables, including target, flags, wrappers,
@@ -90,6 +92,21 @@ interprocess lock. Artifact publication and metadata writes are atomic.
 Generated inputs are not rewritten when their bytes are unchanged, preserving
 mtimes so Cargo validation does not trigger a needless relink or mapped-DLL
 replacement.
+
+Cargo incremental state is separated from artifact identity. Crabwalk derives a
+target identity from the effective Python installation, Rust/Cargo toolchain,
+dependency specification, build environment, Cargo configuration, and release
+policy. On POSIX it lives beneath `.crabwalk/target/<identity>` and generated Cargo
+projects remain beneath `.crabwalk/generated`. On Windows, both linker-facing path
+dimensions use deterministic short roots:
+`%TEMP%/cw-targets/<project>-<identity>` and
+`%TEMP%/cw-projects/<project>-<kind>-<identity>` for generated builds and dependency
+lock bootstraps. This avoids MSVC failures caused by either a deep target or a deep
+embedding snapshot/generated-project root. Set
+`CRABWALK_CARGO_TARGET_ROOT` and `CRABWALK_CARGO_PROJECT_ROOT` to short writable
+roots when host policy requires specific locations; both settings participate in
+build identity. Every created target root receives Cargo's standard `CACHEDIR.TAG`
+signature and explanatory marker.
 
 Every external artifact hit still invokes Cargo, allowing its dependency,
 build-script, and incremental rules to validate inputs. Crabwalk's

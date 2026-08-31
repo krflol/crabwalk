@@ -36,6 +36,7 @@ def has_rust_fn_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
             and is_rust_attribute(item.func)
             and item.func.attr
             in {
+                "fn",
                 "generic",
                 "method",
                 "impl",

@@ -56,6 +56,11 @@ BUFFER_ELEMENTS = frozenset(
     }
 )
 
+# PyO3 0.29 implements direct Python tuple extraction/conversion through arity 12.
+# Larger semantic Rust tuples remain valid inside native code; only a direct Python
+# ABI position is bounded here.
+PYO3_TUPLE_MAX_ARITY = 12
+
 
 class BoundaryPosition(StrEnum):
     TOP_LEVEL = "top_level"
@@ -233,6 +238,18 @@ def boundary_shape(
     return _UNSUPPORTED_SHAPE
 
 
+def unsupported_python_tuple_arity(type_ref: TypeRef) -> int | None:
+    """Return the first tuple arity that PyO3 cannot convert recursively."""
+
+    if type_ref.rust_name == "Tuple" and len(type_ref.arguments) > PYO3_TUPLE_MAX_ARITY:
+        return len(type_ref.arguments)
+    for argument in type_ref.arguments:
+        unsupported = unsupported_python_tuple_arity(argument)
+        if unsupported is not None:
+            return unsupported
+    return None
+
+
 def _lossless_option_child(type_ref: TypeRef) -> bool:
     child = boundary_shape(type_ref, position=BoundaryPosition.NESTED)
     return child.injective and not child.can_equal_none
@@ -348,7 +365,7 @@ def python_parameter_boundary_supported(
             position=BoundaryPosition.NESTED,
         )
     if type_ref.rust_name == "Tuple" and type_ref.arguments:
-        return all(
+        return len(type_ref.arguments) <= PYO3_TUPLE_MAX_ARITY and all(
             python_parameter_boundary_supported(
                 value,
                 position=BoundaryPosition.NESTED,
@@ -368,16 +385,21 @@ def python_return_boundary_supported(
     *,
     error_symbols: set[str] | frozenset[str] = frozenset(),
 ) -> bool:
-    return boundary_shape(
-        type_ref,
-        position=BoundaryPosition.TOP_LEVEL,
-        error_symbols=error_symbols,
-    ).output_supported
+    return (
+        unsupported_python_tuple_arity(type_ref) is None
+        and boundary_shape(
+            type_ref,
+            position=BoundaryPosition.TOP_LEVEL,
+            error_symbols=error_symbols,
+        ).output_supported
+    )
 
 
 def python_mapping_key_supported(type_ref: TypeRef) -> bool:
     """Whether a native value has a hashable, injective Python key form."""
 
+    if unsupported_python_tuple_arity(type_ref) is not None:
+        return False
     shape = boundary_shape(type_ref, position=BoundaryPosition.NESTED)
     return shape.output_supported and shape.hashable and shape.injective
 

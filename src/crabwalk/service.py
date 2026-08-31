@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sysconfig
+import tempfile
 import threading
 import warnings
 from collections.abc import Callable
@@ -28,7 +29,7 @@ from crabwalk.build.cache import (
     write_text,
 )
 from crabwalk.build.cargo import CargoBuildCancelled, CargoBuildFailure, CargoBuilder
-from crabwalk.build.fingerprint import build_fingerprint
+from crabwalk.build.fingerprint import build_fingerprint, build_target_identity
 from crabwalk.build.loader import load_extension
 from crabwalk.compiler.cargo_emission import cargo_dependency_specification
 from crabwalk.compiler.codegen import GeneratedProject, generate_project
@@ -103,6 +104,7 @@ class CompilationService:
         locked: bool = False,
         offline: bool = False,
         project: str | Path | None = None,
+        source_root: str | Path | None = None,
         progress: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> CompilationResult:
@@ -118,6 +120,7 @@ class CompilationService:
                     locked=locked,
                     offline=offline,
                     project=project,
+                    source_root=source_root,
                     progress=progress,
                     cancelled=cancelled,
                 )
@@ -149,6 +152,7 @@ class CompilationService:
         locked: bool = False,
         offline: bool = False,
         project: str | Path | None = None,
+        source_root: str | Path | None = None,
         progress: Callable[[str], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
     ) -> CompilationResult:
@@ -161,7 +165,11 @@ class CompilationService:
             if config is not None
             else requested_path
         )
-        ir = analyze_project_path(source_path, module_name)
+        ir = analyze_project_path(
+            source_path,
+            module_name,
+            crate_source_root=source_root,
+        )
         if config is not None and config.python_boundaries == "deny":
             boundary = next(
                 (function for function in ir.functions if function.python_boundary),
@@ -239,10 +247,13 @@ class CompilationService:
             extension_name,
             cargo_package_identity=cargo_package_identity,
         )
-        generated_dir = (
-            state_root / "generated" / _safe_component(ir.module_name) / fingerprint
+        generated_dir = _cargo_generated_directory(
+            state_root,
+            ir.module_name,
+            fingerprint,
         )
-        target_dir = state_root / "target"
+        target_dir = _cargo_target_directory(state_root, inputs)
+        _validate_windows_cargo_paths(ir, generated_dir, target_dir)
         lock_path = state_root / "locks" / f"{fingerprint}.lock"
         dependency_guard_path = _dependency_unit_lock(state_root, dependency_lock)
         suffix = sysconfig.get_config_var("EXT_SUFFIX")
@@ -442,11 +453,16 @@ class CompilationService:
         cancelled: Callable[[], bool] | None,
     ) -> None:
         manifest_key = _dependency_manifest_key(ir)
-        bootstrap_dir = (
-            state_root
-            / "lock-bootstrap"
-            / _safe_component(ir.module_name)
-            / manifest_key
+        bootstrap_dir = _cargo_lock_bootstrap_directory(
+            state_root,
+            ir.module_name,
+            manifest_key,
+        )
+        _validate_windows_cargo_path(
+            ir,
+            "dependency lock bootstrap",
+            bootstrap_dir,
+            "CRABWALK_CARGO_PROJECT_ROOT",
         )
         lock_path = _dependency_unit_lock(state_root, destination)
         with FileLock(lock_path):
@@ -643,6 +659,124 @@ def _dependency_unit_lock(state_root: Path, dependency_lock: Path) -> Path:
         str(dependency_lock.resolve()).encode("utf-8")
     ).hexdigest()
     return state_root / "locks" / f"dependency-unit-{identity}.lock"
+
+
+def _cargo_target_directory(
+    state_root: Path,
+    inputs: dict[str, object],
+    *,
+    windows: bool | None = None,
+) -> Path:
+    """Choose a short target directory isolated by build compatibility.
+
+    PyO3 bakes interpreter configuration into compiled artifacts.  Sharing one
+    Cargo target between otherwise-identical Python installations can therefore
+    make Cargo report a fresh artifact that belongs to the wrong interpreter.
+    The compatibility identity prevents that reuse while retaining incremental
+    dependency builds between source fingerprints in the same environment.
+    """
+
+    is_windows = os.name == "nt" if windows is None else windows
+    build_identity = build_target_identity(inputs)[:16]
+    if not is_windows:
+        return state_root / "target" / build_identity
+
+    project_identity = _state_root_identity(state_root)
+    configured_root = os.environ.get("CRABWALK_CARGO_TARGET_ROOT")
+    target_root = (
+        Path(configured_root).expanduser().resolve()
+        if configured_root
+        else Path(tempfile.gettempdir()).resolve() / "cw-targets"
+    )
+    return target_root / f"{project_identity}-{build_identity}"
+
+
+def _cargo_generated_directory(
+    state_root: Path,
+    module_name: str,
+    fingerprint: str,
+    *,
+    windows: bool | None = None,
+) -> Path:
+    """Place generated Cargo projects below a linker-safe root on Windows."""
+
+    is_windows = os.name == "nt" if windows is None else windows
+    if not is_windows:
+        return state_root / "generated" / _safe_component(module_name) / fingerprint
+
+    project_root = _windows_cargo_project_root()
+    identity = _state_root_identity(state_root)
+    return project_root / f"{identity}-gen-{fingerprint[:20]}"
+
+
+def _cargo_lock_bootstrap_directory(
+    state_root: Path,
+    module_name: str,
+    manifest_key: str,
+    *,
+    windows: bool | None = None,
+) -> Path:
+    """Choose a linker-safe Cargo project for dependency-lock resolution."""
+
+    is_windows = os.name == "nt" if windows is None else windows
+    if not is_windows:
+        return (
+            state_root / "lock-bootstrap" / _safe_component(module_name) / manifest_key
+        )
+    identity = _state_root_identity(state_root)
+    module_identity = hashlib.sha256(module_name.encode("utf-8")).hexdigest()[:8]
+    return (
+        _windows_cargo_project_root()
+        / f"{identity}-lock-{module_identity}-{manifest_key[:16]}"
+    )
+
+
+def _windows_cargo_project_root() -> Path:
+    configured_root = os.environ.get("CRABWALK_CARGO_PROJECT_ROOT")
+    return (
+        Path(configured_root).expanduser().resolve()
+        if configured_root
+        else Path(tempfile.gettempdir()).resolve() / "cw-projects"
+    )
+
+
+def _state_root_identity(state_root: Path) -> str:
+    root_text = str(state_root.resolve()).casefold()
+    return hashlib.sha256(root_text.encode("utf-8")).hexdigest()[:12]
+
+
+def _validate_windows_cargo_paths(
+    ir: PackageIR,
+    generated_dir: Path,
+    target_dir: Path,
+) -> None:
+    if os.name != "nt":
+        return
+    limits = (
+        ("generated project", generated_dir, "CRABWALK_CARGO_PROJECT_ROOT"),
+        ("target", target_dir, "CRABWALK_CARGO_TARGET_ROOT"),
+    )
+    for label, path, setting in limits:
+        _validate_windows_cargo_path(ir, label, path, setting)
+
+
+def _validate_windows_cargo_path(
+    ir: PackageIR,
+    label: str,
+    path: Path,
+    setting: str,
+) -> None:
+    if os.name != "nt" or len(str(path)) <= 110:
+        return
+    raise CrabwalkCompilationError(
+        Diagnostic(
+            "CRAB310",
+            "Cargo build path is too deep for reliable MSVC linking",
+            f"Resolved {label} root has {len(str(path))} characters: {path}",
+            _primary_span(ir),
+            f"Set {setting} to a short writable directory.",
+        )
+    )
 
 
 def _safe_component(value: str) -> str:

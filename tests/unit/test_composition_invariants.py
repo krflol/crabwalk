@@ -25,6 +25,50 @@ from crabwalk.compiler.types import (
 from crabwalk.diagnostics import CrabwalkCompilationError
 
 
+def test_python_tuple_boundary_rejects_arity_above_pyo3_limit(
+    tmp_path: Path,
+) -> None:
+    twelve_types = ", ".join("rust.u64" for _ in range(12))
+    twelve_values = ", ".join(str(value) for value in range(12))
+    supported = tmp_path / "supported_tuple.py"
+    supported.write_text(
+        f"""\
+from crabwalk import rust
+
+@rust.fn
+def values() -> rust.Tuple[{twelve_types}]:
+    return ({twelve_values})
+""",
+        encoding="utf-8",
+    )
+    assert len(analyze_path(supported).functions[0].return_type.arguments) == 12
+
+    thirteen_types = ", ".join("rust.u64" for _ in range(13))
+    declarations = (
+        f"""\
+@rust.fn
+def invalid() -> rust.Result[rust.Tuple[{thirteen_types}], rust.String]:
+    raise RuntimeError("signature should fail first")
+""",
+        f"""\
+@rust.fn
+def invalid(value: rust.Tuple[{thirteen_types}]) -> rust.u64:
+    return 0
+""",
+    )
+    for index, declaration in enumerate(declarations):
+        rejected = tmp_path / f"rejected_tuple_{index}.py"
+        rejected.write_text(
+            "from crabwalk import rust\n\n" + declaration,
+            encoding="utf-8",
+        )
+        with pytest.raises(CrabwalkCompilationError) as captured:
+            analyze_path(rejected)
+        diagnostic = captured.value.diagnostics[0]
+        assert diagnostic.code == "CRAB237"
+        assert "13-item tuple" in diagnostic.message
+
+
 def test_anonymous_iterator_and_future_locals_use_rust_inference(
     tmp_path: Path,
 ) -> None:

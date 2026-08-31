@@ -37,6 +37,7 @@ from .abi import (
     python_return_boundary_supported as _python_return_boundary_supported,
     shareable_handle_type_supported as _shareable_handle_type_supported,
     struct_field_type_supported as _struct_field_type_supported,
+    unsupported_python_tuple_arity as _unsupported_python_tuple_arity,
 )
 from .declarations import (
     DeclarationIndex,
@@ -165,7 +166,7 @@ from .types import (
 )
 
 _ANALYSIS_CACHE_LIMIT = 64
-_analysis_cache: OrderedDict[tuple[str, str, str], PackageIR] = OrderedDict()
+_analysis_cache: OrderedDict[tuple[str, str, str, str], PackageIR] = OrderedDict()
 _analysis_cache_lock = threading.Lock()
 
 _PRIMITIVES = {
@@ -227,7 +228,12 @@ _GENERIC_ARITY = {
 }
 
 
-def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
+def analyze_path(
+    path: str | Path,
+    module_name: str | None = None,
+    *,
+    crate_source_root: str | Path | None = None,
+) -> PackageIR:
     """Analyze one Python module without importing or executing it."""
 
     parsed = parse_source(path)
@@ -277,7 +283,12 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
             )
         )
 
-    discovered_crates = _discover_crates(tree, source_path)
+    crate_base = (
+        Path(crate_source_root).resolve()
+        if crate_source_root is not None
+        else source_path.parent
+    )
+    discovered_crates = _discover_crates(tree, source_path, crate_base=crate_base)
     crates = {
         local_name: replace(
             crate,
@@ -286,6 +297,23 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
         for local_name, crate in discovered_crates.items()
     }
     external_types = _discover_external_types(tree, source_path, crates)
+    external_traits = _discover_external_traits(
+        tree,
+        source_path,
+        identity,
+        crates,
+        {**type_variables, **external_types},
+    )
+    for name, external_trait in external_traits.items():
+        if name in traits:
+            _fail(
+                "CRAB191",
+                "Duplicate Rust trait declaration",
+                f"{name!r} is declared as both a local and external trait.",
+                source_path,
+                tree,
+            )
+        traits[name] = assign_trait_identity(external_trait)
     struct_placeholders = {
         node.name: _struct_placeholder(
             node,
@@ -386,7 +414,7 @@ def analyze_path(path: str | Path, module_name: str | None = None) -> PackageIR:
     source_graph = single_file_source_graph(source_path)
     return assign_package_identities(
         PackageIR(
-            schema_version=26,
+            schema_version=28,
             module_name=identity,
             source_path=str(source_path),
             source_hash=source_graph.compiler_input_hash,
@@ -674,6 +702,8 @@ def _bind_imported_modules(
 def analyze_project_path(
     path: str | Path,
     module_name: str | None = None,
+    *,
+    crate_source_root: str | Path | None = None,
 ) -> PackageIR:
     """Analyze a file, or its containing regular Python package, as one crate."""
 
@@ -694,11 +724,19 @@ def analyze_project_path(
             str(source_path),
             module_name or source_path.stem,
             source_identity,
+            str(Path(crate_source_root).resolve()) if crate_source_root else "",
         )
         cached = _cached_analysis(cache_key)
         if cached is not None:
             return cached
-        return _remember_analysis(cache_key, analyze_path(source_path, module_name))
+        return _remember_analysis(
+            cache_key,
+            analyze_path(
+                source_path,
+                module_name,
+                crate_source_root=crate_source_root,
+            ),
+        )
 
     package_name = _package_name_for_entry(
         package_root,
@@ -711,7 +749,12 @@ def analyze_project_path(
         source_path,
     )
     source_identity = source_graph.compiler_input_hash
-    cache_key = (str(package_root), package_name, source_identity)
+    cache_key = (
+        str(package_root),
+        package_name,
+        source_identity,
+        str(Path(crate_source_root).resolve()) if crate_source_root else "",
+    )
     cached = _cached_analysis(cache_key)
     if cached is not None:
         return replace(
@@ -720,11 +763,20 @@ def analyze_project_path(
         )
     return _remember_analysis(
         cache_key,
-        _analyze_regular_package(package_root, source_path, module_name),
+        _analyze_regular_package(
+            package_root,
+            source_path,
+            module_name,
+            crate_source_root=(
+                Path(crate_source_root).resolve()
+                if crate_source_root is not None
+                else None
+            ),
+        ),
     )
 
 
-def _cached_analysis(key: tuple[str, str, str]) -> PackageIR | None:
+def _cached_analysis(key: tuple[str, str, str, str]) -> PackageIR | None:
     with _analysis_cache_lock:
         result = _analysis_cache.get(key)
         if result is not None:
@@ -732,7 +784,7 @@ def _cached_analysis(key: tuple[str, str, str]) -> PackageIR | None:
         return result
 
 
-def _remember_analysis(key: tuple[str, str, str], result: PackageIR) -> PackageIR:
+def _remember_analysis(key: tuple[str, str, str, str], result: PackageIR) -> PackageIR:
     with _analysis_cache_lock:
         existing = _analysis_cache.setdefault(key, result)
         _analysis_cache.move_to_end(key)
@@ -768,6 +820,8 @@ def _analyze_regular_package(
     package_root: Path,
     entry_path: Path,
     requested_module_name: str | None,
+    *,
+    crate_source_root: Path | None = None,
 ) -> PackageIR:
     package_name = _package_name_for_entry(
         package_root,
@@ -818,7 +872,12 @@ def _analyze_regular_package(
                 isinstance(node, ast.FunctionDef) and _has_rust_async_fn_decorator(node)
             )
         ]
-        discovered_crates = _discover_crates(tree, source_path)
+        crate_base = (
+            crate_source_root / source_path.relative_to(package_root).parent
+            if crate_source_root is not None
+            else source_path.parent
+        )
+        discovered_crates = _discover_crates(tree, source_path, crate_base=crate_base)
         if (
             declarations
             or struct_nodes
@@ -862,6 +921,23 @@ def _analyze_regular_package(
             for local_name, crate in discovered_crates.items()
         }
         external_types = _discover_external_types(tree, source_path, crates)
+        external_traits = _discover_external_traits(
+            tree,
+            source_path,
+            name,
+            crates,
+            {**type_variables, **external_types},
+        )
+        for trait_name, external_trait in external_traits.items():
+            if trait_name in traits:
+                _fail(
+                    "CRAB191",
+                    "Duplicate Rust trait declaration",
+                    f"{trait_name!r} is declared as both a local and external trait.",
+                    source_path,
+                    tree,
+                )
+            traits[trait_name] = external_trait
         modules[name] = _PackageModule(
             name=name,
             path=source_path,
@@ -1142,7 +1218,7 @@ def _analyze_regular_package(
         source_paths.append(str(module.path))
     return assign_package_identities(
         PackageIR(
-            schema_version=26,
+            schema_version=28,
             module_name=package_name,
             source_path=str(package_root / "__init__.py"),
             source_hash=source_graph.compiler_input_hash,
@@ -1504,6 +1580,7 @@ class _FunctionLowerer(PatternLoweringMixin):
             method_for=self.signature.method_for,
             trait_symbol=self.signature.trait_symbol,
             operator_kind=self.signature.operator_kind,
+            release_gil=self.signature.release_gil,
         )
 
     def _declare_local(self, name: str, type_ref: TypeRef) -> None:
@@ -2748,6 +2825,7 @@ class _FunctionLowerer(PatternLoweringMixin):
         bound_arguments = tuple(cast(ast.expr, value) for value in ordered_nodes)
         substitutions: dict[str, TypeRef] = {}
         lowered_arguments: list[ExpressionIR] = []
+        resolved_parameter_types: list[TypeRef] = []
         for argument, parameter in zip(bound_arguments, signature.parameters):
             if signature.type_parameters:
                 pattern = parameter.type_ref.underlying
@@ -2790,8 +2868,10 @@ class _FunctionLowerer(PatternLoweringMixin):
                         resolved_parameter,
                     )
                 )
+                resolved_parameter_types.append(resolved_parameter)
             else:
                 parameter_type = parameter.type_ref
+                resolved_parameter_types.append(parameter_type)
                 if (
                     signature.external_path is not None
                     and parameter_type.rust_name == "Closure"
@@ -2847,6 +2927,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                 SourceSpan.from_ast(self.path, node),
                 signature.external_effects,
                 signature.name,
+                tuple(resolved_parameter_types),
             )
         return CallIR(
             signature.rust_symbol,
@@ -6279,7 +6360,10 @@ def _bind_signature_identity(
 ) -> _Signature:
     external_path = signature.external_path
     if external_path is not None and external_path[:1] == ("__python__",):
-        external_path = ("__python__", module_name, signature.name)
+        if len(external_path) == 2:
+            external_path = ("__python__", module_name, signature.name)
+        elif external_path[1] == "":
+            external_path = ("__python__", module_name, external_path[2])
     return replace(
         signature,
         module_name=module_name,
@@ -6334,6 +6418,7 @@ def _analyze_signature(
         crates or {},
     )
     decorator = node.decorator_list[0]
+    release_gil = _fn_release_gil_option(node, path)
     external_method = bool(
         isinstance(decorator, ast.Call)
         and isinstance(decorator.func, ast.Attribute)
@@ -6417,6 +6502,23 @@ def _analyze_signature(
                 "Function parameters cannot have the unit type.",
                 path,
                 node,
+            )
+        if (
+            (python_adapter or exported)
+            and parameter.type_ref.ownership is None
+            and (tuple_arity := _unsupported_python_tuple_arity(parameter.type_ref))
+            is not None
+        ):
+            _fail(
+                "CRAB237",
+                "Python tuple boundary exceeds the supported arity",
+                (
+                    f"{parameter.type_ref.display()} contains a {tuple_arity}-item "
+                    "tuple, but PyO3 0.29 converts tuples only through arity 12."
+                ),
+                path,
+                argument.annotation or argument,
+                "Use a generated domain type, nested smaller tuples, or at most 12 items.",
             )
         if python_adapter:
             if parameter.type_ref.ownership is not None or not (
@@ -6568,6 +6670,22 @@ def _analyze_signature(
                 ),
                 None,
             )
+            if (
+                trait is not None
+                and trait.external_path is not None
+                and isinstance(method_for, ExternalType)
+            ):
+                _fail(
+                    "CRAB190",
+                    "External trait implementation violates Rust orphan rules",
+                    (
+                        "An external trait may be implemented only for a local "
+                        "Crabwalk domain type."
+                    ),
+                    path,
+                    arguments.args[0],
+                    "Use a local @rust.struct wrapper around the external value.",
+                )
             declared = (
                 next(
                     (value for value in trait.methods if value.name == method_name),
@@ -6602,6 +6720,22 @@ def _analyze_signature(
         if node.returns is None
         else _annotation_type(node.returns, path, node, domain_types)
     )
+    if (
+        (python_adapter or exported)
+        and return_type.ownership is None
+        and (tuple_arity := _unsupported_python_tuple_arity(return_type)) is not None
+    ):
+        _fail(
+            "CRAB237",
+            "Python tuple boundary exceeds the supported arity",
+            (
+                f"{return_type.display()} contains a {tuple_arity}-item tuple, "
+                "but PyO3 0.29 converts tuples only through arity 12."
+            ),
+            path,
+            node.returns or node,
+            "Use a generated domain type, nested smaller tuples, or at most 12 items.",
+        )
     associated_signature_type = next(
         (
             parameter.type_ref
@@ -6773,7 +6907,49 @@ def _analyze_signature(
         operator_kind=operator_kind,
         external_path=external_path,
         external_effects=external_effects,
+        release_gil=release_gil,
     )
+
+
+def _fn_release_gil_option(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    path: Path,
+) -> bool:
+    decorator = node.decorator_list[0]
+    if not (
+        isinstance(decorator, ast.Call)
+        and isinstance(decorator.func, ast.Attribute)
+        and _is_rust_attribute(decorator.func)
+        and decorator.func.attr == "fn"
+    ):
+        return False
+    options = {value.arg: value for value in decorator.keywords if value.arg}
+    release = options.get("release_gil")
+    if (
+        decorator.args
+        or any(value.arg is None for value in decorator.keywords)
+        or set(options) - {"release_gil"}
+    ):
+        _fail(
+            "CRAB236",
+            "Invalid GIL-release policy",
+            "Use @rust.fn(release_gil=True) for an explicitly audited native call.",
+            path,
+            decorator,
+        )
+    if release is None:
+        return False
+    if not isinstance(release.value, ast.Constant) or not isinstance(
+        release.value.value, bool
+    ):
+        _fail(
+            "CRAB236",
+            "Invalid GIL-release policy",
+            "Use @rust.fn(release_gil=True) for an explicitly audited native call.",
+            path,
+            decorator,
+        )
+    return release.value.value
 
 
 def _annotation_type(
@@ -7182,6 +7358,7 @@ def _discover_traits(
                     )
                     if len(set(generic_names)) != len(generic_names) or any(
                         name not in (visible_type_variables or {})
+                        or not (visible_type_variables or {})[name].is_generic
                         or (visible_type_variables or {})[name].is_lifetime
                         for name in generic_names
                     ):
@@ -7216,9 +7393,7 @@ def _discover_traits(
                     )
                     for name in generic_names
                 )
-                method_visible_types = {
-                    name: (visible_type_variables or {})[name] for name in generic_names
-                }
+                method_visible_types = dict(visible_type_variables or {})
                 return_type = _annotation_type(
                     signature_node.args[0],
                     path,
@@ -7230,7 +7405,12 @@ def _discover_traits(
                     for value in signature_node.args[1:]
                 )
             else:
-                return_type = _annotation_type(option.value, path, option.value, {})
+                return_type = _annotation_type(
+                    option.value,
+                    path,
+                    option.value,
+                    visible_type_variables or {},
+                )
             if return_type.ownership is not None or return_type.rust_name in {
                 "Trait",
                 "Dyn",
@@ -7268,6 +7448,103 @@ def _discover_traits(
             tuple(methods),
             SourceSpan.from_ast(path, node),
         )
+    return traits
+
+
+def _discover_external_traits(
+    tree: ast.Module,
+    path: Path,
+    module_name: str,
+    crates: dict[str, CrateIR],
+    visible_types: dict[str, TypeRef],
+) -> dict[str, TraitIR]:
+    """Discover statically declared trait contracts owned by dependencies."""
+
+    traits: dict[str, TraitIR] = {}
+    for node in tree.body:
+        if not (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+            and _is_rust_call_named(node.value, "extern_trait")
+        ):
+            continue
+        binding = node.targets[0].id
+        _validate_source_binding(
+            binding,
+            path,
+            node.targets[0],
+            "external trait",
+            rust_namespace="type",
+        )
+        call = node.value
+        crate_path = _crate_path(call.args[0], crates) if len(call.args) == 1 else None
+        path_options = [value for value in call.keywords if value.arg == "path"]
+        method_options = [value for value in call.keywords if value.arg != "path"]
+        if (
+            crate_path is None
+            or len(crate_path) != 1
+            or len(path_options) != 1
+            or not method_options
+            or any(value.arg is None for value in method_options)
+            or not isinstance(path_options[0].value, ast.Constant)
+            or not isinstance(path_options[0].value.value, str)
+        ):
+            _fail(
+                "CRAB191",
+                "Invalid external Rust trait declaration",
+                (
+                    "Use Trait = rust.extern_trait(crate_name, path='module::Trait', "
+                    "method=rust.trait_method(...))."
+                ),
+                path,
+                call,
+            )
+        rust_path = tuple(path_options[0].value.value.split("::"))
+        if not rust_path or any(
+            not is_rust_2024_identifier(part) for part in rust_path
+        ):
+            _fail(
+                "CRAB191",
+                "Invalid external Rust trait path",
+                "Every component must be a static Rust identifier.",
+                path,
+                path_options[0].value,
+            )
+        external_path = (*crate_path, *rust_path)
+
+        # Reuse the ordinary trait-signature parser.  The synthetic declaration
+        # contains only compiler-owned syntax; method nodes retain their authored
+        # locations so diagnostics still point to the original contract.
+        synthetic_call = ast.copy_location(
+            ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="rust", ctx=ast.Load()),
+                    attr="trait",
+                    ctx=ast.Load(),
+                ),
+                args=[ast.Constant(binding)],
+                keywords=method_options,
+            ),
+            call,
+        )
+        synthetic = ast.copy_location(
+            ast.Assign(targets=node.targets, value=synthetic_call),
+            node,
+        )
+
+        def external_trait_symbol(_name: str) -> str:
+            return "::".join(external_path)
+
+        parsed = _discover_traits(
+            ast.Module(body=[synthetic], type_ignores=[]),
+            path,
+            module_name,
+            external_trait_symbol,
+            visible_types,
+        )[binding]
+        traits[binding] = replace(parsed, external_path=external_path)
     return traits
 
 
@@ -7328,7 +7605,7 @@ def _generic_type_parameters(
         isinstance(decorator, ast.Call)
         and isinstance(decorator.func, ast.Attribute)
         and _is_rust_attribute(decorator.func)
-        and decorator.func.attr in {"method", "impl", "operator", "extern_method"}
+        and decorator.func.attr in {"fn", "method", "impl", "operator", "extern_method"}
     ):
         return ()
     if not (
@@ -7710,6 +7987,7 @@ def _discover_external_types(
 
 
 _EXTERN_EFFECTS: dict[str, Effect] = {
+    "OpaqueCrateCall": Effect.OPAQUE_CRATE_CALL,
     "PythonRuntime": Effect.PYTHON_RUNTIME,
     "Blocking": Effect.BLOCKING,
     "ThreadSpawn": Effect.THREAD_SPAWN,
@@ -7736,16 +8014,57 @@ def _extern_decorator_metadata(
             )
         decorator = node.decorator_list[0]
         additional: tuple[Effect, ...] = ()
+        target_module = ""
+        target_name = node.name
         if isinstance(decorator, ast.Call):
             options = {value.arg: value for value in decorator.keywords if value.arg}
-            if decorator.args or set(options) - {"effects"}:
+            if decorator.args or set(options) - {"effects", "module", "name"}:
                 _fail(
                     "CRAB232",
                     "Invalid Python adapter declaration",
-                    "Use @rust.python_adapter or @rust.python_adapter(effects=[...]).",
+                    (
+                        "Use @rust.python_adapter or "
+                        "@rust.python_adapter(module='package.module', "
+                        "name='callable', effects=[...])."
+                    ),
                     path,
                     decorator,
                 )
+            module_option = options.get("module")
+            name_option = options.get("name")
+            if module_option is not None:
+                if not (
+                    isinstance(module_option.value, ast.Constant)
+                    and isinstance(module_option.value.value, str)
+                    and module_option.value.value
+                    and all(
+                        part.isidentifier() and not keyword.iskeyword(part)
+                        for part in module_option.value.value.split(".")
+                    )
+                ):
+                    _fail(
+                        "CRAB232",
+                        "Invalid Python adapter module",
+                        "module must be a literal dotted Python module name.",
+                        path,
+                        module_option.value,
+                    )
+                target_module = module_option.value.value
+            if name_option is not None:
+                if not (
+                    isinstance(name_option.value, ast.Constant)
+                    and isinstance(name_option.value.value, str)
+                    and name_option.value.value.isidentifier()
+                    and not keyword.iskeyword(name_option.value.value)
+                ):
+                    _fail(
+                        "CRAB232",
+                        "Invalid Python adapter callable",
+                        "name must be a literal Python identifier.",
+                        path,
+                        name_option.value,
+                    )
+                target_name = name_option.value.value
             effects_option = options.get("effects")
             if effects_option is not None:
                 effects_node = effects_option.value
@@ -7789,7 +8108,7 @@ def _extern_decorator_metadata(
                     values.append(effect)
                 additional = tuple(dict.fromkeys(values))
         return (
-            ("__python__", node.name),
+            ("__python__", target_module, target_name),
             tuple(
                 dict.fromkeys((Effect.PYTHON_RUNTIME, Effect.MAY_PANIC, *additional))
             ),
@@ -7917,7 +8236,12 @@ def _extern_decorator_metadata(
     return (*crate_path, *rust_path), effects
 
 
-def _discover_crates(tree: ast.Module, path: Path) -> dict[str, CrateIR]:
+def _discover_crates(
+    tree: ast.Module,
+    path: Path,
+    *,
+    crate_base: Path | None = None,
+) -> dict[str, CrateIR]:
     crates: dict[str, CrateIR] = {}
     for node in tree.body:
         if (
@@ -8014,7 +8338,7 @@ def _discover_crates(tree: ast.Module, path: Path) -> dict[str, CrateIR]:
                 node.value,
             )
         resolved_path = (
-            str((path.parent / crate_path).resolve())
+            str(((crate_base or path.parent) / crate_path).resolve())
             if isinstance(crate_path, str)
             else None
         )

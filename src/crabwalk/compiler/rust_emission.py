@@ -559,6 +559,19 @@ def _render_expression(
                 f"__cw_python_result.extract::<{expression.type_ref.render()}>() "
                 "})?"
             )
+        if expression.parameter_types is not None:
+            rendered_arguments = [
+                (
+                    f"&({rendered}).to_vec()"
+                    if parameter_type.underlying.rust_name == "Buffer"
+                    else rendered
+                )
+                for rendered, parameter_type in zip(
+                    rendered_arguments,
+                    expression.parameter_types,
+                    strict=True,
+                )
+            ]
         arguments = ", ".join(rendered_arguments)
         return f"{'::'.join(expression.path)}({arguments})"
     if isinstance(expression, ConstructorIR):
@@ -1041,7 +1054,11 @@ def _render_expression(
             ):
                 return f"{rendered_receiver}.reduce_with({rendered_arguments[0]})"
         arguments = ", ".join(rendered_arguments)
-        return f"{rendered_receiver}.{expression.method}({arguments})"
+        rendered_call = f"{rendered_receiver}.{expression.method}({arguments})"
+        reaches_python = expression.target_symbol in boundary_names or any(
+            target in boundary_names for target in expression.dispatch_targets
+        )
+        return f"{rendered_call}?" if reaches_python else rendered_call
     if isinstance(expression, TraitCallIR):
         if expression.required_receiver == "owned":
             receiver = _render_expression(

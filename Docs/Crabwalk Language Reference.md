@@ -29,7 +29,7 @@ xfail-only contract does not satisfy a maturity claim.
 |---|---|---|---|---|
 | Static compiler pipeline | Compositional | Source-spanned typed IR, validation, deterministic Rust/PyO3 emission | unit, native, package, diagnostic, and generated-Rust tests<br>Contracts: `compiler.package-native`, `compiler.generated-identities`, `compiler.pattern-identity` | an explicit Python subset; rustc remains authoritative |
 | Non-executing source embedding | Bounded | content-addressed single-source/virtual-package compilation and direct native callable binding | native cross-module non-execution, callable binding, and process cancellation tests<br>Contracts: `embedding.nonexecuting-source-callable`, `embedding.phase-cancellation`, `embedding.virtual-package` | Cargo dependencies remain a trusted build boundary; virtual mappings are regularized into immutable package snapshots |
-| Ownership boundary | Compositional | Owned/Ref/Mut plus immutable Shared, move state, borrows, reload and fingerprint identity | multi-argument, alias, reload, thread, domain, and vector tests<br>Contracts: `ownership.failure-atomic`, `ownership.reload-fingerprint`, `ownership.domain-schema`, `ownership.shared-send-sync` | ordinary handles are thread-affine; Shared is immutable Send + Sync only; no retained cross-call borrows |
+| Ownership boundary | Compositional | Owned/Ref/Mut plus immutable Shared, move state, borrows, reload and fingerprint identity | multi-argument, alias, reload, thread, domain, and vector tests<br>Contracts: `ownership.failure-atomic`, `ownership.reload-fingerprint`, `ownership.domain-schema`, `ownership.shared-send-sync`, `ownership.audited-gil-release` | ordinary handles are thread-affine; Shared is immutable Send + Sync only; no retained cross-call borrows |
 | Cargo build and cache | Production | locks, complete modeled fingerprints, hashing, leases, atomic publish, cancellation, and release budgets | dependency, corruption, replan, prune, race, cancellation, wheel, and versioned performance gates<br>Contracts: `cache.corruption-repair`, `cache.concurrent-publication`, `cache.prune-load-lease`, `build.hard-cancellation`, `build.performance-budgets` | trusted build scripts may require declared extra inputs |
 | Application packaging | Bounded | PEP 517 wheel/sdist metadata merging with regular, namespace, and multiple top-level packages | clean dependency-resolving install of a native multi-package wheel without a Rust toolchain<br>Contracts: `packaging.metadata-sdist`, `packaging.pep517-multi-package` | platform wheels remain CPython-specific and must be built per supported target |
 | Sequential iterators | Compositional | owned/shared items; map/filter/filter_map/fold/reduce/collect and queries | Copy, String, &str, tuple, domain, one- and three-stage native pipelines<br>Contracts: `iterator.copy-inline`, `iterator.string-inline`, `iterator.string-split-local`, `iterator.opaque-shadow`, `iterator.borrowed-for-loop`, `iterator.borrowed-for-loop-native`, `iterator.vec-consuming` | expression lambdas only; no retained iterator boundary |
@@ -41,9 +41,9 @@ xfail-only contract does not satisfy a maturity claim.
 | Native standard-library ETL | Bounded | checked casts, isize, slices/chunks/windows, ordered/hash collections, sorting, numeric formatting, UTF-8 bytes, PathBuf, and buffered I/O | native parse-validate-group-sort-format-emit application acceptance<br>Contracts: `etl.native-standard-library`, `etl.ordered-grouping` | finite UTF-8/path surface; no arbitrary filesystem traversal policy |
 | Native filesystem results | Proof | typed File::open and whole-file String reads with io::Error propagation | native success, open-error, and read-error Result propagation test<br>Contracts: `filesystem.result-propagation` | read-only whole-file teaching surface; no general path or filesystem API |
 | Structured native errors | Bounded | declared From conversions, custom error enums, fields, and cause chains | native file, parse, and validation errors through one application error<br>Contracts: `errors.from-structured`, `errors.undeclared-from-rejected` | error payloads are displayable scalar/string/io/error values; no arbitrary Error trait discovery |
-| Typed crate adapters | Bounded | external types/functions, borrow signatures, closures, declared effects | real path-crate value and generic callback native test<br>Contracts: `crate.typed-value`, `crate.typed-callback`, `crate.builder-method-error` | no trait/builder manifest generation or automatic crate API discovery |
-| Typed Python-call adapters | Bounded | static Python signatures, explicit effects, PyErr propagation, and checked return extraction | native success/exception/invalid-return plus closure-placement diagnostics<br>Contracts: `python-adapter.success-errors`, `python-adapter.invalid-placement` | synchronous calls only; rejected in native closures, methods, workers, and async helpers |
-| Traits, generics, operators | Bounded | per-parameter generic bounds; typed trait arguments; ref/mut/owned receivers; generic and associated outputs; arithmetic operators | focused lowering and native compositional conformance tests<br>Contracts: `traits.dynamic-dispatch`, `generics.concrete-export`, `traits.arguments-receivers-associated`, `closures.capture-contracts` | finite safe trait/operator surface; no unsafe traits or specialization |
+| Typed crate adapters | Bounded | external types/functions/traits, borrow signatures, closures, declared effects | real path-crate value, generic callback, buffer, and trait native tests<br>Contracts: `crate.typed-value`, `crate.typed-callback`, `crate.builder-method-error`, `crate.buffer-adapter` | no automatic crate API discovery or manifest generation |
+| Typed Python-call adapters | Bounded | static Python signatures, explicit effects, PyErr propagation, and checked return extraction | native success/exception/invalid-return plus closure-placement diagnostics<br>Contracts: `python-adapter.success-errors`, `python-adapter.explicit-target`, `python-adapter.method-placement`, `python-adapter.invalid-placement` | synchronous calls only; rejected in closures, trait/operator methods, workers, and async helpers |
+| Traits, generics, operators | Bounded | per-parameter generic bounds; typed trait arguments; ref/mut/owned receivers; generic and associated outputs; arithmetic operators | focused lowering and native compositional conformance tests<br>Contracts: `traits.dynamic-dispatch`, `generics.concrete-export`, `traits.arguments-receivers-associated`, `traits.external-implementation`, `closures.capture-contracts` | finite safe trait/operator surface; no unsafe traits or specialization |
 | std-only native futures | Proof | Future/await/join/select lowering through a teaching executor | focused Rust Book subprocess tests<br>Contracts: `futures.split-local-block-on` | busy-polling; no reactor, cancellation, Tokio, or Python future ABI |
 | Thread pool and TCP | Proof | finite unit-job pool and loopback HTTP teaching operations | panic-containment and Rust Book web-server subprocess tests<br>Contracts: `threadpool.loopback-http` | no general server, task handles, backpressure, TLS, or cancellation |
 | Advanced and unsafe intrinsics | Proof | audited operations for individual Rust Book concepts | subprocess panic/unsafe and exact code-generation tests<br>Contracts: `advanced.audited-intrinsics` | not general inline Rust, FFI, unsafe, macro, or pointer support |
@@ -55,6 +55,8 @@ xfail-only contract does not satisfy a maturity claim.
 
 - Use exactly `from crabwalk import rust`; namespace aliases are rejected.
 - `@rust.fn` exports a module-level synchronous function through Python's ABI.
+  `@rust.fn(release_gil=True)` is an explicit audited release policy for eligible
+  owned/shared native calls; it is not inferred purity for an external crate.
 - `@rust.async_fn` marks a native-only `async def`; an exported function enters it
   explicitly with `rust.block_on(...)`.
 - `@rust.generic(...)`, `@rust.method(...)`, `@rust.impl(...)`, and
@@ -89,7 +91,7 @@ xfail-only contract does not satisfy a maturity claim.
 | `rust.Shared[T]` | `Arc<T>` | immutable cross-thread handle for compiler-approved `Send + Sync` payloads |
 | `rust.Option[T]` | `Option<T>` | `None` or the supported conversion for `T`; `T` must not itself normalize to `None` |
 | `rust.Result[T, E]` | `Result<T, E>` | top-level exported return control type only; `Ok` converts `T`; `Err` raises `CrabwalkRustError` |
-| `rust.Tuple[T, ...]` | fixed Rust tuple | recursively checked Python tuple when every element is boundary-safe |
+| `rust.Tuple[T, ...]` | fixed Rust tuple | recursively checked Python tuple when every element is boundary-safe; direct Python ABI conversion is limited to 12 items by PyO3 0.29 |
 | `None` return | `()` | Python `None` |
 
 Bare `Vec` parameters are rejected because they would hide an allocating input
@@ -101,6 +103,9 @@ applies to `rust.to_python()` and Python-visible domain fields or enum payloads.
 Generated domain parameters likewise require `Owned`, `Ref`, `Mut`, or eligible
 immutable `Shared`. A top-level `HashMap[K, V]` parameter is the explicit exception:
 it accepts a checked Python mapping because no persistent map handle is created.
+Native-only tuples may be larger, but a tuple at any level of a direct exported or
+Python-adapter parameter/return is limited to 12 elements. Larger products fail as
+`CRAB237`; use a generated domain type or nested smaller tuples.
 
 `Buffer[T]` is the bounded alternative when compatible numeric storage already
 exists in Python and the function only needs to read it:
@@ -240,6 +245,12 @@ external receiver type with explicit shared/mutable/owned receiver semantics. Th
 supports typed builder values, consuming `Result` transitions, and closure-taking
 methods without falling back to inferred intermediate chains.
 
+A `Buffer[T]` passed to an external adapter declared as `rust.Buffer[T]` is copied
+into temporary owned Rust storage before the adapter receives `&[T]`.
+That explicit adapter-boundary copy avoids inventing an immutable slice over
+aliasable Python memory. Direct generated `Buffer` iteration remains zero-copy and
+keeps the exporter lease and GIL for the call.
+
 ## Domain types, methods, and traits
 
 - `@rust.struct` emits a Clone/Debug Rust struct plus its Python ownership wrapper.
@@ -257,6 +268,9 @@ methods without falling back to inferred intermediate chains.
   output. `rust.trait(...)` groups those method declarations; the old return-type
   shorthand remains the shared/no-argument form.
 - `@rust.impl(Trait, Type, name="method")` emits a concrete implementation.
+- `rust.extern_trait(crate, path="module::Trait", ...)` declares a typed
+  dependency-owned trait. It may be implemented for a local Crabwalk domain type;
+  an external-trait/external-type pair is rejected by Rust's orphan rule.
 - `rust.Dyn[Trait]` and `rust.dyn_box(Trait, value)` create `dyn Trait` boxes for
   heterogeneous vectors. `rust.trait_call` emits fully qualified syntax when an
   inherent and one or more trait methods share a name.
@@ -280,6 +294,26 @@ Trait conformance is also checked before emission: every declared method must be
 implemented exactly once; receiver ownership, argument arity/types, generic
 parameters/bounds, and concrete/associated outputs must match. Implementations may
 therefore use shared, mutable, or consuming receivers and typed method arguments.
+
+For example, a local application type can implement a framework trait without a
+handwritten semantic shim:
+
+```python
+framework = rust.crate("framework", path="./framework")
+App = rust.extern_trait(
+    framework,
+    path="App",
+    update=rust.trait_method(None, rust.u64),
+)
+
+@rust.struct
+class Editor:
+    frames: rust.u64
+
+@rust.impl(App, Editor, name="update")
+def update(editor: rust.Mut[Editor], frame: rust.u64) -> None:
+    editor.frames = frame
+```
 
 Nested struct fields and enum payloads can be constructed from a matching compiled
 handle or mapping, read as fingerprint-bound handles, and deep-copied with
@@ -439,11 +473,15 @@ Python work enters through `print(value)` or a statically declared synchronous
 `@rust.python_adapter`. An adapter gives the Python callable a Crabwalk-visible
 signature and explicit extra effects; generated code attaches to Python, imports
 the named module/callable, propagates `PyErr`, and checks its return conversion.
+By default it targets the declaration module and function name; use
+`@rust.python_adapter(module="operator", name="neg")` to route explicitly.
 `rust.println(value)` remains native. The Python effect propagates through ordinary
 calls, inherent methods, concrete and dynamic trait dispatch, custom operators,
-and function-pointer targets. Wrapper policy consumes the typed effects: Python
-runtime, opaque crate calls, global mutation, unsafe memory, and unsafe FFI prevent
-GIL detachment even when the signature itself contains only primitives.
+and function-pointer targets. Result-aware inherent methods may call Python;
+trait/operator methods, closures, workers, and native async helpers still reject
+that placement. Wrapper policy consumes the typed effects: Python runtime, opaque
+crate calls, global mutation, unsafe memory, and unsafe FFI prevent *automatic* GIL
+detachment even when the signature itself contains only primitives.
 
 `OpaqueCrateCall` is visibility, not a claim that the external implementation is
 pure, nonblocking, or Python-free. Crabwalk conservatively also records `MayPanic`
@@ -451,6 +489,15 @@ and keeps the GIL attached for an opaque call. Effect policy is complete for
 Crabwalk-visible operations. Typed adapters can replace opacity with a reviewed
 effect promise and recover detachment, but Crabwalk cannot prove that a third-party
 implementation honors its declaration.
+
+`@rust.fn(release_gil=True)` is the deliberate override for an audited call whose
+visible effects are conservative (for example `OpaqueCrateCall` plus `Blocking`).
+Validation rejects any reachable `PythonRuntime` operation and any call-scoped
+borrow (`Buffer`, `Str`, `Ref`, or `Mut`). `Owned` and immutable `Shared` handles are
+preflighted/extracted and their Python guards are dropped before `py.detach(...)`.
+The author remains responsible for the external implementation's thread safety and
+for the truth of the no-Python audit. Inspection reports `gil_policy` separately
+from the effect list.
 
 Every concrete `ExpressionIR` variant has one mandatory direct-effect rule; adding
 a new expression without updating that table fails the compiler invariant suite.
@@ -461,10 +508,10 @@ the complete Crabwalk-visible dispatch graph.
 
 Before code generation, an IR validation pass checks effect consistency and rejects
 a Rust worker closure that directly or transitively reaches Python runtime state
-(`CRAB206`). It also rejects a Python-runtime effect in methods/trait or operator
-implementations, native async helpers, iterator closures, and function-pointer
-targets (`CRAB207`) until those generated contexts have a result-aware boundary
-lowering.
+(`CRAB206`). It also rejects a Python-runtime effect in trait/operator methods,
+native async helpers, iterator closures, and function-pointer targets (`CRAB207`)
+until those generated contexts have a result-aware boundary lowering. Inherent
+method glue is result-aware and is therefore supported.
 
 ## Package import policy
 

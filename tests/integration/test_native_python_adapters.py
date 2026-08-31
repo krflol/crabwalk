@@ -9,7 +9,11 @@ from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_python_adapters import PYTHON_ADAPTER_SOURCE
 
 
-@capability_contract("python-adapter.success-errors")
+@capability_contract(
+    "python-adapter.success-errors",
+    "python-adapter.explicit-target",
+    "python-adapter.method-placement",
+)
 def test_typed_python_adapter_success_exception_and_invalid_return(
     tmp_path: Path,
 ) -> None:
@@ -20,6 +24,8 @@ def test_typed_python_adapter_success_exception_and_invalid_return(
 print(label(7))
 print(label.__crabwalk__["gil_released"])
 print([str(value) for value in label.__crabwalk__["effects"]])
+print(negate(21))
+print(negate_via_method(22))
 try:
     fail(9)
 except ValueError as error:
@@ -52,5 +58,7 @@ except TypeError as error:
     assert lines[1] == "False"
     assert "PythonRuntime" in lines[2]
     assert "Blocking" in lines[2]
-    assert lines[3] == "ValueError bad-9"
-    assert lines[4] == "TypeError True"
+    assert lines[3] == "-21"
+    assert lines[4] == "-22"
+    assert lines[5] == "ValueError bad-9"
+    assert lines[6] == "TypeError True"

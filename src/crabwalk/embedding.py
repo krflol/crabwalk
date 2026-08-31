@@ -9,7 +9,7 @@ import re
 import tempfile
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
@@ -75,6 +75,8 @@ def compile_source(
     entry: str | None = None,
     module_name: str | None = None,
     cache_directory: str | Path | None = None,
+    source_root: str | Path | None = None,
+    origin_map: Mapping[int, object] | Mapping[str, Mapping[int, object]] | None = None,
     locked: bool = False,
     offline: bool = False,
     progress: Callable[[str], None] | None = None,
@@ -93,6 +95,12 @@ def compile_source(
     so callers can describe namespace-shaped input without mutating ``sys.path``.
     ``entry`` selects the diagnostic/build entry module and defaults to
     ``__init__.py``.
+
+    ``source_root`` preserves the authored base directory for relative path-crate
+    declarations while the Python text remains in its immutable snapshot.
+    ``origin_map`` attaches opaque host metadata to diagnostics by source line: use
+    ``{line: payload}`` for one source string or
+    ``{"relative.py": {line: payload}}`` for a virtual package.
 
     Cancellation is checked between phases and terminates an already-running Cargo
     process tree before returning ``CRAB309``.
@@ -118,6 +126,12 @@ def compile_source(
         source_hash = _virtual_source_hash(virtual_sources)
     else:
         raise TypeError("source must be a string or mapping of .py paths to strings")
+    authored_root = _validated_source_root(source_root)
+    normalized_origins = _validated_origin_map(
+        origin_map,
+        filename=safe_filename if virtual_sources is None else None,
+        virtual=virtual_sources is not None,
+    )
     resolved_module = module_name or f"crabwalk_source_{source_hash[:20]}"
     _validate_module_name(resolved_module)
     root = (
@@ -157,16 +171,25 @@ def compile_source(
         )
         path = package / selected_entry
         compile_module_name = _virtual_entry_module(resolved_module, selected_entry)
-    compilation = default_service.compile_path(
-        path,
-        module_name=compile_module_name,
-        mode="build",
-        load=True,
-        locked=locked,
-        offline=offline,
-        progress=report,
-        cancelled=cancelled,
-    )
+    try:
+        compilation = default_service.compile_path(
+            path,
+            module_name=compile_module_name,
+            mode="build",
+            load=True,
+            locked=locked,
+            offline=offline,
+            source_root=authored_root,
+            progress=report,
+            cancelled=cancelled,
+        )
+    except CrabwalkCompilationError as error:
+        raise _attach_external_origins(
+            error,
+            normalized_origins,
+            snapshot_path=path,
+            package_root=path.parent if virtual_sources is None else package,
+        ) from error
     report("Binding exported native functions")
     exported = [function for function in compilation.ir.functions if function.exported]
     functions = {
@@ -181,6 +204,80 @@ def compile_source(
         path,
         MappingProxyType(functions),
     )
+
+
+def _validated_source_root(value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    root = Path(value).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError("source_root must name an existing directory")
+    return root
+
+
+def _validated_origin_map(
+    value: Mapping[int, object] | Mapping[str, Mapping[int, object]] | None,
+    *,
+    filename: str | None,
+    virtual: bool,
+) -> dict[str, dict[int, object]]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise TypeError("origin_map must be a mapping")
+    if virtual:
+        result: dict[str, dict[int, object]] = {}
+        for raw_path, lines in value.items():
+            if not isinstance(raw_path, str) or not isinstance(lines, Mapping):
+                raise TypeError(
+                    "virtual origin_map must map relative .py paths to line mappings"
+                )
+            path = _validated_virtual_path(raw_path)
+            result[path] = _validated_origin_lines(lines)
+        return result
+    if any(not isinstance(line, int) for line in value):
+        raise TypeError("single-source origin_map must map line numbers to payloads")
+    assert filename is not None
+    lines = {line: payload for line, payload in value.items() if isinstance(line, int)}
+    return {filename: _validated_origin_lines(lines)}
+
+
+def _validated_origin_lines(value: Mapping[int, object]) -> dict[int, object]:
+    result: dict[int, object] = {}
+    for line, payload in value.items():
+        if not isinstance(line, int) or isinstance(line, bool) or line < 1:
+            raise ValueError("origin_map line numbers must be positive integers")
+        result[line] = payload
+    return result
+
+
+def _attach_external_origins(
+    error: CrabwalkCompilationError,
+    origins: Mapping[str, Mapping[int, object]],
+    *,
+    snapshot_path: Path,
+    package_root: Path,
+) -> CrabwalkCompilationError:
+    if not origins:
+        return error
+    enriched: list[Diagnostic] = []
+    resolved_snapshot = snapshot_path.resolve()
+    resolved_package = package_root.resolve()
+    for diagnostic in error.diagnostics:
+        span = diagnostic.span
+        origin: object | None = None
+        if span is not None:
+            span_path = Path(span.path).resolve()
+            if span_path == resolved_snapshot and len(origins) == 1:
+                source_key = next(iter(origins))
+            else:
+                try:
+                    source_key = span_path.relative_to(resolved_package).as_posix()
+                except ValueError:
+                    source_key = ""
+            origin = origins.get(source_key, {}).get(span.line)
+        enriched.append(replace(diagnostic, external_origin=origin))
+    return CrabwalkCompilationError(enriched)
 
 
 def _encode_source(source: str) -> bytes:

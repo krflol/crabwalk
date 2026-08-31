@@ -182,6 +182,7 @@ def function_inspection(function: FunctionIR) -> dict[str, object]:
             "Python runtime boundary" if function.python_boundary else "Native Rust"
         ),
         "gil": gil,
+        "gil_policy": "explicit audited release" if function.release_gil else "auto",
         "python_calls": python_calls,
         "native_calls": native_calls,
         "boundary_telemetry": {

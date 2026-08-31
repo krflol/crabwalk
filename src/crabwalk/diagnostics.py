@@ -87,6 +87,7 @@ class Diagnostic:
     help: str | None = None
     rustc_code: str | None = None
     detail: str | None = None
+    external_origin: object | None = None
 
     def render(self) -> str:
         heading = f"{self.code} {self.title}"

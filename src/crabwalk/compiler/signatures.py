@@ -25,6 +25,7 @@ class Signature:
     operator_kind: str | None = None
     external_path: tuple[str, ...] | None = None
     external_effects: tuple[Effect, ...] | None = None
+    release_gil: bool = False
 
     @property
     def rust_symbol(self) -> str:

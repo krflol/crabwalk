@@ -33,7 +33,7 @@ from .naming import (
     shared_class_names,
 )
 
-CODEGEN_SCHEMA_VERSION = 43
+CODEGEN_SCHEMA_VERSION = 44
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
@@ -120,8 +120,9 @@ def generate_project(
         writer.line()
 
     for trait in ir.traits:
-        _write_native_trait(writer, trait)
-        writer.line()
+        if trait.external_path is None:
+            _write_native_trait(writer, trait)
+            writer.line()
 
     for enum in ir.enums:
         _write_native_enum(writer, enum)
@@ -458,9 +459,14 @@ def _write_method_glue(
     arguments = ", ".join(
         ("self", *(parameter.rust_name for parameter in function.parameters[1:]))
     )
+    return_type = (
+        f"PyResult<{function.return_type.render()}>"
+        if function.python_boundary
+        else function.return_type.render()
+    )
     writer.line(
         f"fn {emitted_method_name or function.method_name}{generics}({parameters}) "
-        f"-> {function.return_type.render()} {{",
+        f"-> {return_type} {{",
         function.span,
         "method_impl",
     )
@@ -1363,8 +1369,19 @@ def _write_export_wrapper(
             python_token,
             untyped_buffers.get(parameter.rust_name),
         )
+    if releases_gil:
+        for parameter in function.parameters:
+            if parameter.type_ref.ownership in {"Owned", "Shared"}:
+                writer.line(
+                    f"drop({parameter.rust_name});",
+                    parameter.span,
+                    "gil_release_guard_drop",
+                )
     if owned_return:
         native_call = f"__cw_native_{function.rust_symbol}({arguments})"
+        if releases_gil:
+            assert python_token is not None
+            native_call = f"{python_token}.detach(move || {native_call})"
         caught_result = emission_names.temporary("caught_result")
         writer.line(
             f"let {caught_result} = __cw_catch_panic(|| {native_call})?;",
@@ -1482,6 +1499,7 @@ def _write_buffer_support(writer: _Writer) -> None:
         "fn iter(&self) -> impl Iterator<Item = T> + '_ { "
         "self.values.iter().map(pyo3::buffer::ReadOnlyCell::get) }"
     )
+    writer.line("fn to_vec(&self) -> Vec<T> { self.iter().collect() }")
     writer.leave()
     writer.line("}")
 
@@ -2012,6 +2030,15 @@ def function_releases_gil(function: FunctionIR) -> bool:
     """Whether an exported wrapper can detach from Python for the native call."""
 
     effects = set(function.effects)
+    if function.release_gil:
+        return (
+            function.exported
+            and Effect.PYTHON_RUNTIME not in effects
+            and all(
+                not _type_retains_python_borrow_for_detach(parameter.type_ref)
+                for parameter in function.parameters
+            )
+        )
     if effects & {
         Effect.BORROWED_BUFFER,
         Effect.OPAQUE_CRATE_CALL,
@@ -2052,6 +2079,18 @@ def function_releases_gil(function: FunctionIR) -> bool:
             for parameter in function.parameters
         )
         and function.return_type.rust_name in safe_names
+    )
+
+
+def _type_retains_python_borrow_for_detach(type_ref: TypeRef) -> bool:
+    if type_ref.ownership in {"Owned", "Shared"}:
+        return False
+    if type_ref.ownership in {"Ref", "Mut"}:
+        return True
+    if type_ref.rust_name in {"Buffer", "Str", "LifetimeRef"}:
+        return True
+    return any(
+        _type_retains_python_borrow_for_detach(value) for value in type_ref.arguments
     )
 
 

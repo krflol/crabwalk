@@ -6,6 +6,7 @@ reimplementations of their Rust namesakes.
 
 from __future__ import annotations
 
+import builtins
 from dataclasses import dataclass
 from functools import update_wrapper
 from typing import Callable, Literal, TypeVar, overload
@@ -178,6 +179,8 @@ class RustTrait:
 
     name: str
     methods: tuple[tuple[str, RustTraitMethod], ...] = ()
+    crate: "Crate | None" = None
+    path: tuple[str, ...] = ()
 
     def __repr__(self) -> str:
         return f"rust.{self.name}"
@@ -228,6 +231,7 @@ GlobalMutation = RustEffect("GlobalMutation")
 UnsafeMemory = RustEffect("UnsafeMemory")
 UnsafeFfi = RustEffect("UnsafeFfi")
 MayPanic = RustEffect("MayPanic")
+OpaqueCrateCall = RustEffect("OpaqueCrateCall")
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,7 +413,7 @@ def generic(
 
 
 def trait_method(
-    return_type: RustType,
+    return_type: RustType | None,
     *parameters: RustType,
     receiver: Literal["ref", "mut", "owned"] = "ref",
     type_parameters: tuple[RustType, ...] | list[RustType] = (),
@@ -421,6 +425,8 @@ def trait_method(
 ) -> RustTraitMethod:
     """Describe one typed trait method, including receiver and tail arguments."""
 
+    if return_type is None:
+        return_type = RustType("Unit")
     if not isinstance(return_type, RustType) or not all(
         isinstance(value, RustType) for value in parameters
     ):
@@ -475,6 +481,39 @@ def trait(name: str, **methods: RustType | RustTraitMethod) -> RustTrait:
             )
         normalized.append((method_name, value))
     return RustTrait(name, tuple(normalized))
+
+
+def extern_trait(
+    crate_value: Crate,
+    *,
+    path: str,
+    **methods: RustType | RustTraitMethod,
+) -> RustTrait:
+    """Declare the typed surface of an existing trait from a Cargo dependency."""
+
+    if not isinstance(crate_value, Crate):
+        raise TypeError("rust.extern_trait expects a value returned by rust.crate")
+    parts = tuple(path.split("::")) if isinstance(path, str) else ()
+    if not parts or any(not part.isidentifier() for part in parts):
+        raise TypeError("rust.extern_trait path must be a static Rust path")
+    if not methods or not all(key.isidentifier() for key in methods):
+        raise TypeError("rust.extern_trait methods must use valid identifiers")
+    normalized: list[tuple[str, RustTraitMethod]] = []
+    for method_name, value in methods.items():
+        if isinstance(value, RustType):
+            value = RustTraitMethod(value)
+        if not isinstance(value, RustTraitMethod):
+            raise TypeError(
+                "rust.extern_trait methods must map names to Rust return types or "
+                "rust.trait_method declarations"
+            )
+        normalized.append((method_name, value))
+    return RustTrait(
+        parts[-1],
+        tuple(normalized),
+        crate=crate_value,
+        path=parts,
+    )
 
 
 def method(
@@ -567,23 +606,31 @@ def async_fn(function: _F) -> NativeOnlyFunction:
 
 
 @overload
-def fn(function: _F) -> object: ...
+def fn(function: _F, *, release_gil: builtins.bool = False) -> object: ...
 
 
 @overload
-def fn(function: None = None) -> Callable[[_F], object]: ...
+def fn(
+    function: None = None,
+    *,
+    release_gil: builtins.bool = False,
+) -> Callable[[_F], object]: ...
 
 
-def fn(function: _F | None = None) -> object:
+def fn(function: _F | None = None, *, release_gil: builtins.bool = False) -> object:
     """Compile a module-level function as Rust and return its native wrapper."""
 
-    if function is None:
-        return fn
-    if not callable(function):
-        raise TypeError("@rust.fn expects a function")
-    from .runtime import compile_function
+    if not isinstance(release_gil, builtins.bool):
+        raise TypeError("rust.fn release_gil must be bool")
 
-    return compile_function(function)
+    def decorate(value: _F) -> object:
+        if not callable(value):
+            raise TypeError("@rust.fn expects a function")
+        from .runtime import compile_function
+
+        return compile_function(value)
+
+    return decorate if function is None else decorate(function)
 
 
 def struct(
@@ -778,6 +825,8 @@ def python_adapter(
     function: _F | None = None,
     *,
     effects: list[RustEffect] | tuple[RustEffect, ...] = (),
+    module: str | None = None,
+    name: str | None = None,
 ) -> _F | Callable[[_F], _F]:
     """Declare an ordinary Python callable available to compiled Rust code.
 
@@ -788,6 +837,16 @@ def python_adapter(
 
     if not all(isinstance(value, RustEffect) for value in effects):
         raise TypeError("rust.python_adapter effects must be RustEffect values")
+    if module is not None and (
+        not isinstance(module, str)
+        or not module
+        or any(not part.isidentifier() for part in module.split("."))
+    ):
+        raise TypeError("rust.python_adapter module must be a dotted identifier")
+    if name is not None and (
+        not isinstance(name, str) or not name or not name.isidentifier()
+    ):
+        raise TypeError("rust.python_adapter name must be an identifier")
     if Pure in effects or PythonRuntime in effects:
         raise TypeError(
             "rust.python_adapter always has PythonRuntime semantics; declare only "
@@ -803,6 +862,8 @@ def python_adapter(
             {
                 "kind": "python_adapter",
                 "effects": (PythonRuntime, MayPanic, *effects),
+                "module": module,
+                "name": name or value.__name__,
             },
         )
         return value
@@ -917,6 +978,7 @@ __all__ = [
     "BTreeMap",
     "BTreeSet",
     "Ok",
+    "OpaqueCrateCall",
     "Option",
     "Ord",
     "Owned",
@@ -972,6 +1034,7 @@ __all__ = [
     "enum",
     "extern",
     "extern_method",
+    "extern_trait",
     "extern_type",
     "drop",
     "dyn_box",

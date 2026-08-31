@@ -12,7 +12,12 @@ import pytest
 from crabwalk.build.cargo import CargoBuilder, CargoOutcome
 from crabwalk.build.cache import prune_artifact_cache
 from crabwalk.diagnostics import CrabwalkCompilationError
-from crabwalk.service import CompilationService
+from crabwalk.service import (
+    CompilationService,
+    _cargo_generated_directory,
+    _cargo_lock_bootstrap_directory,
+    _cargo_target_directory,
+)
 
 
 def test_cargo_builder_records_the_reported_artifact_freshness(
@@ -47,6 +52,93 @@ def test_cargo_builder_records_the_reported_artifact_freshness(
 
     assert outcome.artifact == artifact
     assert outcome.artifact_fresh is True
+    assert (tmp_path / "target" / "CACHEDIR.TAG").read_text(encoding="utf-8") == (
+        "Signature: 8a477f597d28d172789f06886806bc55\n"
+        "# This file is a cache directory tag created by cargo.\n"
+        "# For information about cache directory tags see "
+        "https://bford.info/cachedir/\n"
+    )
+
+
+def test_windows_target_directory_is_short_stable_and_environment_isolated(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    state_root = tmp_path / ("deep-project-component-" * 12) / ".crabwalk"
+    inputs = {"python": {"executable": "C:/Python311/python.exe"}}
+    short_root = tmp_path / "t"
+    monkeypatch.setenv(  # type: ignore[attr-defined]
+        "CRABWALK_CARGO_TARGET_ROOT", str(short_root)
+    )
+
+    first = _cargo_target_directory(state_root, inputs, windows=True)
+    second = _cargo_target_directory(state_root, inputs, windows=True)
+    other = _cargo_target_directory(
+        state_root,
+        {"python": {"executable": "C:/Python312/python.exe"}},
+        windows=True,
+    )
+
+    assert first == second
+    assert first.parent == short_root.resolve()
+    assert first != other
+    assert len(str(first)) < len(str(state_root / "target"))
+
+
+def test_windows_generated_project_escapes_a_deep_embedding_root(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    state_root = tmp_path / ("deep-embedding-component-" * 12) / ".crabwalk"
+    short_root = tmp_path / "p"
+    monkeypatch.setenv(  # type: ignore[attr-defined]
+        "CRABWALK_CARGO_PROJECT_ROOT", str(short_root)
+    )
+
+    first = _cargo_generated_directory(
+        state_root,
+        "deep.package",
+        "a" * 64,
+        windows=True,
+    )
+    second = _cargo_generated_directory(
+        state_root,
+        "deep.package",
+        "a" * 64,
+        windows=True,
+    )
+    changed = _cargo_generated_directory(
+        state_root,
+        "deep.package",
+        "b" * 64,
+        windows=True,
+    )
+
+    assert first == second
+    assert first.parent == short_root.resolve()
+    assert first != changed
+    assert len(str(first)) < len(
+        str(state_root / "generated" / "deep_package" / ("a" * 64))
+    )
+
+    bootstrap = _cargo_lock_bootstrap_directory(
+        state_root,
+        "deep.package",
+        "c" * 64,
+        windows=True,
+    )
+    other_module_bootstrap = _cargo_lock_bootstrap_directory(
+        state_root,
+        "other.package",
+        "c" * 64,
+        windows=True,
+    )
+    assert bootstrap.parent == short_root.resolve()
+    assert "-lock-" in bootstrap.name
+    assert bootstrap != other_module_bootstrap
+    assert len(str(bootstrap)) < len(
+        str(state_root / "lock-bootstrap" / "deep_package" / ("c" * 64))
+    )
 
 
 def test_cargo_builder_overrides_abort_profile_for_panic_boundary(
@@ -292,7 +384,10 @@ class _LockChangingArtifactCargo(_ArtifactCargo):
     ) -> CargoOutcome:
         del target_dir, mode, locked, offline
         self.run_count += 1
-        self.build_fingerprints.append(project_dir.name)
+        build_inputs = json.loads(
+            (project_dir / "crabwalk-build-inputs.json").read_text(encoding="utf-8")
+        )
+        self.build_fingerprints.append(build_inputs["fingerprint"])
         if self.run_count == 1:
             (project_dir / "Cargo.lock").write_text(
                 "version = 4\n# updated\n", encoding="utf-8"

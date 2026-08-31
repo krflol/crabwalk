@@ -12,6 +12,7 @@ import sys
 import sysconfig
 from functools import lru_cache
 from pathlib import Path
+from typing import Protocol
 
 from crabwalk import __version__
 from crabwalk.compiler.cargo_emission import (
@@ -30,6 +31,8 @@ _BUILD_ENVIRONMENT_KEYS = (
     "CARGO_BUILD_TARGET",
     "CARGO_ENCODED_RUSTFLAGS",
     "CARGO_HOME",
+    "CRABWALK_CARGO_PROJECT_ROOT",
+    "CRABWALK_CARGO_TARGET_ROOT",
     "LDFLAGS",
     "MACOSX_DEPLOYMENT_TARGET",
     "OPENSSL_DIR",
@@ -50,6 +53,10 @@ _BUILD_ENVIRONMENT_KEYS = (
 )
 
 
+class _Digest(Protocol):
+    def update(self, value: bytes, /) -> None: ...
+
+
 def build_fingerprint(
     ir: PackageIR,
     dependency_lock_hash: str | None = None,
@@ -64,7 +71,7 @@ def build_fingerprint(
     toolchain_root = (project_root or Path(ir.source_path).parent).resolve()
     toolchain_files_hash = _toolchain_files_hash(toolchain_root)
     payload: dict[str, object] = {
-        "fingerprint_schema": 5,
+        "fingerprint_schema": 6,
         "crabwalk_version": __version__,
         "implementation_hash": _implementation_hash(),
         "ir_schema": ir.schema_version,
@@ -77,6 +84,9 @@ def build_fingerprint(
             "version": list(sys.version_info[:3]),
             "abiflags": getattr(sys, "abiflags", ""),
             "extension_suffix": sysconfig.get_config_var("EXT_SUFFIX"),
+            "executable": str(Path(sys.executable).resolve()),
+            "prefix": str(Path(sys.prefix).resolve()),
+            "base_prefix": str(Path(sys.base_prefix).resolve()),
         },
         "rustc": _tool_version("rustc", toolchain_root, toolchain_files_hash),
         "cargo": _tool_version("cargo", toolchain_root, toolchain_files_hash),
@@ -110,6 +120,40 @@ def build_fingerprint(
     return hashlib.sha256(encoded).hexdigest(), payload
 
 
+def build_target_identity(inputs: dict[str, object]) -> str:
+    """Return the compatible Cargo-target identity for one build plan.
+
+    Cargo target state is reusable only while the effective interpreter,
+    toolchain, dependency specification, profile, and build environment agree.
+    Source-specific inputs intentionally remain outside this identity so related
+    modules retain Cargo's incremental dependency cache.
+    """
+
+    selected = {
+        key: inputs.get(key)
+        for key in (
+            "python",
+            "rustc",
+            "cargo",
+            "toolchain_files",
+            "pyo3",
+            "generated_dependencies",
+            "profile",
+            "overflow_checks",
+            "panic_strategy",
+            "build_environment",
+            "cargo_configuration_hash",
+        )
+    }
+    encoded = json.dumps(
+        selected,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _path_dependency_hash(root: Path) -> str:
     return _input_tree_hash(root)
 
@@ -123,23 +167,52 @@ def _input_tree_hash(root: Path) -> str:
         return digest.hexdigest()
     if not root.is_dir():
         return "missing"
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root)
-        if any(part in {".git", ".crabwalk", "target"} for part in relative.parts):
-            continue
-        if path.is_symlink():
+    ignored_directories = {".git", ".crabwalk", "target"}
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for current, directories, filenames in os.walk(
+        root,
+        topdown=True,
+        onerror=raise_walk_error,
+        followlinks=False,
+    ):
+        current_path = Path(current)
+        retained_directories: list[str] = []
+        for name in sorted(directories):
+            path = current_path / name
+            if name in ignored_directories:
+                continue
+            if path.is_symlink():
+                _hash_input_symlink(digest, root, path)
+                continue
+            retained_directories.append(name)
+        # Mutating the top-down walk list prevents os.walk from enumerating ignored
+        # Cargo output trees. Merely filtering yielded paths still traverses every
+        # file under a large in-source target directory.
+        directories[:] = retained_directories
+        for name in sorted(filenames):
+            path = current_path / name
+            if path.is_symlink():
+                _hash_input_symlink(digest, root, path)
+                continue
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
             digest.update(relative.as_posix().encode("utf-8"))
-            digest.update(b"\0symlink\0")
-            digest.update(os.readlink(path).encode("utf-8"))
             digest.update(b"\0")
-            continue
-        if not path.is_file():
-            continue
-        digest.update(relative.as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _hash_input_symlink(digest: _Digest, root: Path, path: Path) -> None:
+    relative = path.relative_to(root)
+    digest.update(relative.as_posix().encode("utf-8"))
+    digest.update(b"\0symlink\0")
+    digest.update(os.readlink(path).encode("utf-8"))
+    digest.update(b"\0")
 
 
 def _tool_version(

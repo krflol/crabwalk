@@ -130,7 +130,11 @@ def _lsp_diagnostic(diagnostic: Diagnostic) -> dict[str, object]:
         "code": diagnostic.code,
         "source": "crabwalk",
         "message": f"{diagnostic.title}: {diagnostic.message}",
-        "data": {"help": diagnostic.help, "rustc_code": diagnostic.rustc_code},
+        "data": {
+            "help": diagnostic.help,
+            "rustc_code": diagnostic.rustc_code,
+            "external_origin": diagnostic.external_origin,
+        },
     }
 
 

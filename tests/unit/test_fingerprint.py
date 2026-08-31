@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 
-from crabwalk.build.fingerprint import build_fingerprint
+import pytest
+
+from crabwalk.build.fingerprint import build_fingerprint, build_target_identity
 from crabwalk.compiler.frontend import analyze_path
 
 
@@ -142,3 +144,103 @@ def identity(value: rust.u64) -> rust.u64:
     assert first != second
     recorded = inputs["build_environment"]["APP_NATIVE_MODE"]  # type: ignore[index]
     assert "one" not in str(recorded)
+
+
+def test_effective_python_installation_is_a_build_and_target_input(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    source = tmp_path / "python_identity.py"
+    source.write_text(
+        """\
+from crabwalk import rust
+
+@rust.fn
+def identity(value: rust.u64) -> rust.u64:
+    return value
+""",
+        encoding="utf-8",
+    )
+    ir = analyze_path(source)
+    first, first_inputs = build_fingerprint(ir)
+
+    import crabwalk.build.fingerprint as fingerprint_module
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        fingerprint_module.sys,
+        "executable",
+        str(tmp_path / "alternate-python.exe"),
+    )
+    second, second_inputs = build_fingerprint(ir)
+
+    assert first != second
+    assert build_target_identity(first_inputs) != build_target_identity(second_inputs)
+    assert "alternate-python.exe" in str(second_inputs["python"])
+
+
+def test_path_dependency_hash_prunes_cargo_output_trees(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    import crabwalk.build.fingerprint as fingerprint_module
+
+    dependency = tmp_path / "native"
+    source = dependency / "src"
+    cargo_output = dependency / "target" / "release" / "deps"
+    source.mkdir(parents=True)
+    cargo_output.mkdir(parents=True)
+    (source / "lib.rs").write_text("pub fn value() -> u64 { 1 }\n", encoding="utf-8")
+    ignored = cargo_output / "large-generated-output.bin"
+    ignored.write_bytes(b"first")
+
+    walked: list[Path] = []
+    original_walk = fingerprint_module.os.walk
+
+    def observing_walk(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        for current, directories, filenames in original_walk(*args, **kwargs):
+            walked.append(Path(current).resolve())
+            yield current, directories, filenames
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        fingerprint_module.os,
+        "walk",
+        observing_walk,
+    )
+    first = fingerprint_module._input_tree_hash(dependency)
+    ignored.write_bytes(b"second")
+    second = fingerprint_module._input_tree_hash(dependency)
+
+    assert dependency.resolve() in walked
+    assert (dependency / "target").resolve() not in walked
+    assert first == second
+
+
+def test_path_dependency_hash_does_not_silently_ignore_walk_errors(
+    tmp_path: Path,
+    monkeypatch: object,
+) -> None:
+    import crabwalk.build.fingerprint as fingerprint_module
+
+    dependency = tmp_path / "native"
+    dependency.mkdir()
+
+    def failing_walk(
+        _root: Path,
+        *,
+        topdown: bool,
+        onerror: object,
+        followlinks: bool,
+    ):  # type: ignore[no-untyped-def]
+        del topdown, followlinks
+        assert callable(onerror)
+        onerror(PermissionError("unreadable dependency input"))
+        return iter(())
+
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        fingerprint_module.os,
+        "walk",
+        failing_walk,
+    )
+
+    with pytest.raises(PermissionError, match="unreadable dependency input"):
+        fingerprint_module._input_tree_hash(dependency)

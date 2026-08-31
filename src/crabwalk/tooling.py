@@ -11,7 +11,7 @@ from typing import NoReturn
 from crabwalk.diagnostics import CrabwalkCompilationError, Diagnostic
 from crabwalk.service import CompilationResult
 
-DIAGNOSTIC_SCHEMA_VERSION = 1
+DIAGNOSTIC_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +66,18 @@ _EXPLANATIONS = {
         "opaque storage",
         "An anonymous Rust adapter/future local cannot change its concrete storage type by assignment.",
         "Bind the transformed value to a new local or use explicit shadowing.",
+    ),
+    "CRAB236": DiagnosticExplanation(
+        "CRAB236",
+        "GIL policy",
+        "An explicit audited GIL-release request is invalid for this function.",
+        "Keep Python and call-scoped borrows outside the detached call, or remove release_gil=True.",
+    ),
+    "CRAB237": DiagnosticExplanation(
+        "CRAB237",
+        "Python ABI",
+        "A direct Python boundary contains a tuple larger than PyO3 can convert.",
+        "Use at most 12 items, a generated domain type, or nested smaller tuples.",
     ),
     "CRAB301": DiagnosticExplanation(
         "CRAB301",
@@ -122,6 +134,7 @@ def diagnostic_to_dict(diagnostic: Diagnostic) -> dict[str, object]:
         "help": diagnostic.help,
         "rustc_code": diagnostic.rustc_code,
         "detail": diagnostic.detail,
+        "external_origin": diagnostic.external_origin,
     }
 
 

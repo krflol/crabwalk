@@ -89,6 +89,7 @@ def test_virtual_package_compiles_cross_module_calls_without_execution(
 ) -> None:
     runner = tmp_path / "run_virtual_embedding.py"
     sentinel = tmp_path / "virtual-executed.txt"
+    deep_cache = tmp_path / ("deep-embedding-root-" * 5) / "cache"
     sources = {
         "__init__.py": (
             f"from pathlib import Path\n"
@@ -119,7 +120,7 @@ compiled = compile_source(
     {sources!r},
     module_name="virtual_recipe",
     entry="kernel.py",
-    cache_directory={str(tmp_path / "cache")!r},
+    cache_directory={str(deep_cache)!r},
 )
 print(compiled.function("kernel.triple")(4))
 print({str(sentinel)!r})

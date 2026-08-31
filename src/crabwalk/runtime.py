@@ -1238,6 +1238,7 @@ class RustFunction:
             else function_ir.return_type
         )
         self._releases_gil = function_releases_gil(function_ir)
+        self._release_gil_requested = function_ir.release_gil
         self._effects = function_ir.effects
 
     def __call__(self, *args: object, **kwargs: object) -> object:
@@ -1484,6 +1485,9 @@ class RustFunction:
             "cache_hit": self._compilation.cache_hit,
             "native_symbol": self._rust_symbol,
             "gil_released": self._releases_gil,
+            "gil_policy": (
+                "explicit audited release" if self._release_gil_requested else "auto"
+            ),
             "async_eligible": self._releases_gil,
             "effects": self._effects,
             "parameter_boundaries": parameter_boundaries,

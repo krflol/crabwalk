@@ -13,9 +13,11 @@ from crabwalk.boundary import (
 )
 from crabwalk.compiler.abi import (
     BoundaryPosition,
+    PYO3_TUPLE_MAX_ARITY,
     boundary_shape,
     python_mapping_key_supported,
     python_return_boundary_supported,
+    unsupported_python_tuple_arity,
 )
 from crabwalk.compiler.ir import TypeRef
 from crabwalk.runtime import _boundary_metadata
@@ -131,6 +133,22 @@ def test_result_is_only_a_top_level_return_control_type() -> None:
     assert python_return_boundary_supported(result)
     assert not python_return_boundary_supported(nested)
     assert not python_return_boundary_supported(nested_success)
+
+
+def test_direct_python_tuple_shape_tracks_pyo3_arity() -> None:
+    supported = TypeRef("Tuple", (TypeRef("u64"),) * PYO3_TUPLE_MAX_ARITY)
+    unsupported = TypeRef(
+        "Result",
+        (
+            TypeRef("Tuple", (TypeRef("u64"),) * (PYO3_TUPLE_MAX_ARITY + 1)),
+            TypeRef("String"),
+        ),
+    )
+
+    assert unsupported_python_tuple_arity(supported) is None
+    assert unsupported_python_tuple_arity(unsupported) == 13
+    assert python_return_boundary_supported(supported)
+    assert not python_return_boundary_supported(unsupported)
 
 
 def test_result_success_uses_the_child_output_codec() -> None:

@@ -27,6 +27,10 @@ def python_failure(value: rust.u64) -> rust.u64:
 def python_wrong_type(value: rust.u64) -> rust.u64:
     return "not-an-int"
 
+@rust.python_adapter(module="operator", name="neg")
+def python_neg(value: rust.i64) -> rust.i64:
+    pass
+
 @rust.fn
 def label(value: rust.u64) -> rust.String:
     return python_label(value)
@@ -38,6 +42,23 @@ def fail(value: rust.u64) -> rust.u64:
 @rust.fn
 def wrong_type(value: rust.u64) -> rust.u64:
     return python_wrong_type(value)
+
+@rust.fn
+def negate(value: rust.i64) -> rust.i64:
+    return python_neg(value)
+
+@rust.struct
+class SignedValue:
+    value: rust.i64
+
+@rust.method(SignedValue, name="negated")
+def negated(value: rust.Ref[SignedValue]) -> rust.i64:
+    return python_neg(value.value)
+
+@rust.fn
+def negate_via_method(value: rust.i64) -> rust.i64:
+    wrapped: SignedValue = SignedValue(value=value)
+    return wrapped.negated()
 """
 
 
@@ -58,8 +79,15 @@ def test_python_adapter_has_typed_codegen_effects_and_inspection(
     assert "Python::attach(|py| -> PyResult<String>" in generated.rust_source
     assert 'PyModule::import(py, "python_adapter")' in generated.rust_source
     assert '.getattr("python_label")' in generated.rust_source
+    assert 'PyModule::import(py, "operator")' in generated.rust_source
+    assert '.getattr("neg")' in generated.rust_source
     assert inspection["gil"] == "held or reacquired for Python runtime operations"
     assert inspection["python_calls"][0]["name"] == "python_adapter.python_label"  # type: ignore[index]
+    negate = next(value for value in ir.functions if value.name == "negate")
+    negate_inspection = function_inspection(negate)
+    assert negate_inspection["python_calls"][0]["name"] == "operator.neg"  # type: ignore[index]
+    assert "fn negated(&self) -> PyResult<i64>" in generated.rust_source
+    assert "wrapped.negated()?" in generated.rust_source
 
 
 @capability_contract(

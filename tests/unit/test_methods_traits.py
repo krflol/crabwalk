@@ -57,6 +57,35 @@ def method_and_trait_demo() -> rust.u64:
 """
 
 
+EXTERNAL_TRAIT_SOURCE = """\
+from crabwalk import rust
+
+native = rust.crate("native-trait", path="./native")
+Tick = rust.extern_trait(
+    native,
+    path="Tick",
+    tick=rust.trait_method(rust.u64, rust.u64, receiver="mut"),
+)
+
+@rust.struct
+class Counter:
+    value: rust.u64
+
+@rust.impl(Tick, Counter, name="tick")
+def tick_counter(
+    counter: rust.Mut[Counter],
+    amount: rust.u64,
+) -> rust.u64:
+    counter.value = counter.value + amount
+    return counter.value
+
+@rust.fn
+def external_trait_demo() -> rust.u64:
+    counter: Counter = Counter(value=40)
+    return rust.trait_call(Tick, counter, "tick", 2)
+"""
+
+
 def test_inherent_methods_and_trait_objects_lower_to_rust(tmp_path: Path) -> None:
     source = tmp_path / "methods_traits.py"
     source.write_text(METHOD_TRAIT_SOURCE, encoding="utf-8")
@@ -80,6 +109,25 @@ def test_inherent_methods_and_trait_objects_lower_to_rust(tmp_path: Path) -> Non
     assert f"as Box<dyn {trait_symbol}>" in generated.rust_source
     assert "for component in components.iter()" in generated.rust_source
     assert "total = (total + component.draw());" in generated.rust_source
+
+
+def test_external_trait_contract_emits_dependency_impl_without_redeclaration(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "external_trait.py"
+    source.write_text(EXTERNAL_TRAIT_SOURCE, encoding="utf-8")
+
+    ir = analyze_path(source)
+    generated = generate_project(ir, "_crabwalk_external_trait")
+    trait = ir.traits[0]
+    counter = ir.structs[0]
+
+    assert trait.external_path is not None
+    assert trait.symbol.endswith("::Tick")
+    assert f"trait {trait.symbol} {{" not in generated.rust_source
+    assert f"impl {trait.symbol} for {counter.symbol} {{" in generated.rust_source
+    assert "fn tick(&mut self, amount: u64) -> u64" in generated.rust_source
+    assert f"<{counter.symbol} as {trait.symbol}>::tick" in generated.rust_source
 
 
 @pytest.mark.parametrize(

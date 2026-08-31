@@ -153,7 +153,10 @@ crabwalk cache status PATH [--json]
 crabwalk cache prune [PROJECT] [--dry-run]
 ```
 
-Generated Rust and disposable build/cache state live under `.crabwalk/`.
+Generated Rust and disposable build/cache state normally live under `.crabwalk/`.
+On Windows, linker-facing generated projects and Cargo target state use deterministic
+short temporary roots to stay within MSVC's effective path budget; inspection still
+reports their exact locations.
 Resolved generated Cargo dependency locks live under `crabwalk-locks/` and should
 be committed. Every compilation unit has one because its graph includes mandatory
 PyO3 even when source declares no additional crate.
@@ -171,7 +174,13 @@ without importing or executing that Python module:
 ```python
 from crabwalk import compile_source
 
-compiled = compile_source(editor_text, filename="recipe.py", progress=show_compile_phase)
+compiled = compile_source(
+    editor_text,
+    filename="recipe.py",
+    source_root=project_root,
+    origin_map={18: {"node_id": "normalize"}},
+    progress=show_compile_phase,
+)
 transform = compiled.function("transform")
 ```
 
@@ -183,7 +192,9 @@ for content-addressed multi-module embedding. This is not a sandbox for Cargo
 dependencies, build scripts, proc macros, or linkers; apply an application-specific
 source/effect/crate policy before building untrusted input. Cancellation is checked
 between phases and terminates an active Cargo process tree before returning
-`CRAB309`.
+`CRAB309`. `source_root` is the authored base used only to resolve relative path
+crates; source bytes still come from the immutable snapshot. `origin_map` carries
+opaque host metadata into each matching diagnostic's `external_origin` field.
 
 When a `.py` file triggers an implicit first build, Crabwalk reports analysis,
 dependency, cache, Cargo, and extension-loading phases on stderr. Interactive
