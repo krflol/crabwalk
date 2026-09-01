@@ -133,6 +133,7 @@ def function_inspection(function: FunctionIR) -> dict[str, object]:
                     else "::".join(value.path)
                 ),
                 "adapter": value.adapter_name,
+                "error_hook": value.python_error_hook,
                 "declared_effects": (
                     [effect.value for effect in value.declared_effects]
                     if value.declared_effects is not None
@@ -182,6 +183,7 @@ def function_inspection(function: FunctionIR) -> dict[str, object]:
             "Python runtime boundary" if function.python_boundary else "Native Rust"
         ),
         "gil": gil,
+        "gil_policy": "explicit audited release" if function.release_gil else "auto",
         "python_calls": python_calls,
         "native_calls": native_calls,
         "boundary_telemetry": {

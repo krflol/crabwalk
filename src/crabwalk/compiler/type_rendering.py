@@ -90,6 +90,7 @@ def render_rust_type(type_ref: TypeRef) -> str:
         "Receiver": "std::sync::mpsc::Receiver",
         "RefCell": "std::cell::RefCell",
         "Sender": "std::sync::mpsc::Sender",
+        "SyncSender": "std::sync::mpsc::SyncSender",
         "ThreadHandle": "std::thread::JoinHandle",
     }
     name = standard_paths.get(type_ref.rust_name, type_ref.rust_name)

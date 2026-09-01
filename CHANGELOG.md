@@ -4,6 +4,66 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-01
+
+### Added
+
+- `CompiledSource.artifacts()` exposes generated Rust, Cargo manifest/lock, build
+  script, semantic IR, build inputs, and source maps without private filename
+  knowledge.
+- Declared external crate values can cross exported `rust.Owned[ExternalType]`
+  returns as opaque, move-aware, fingerprint-bound handles and later enter
+  `Owned`/`Ref`/`Mut` calls without requiring `Clone`, `Debug`, or `Send`.
+- `String.clone()`, `Option.as_mut()`, compatible unary native function items in
+  callable adapters, and `rust.channel(T, capacity)` with `SyncSender[T]` complete
+  the corresponding integration contracts.
+- `compile_source(..., source_root=..., origin_map=...)` preserves the authored
+  base directory for relative path dependencies while retaining immutable source
+  snapshots, and attaches host graph/source identities to structured diagnostic
+  schema v2.
+- Typed Python adapters can explicitly name their import module and callable;
+  Python-runtime calls are supported in result-aware inherent methods.
+- `rust.extern_trait(...)` declares a dependency-owned trait contract that a local
+  Crabwalk domain type can implement, with Rust orphan rules validated before
+  code generation.
+- `@rust.fn(release_gil=True)` provides an audited opt-in for long-running native
+  calls with owned/shared inputs when conservative external effects would otherwise
+  keep the GIL attached.
+- Integral `&`, `|`, `^`, `<<`, and `>>` expressions and augmented assignments
+  lower for Rust integer types with source-level rejection for non-integral values.
+- `@rust.python_adapter(..., on_error=handler)` can run one zero-argument native
+  observer immediately before an import, call, or return-conversion `PyErr`
+  propagates, while preserving the original Python exception.
+
+### Changed
+
+- Cargo target state is isolated by the effective CPython installation, Rust/Cargo
+  toolchain, dependency graph, and build environment. Windows builds default to a
+  deterministic short temporary target root; `CRABWALK_CARGO_TARGET_ROOT` can
+  override it.
+- Path-dependency hashing prunes `.git`, `.crabwalk`, and Cargo `target` directories
+  before traversal instead of enumerating ignored build output.
+
+### Fixed
+
+- Content-addressed embedding snapshot publication retries bounded transient
+  Windows sharing violations and recognizes an identical competing publisher.
+- Mutable access through `Option.as_mut()` marks the root Rust local mutable before
+  emission instead of deferring an accepted program to rustc `E0596`.
+- Generated Cargo target directories carry Cargo's standard `CACHEDIR.TAG` marker.
+- Windows places both generated Cargo projects and target state beneath deterministic
+  short roots, preventing deep embedding snapshots from reaching MSVC linker limits.
+- Direct Python ABI tuples above PyO3's supported arity of 12 fail as source-spanned
+  `CRAB237` diagnostics instead of downstream Rust trait errors.
+- Typed external adapters safely copy `Buffer[T]` into temporary Rust storage when
+  their declared parameter is `&[T]`, preserving the alias-aware Python buffer
+  contract without an unsafe cast.
+- Compiler analysis, target reuse, and native loading no longer conflate distinct
+  Python installations that happen to share one project tree.
+- Native borrowed-return calls preserve their `Ref`/named-`Borrow` identity,
+  automatically borrow compatible owned locals, reborrow existing shared
+  expressions, and infer the unique returned collection lifetime when possible.
+
 ## [1.1.0] - 2026-08-30
 
 ### Added

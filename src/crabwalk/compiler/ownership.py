@@ -102,6 +102,8 @@ def builtin_receiver_access(type_ref: TypeRef, method: str) -> ReceiverAccess:
         return "mutable"
     if receiver == "String" and method == "push_str":
         return "mutable"
+    if receiver == "Option" and method == "as_mut":
+        return "mutable"
     if receiver == "String" and method == "into_bytes":
         return "owned"
     if receiver == "Vec" and method == "into_utf8":

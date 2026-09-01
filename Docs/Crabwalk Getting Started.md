@@ -93,6 +93,8 @@ phases: list[str] = []
 compiled = compile_source(
     source_text,
     filename="recipe.py",
+    source_root=project_root,
+    origin_map={12: {"graph_node": "transform"}},
     cache_directory=".recipe-cache",
     progress=phases.append,
 )
@@ -100,16 +102,27 @@ transform = compiled.function("transform")
 ```
 
 The returned `CompiledSource` exposes `functions`, `function(name)`, `fingerprint`,
-`source_hash`, `source_path`, and `inspect()`. Crabwalk normalizes the text to UTF-8,
+`source_hash`, `source_path`, `inspect()`, and `artifacts()`. `artifacts()` returns
+generated Rust, Cargo manifest/lock, build script, IR, build inputs, and source-map
+data directly, so an embedding host does not depend on generated filenames.
+Crabwalk normalizes the text to UTF-8,
 stores an immutable content-addressed snapshot, performs static analysis, builds and
 loads the extension, and binds exported `RustFunction` objects directly from IR.
 It never imports the source module, so unrelated top-level Python statements do not
 run and there is no second decorator-driven build lifecycle.
 
+`source_root` preserves the authored base directory for resolving relative
+`rust.crate(..., path="...")` declarations; compilation and diagnostics still use
+the immutable snapshot. `origin_map` maps one-based source lines to opaque host
+metadata, exposed as `diagnostic.external_origin` and in JSON/LSP diagnostic data.
+Use JSON-compatible payloads when diagnostics will cross a JSON protocol.
+
 Pass a mapping such as `{"__init__.py": "...", "model.py": "..."}` plus
 `entry="model.py"` for a virtual multi-module package. Crabwalk synthesizes missing
 package initializers, materializes one immutable snapshot, resolves the internal
-graph, and exposes qualified names such as `model.transform`.
+graph, and exposes qualified names such as `model.transform`. For this form,
+`origin_map` is keyed first by the same package-relative `.py` path and then by
+one-based line number.
 
 This API is a non-executing Python-module boundary, not a capability sandbox for the
 Rust toolchain. Declared Cargo dependencies, build scripts, procedural macros,

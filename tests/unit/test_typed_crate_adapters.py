@@ -7,6 +7,7 @@ import pytest
 from crabwalk.compiler.codegen import generate_project
 from crabwalk.compiler.frontend import analyze_path, analyze_project_path
 from crabwalk.compiler.ir import CrateCallIR, Effect, LetIR, ReturnIR
+from crabwalk.compiler.naming import owned_class_names
 from crabwalk.compiler.types import ExternalType
 from crabwalk.diagnostics import CrabwalkCompilationError
 
@@ -38,6 +39,24 @@ def adapted(value: rust.u64) -> rust.u64:
     current: rust.u64 = counter_value(counter)
     return apply_twice(current, lambda item: item + 1)
 """
+
+EXTERNAL_OWNED_SOURCE = (
+    ADAPTER_SOURCE
+    + """\
+
+@rust.fn
+def make_owned_counter(value: rust.u64) -> rust.Owned[Counter]:
+    return make_counter(value)
+
+@rust.fn
+def read_owned_counter(counter: rust.Ref[Counter]) -> rust.u64:
+    return counter_value(counter)
+
+@rust.fn
+def consume_owned_counter(counter: rust.Owned[Counter]) -> rust.u64:
+    return counter_value(counter)
+"""
+)
 
 
 def test_typed_crate_values_closures_and_effects_are_semantic(tmp_path: Path) -> None:
@@ -85,6 +104,24 @@ def test_same_nominal_external_type_remains_reassignable(tmp_path: Path) -> None
 
     assert "counter =" in generated.rust_source
     assert "model::make_counter((value + 1u64))" in generated.rust_source
+
+
+def test_external_type_has_an_opaque_owned_boundary_wrapper(tmp_path: Path) -> None:
+    source = tmp_path / "external_owned.py"
+    source.write_text(EXTERNAL_OWNED_SOURCE, encoding="utf-8")
+
+    ir = analyze_path(source)
+    generated = generate_project(ir, "_crabwalk_external_owned")
+    external = ir.functions[0].body[0].type_ref
+    assert isinstance(external, ExternalType)
+    python_class, rust_class = owned_class_names(external)
+
+    assert f'#[pyclass(unsendable, name = "{python_class}")]' in generated.rust_source
+    assert f"struct {rust_class}" in generated.rust_source
+    assert f"value: Option<{external.render()}>" in generated.rust_source
+    assert f"PyResult<{rust_class}>" in generated.rust_source
+    assert f"m.add_class::<{rust_class}>()?;" in generated.rust_source
+    assert "Counter(<opaque>)" in generated.rust_source
 
 
 def test_unannotated_opaque_crate_values_cannot_escape_a_terminal_chain(

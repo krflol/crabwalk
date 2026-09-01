@@ -503,6 +503,11 @@ def _render_expression(
             "multiply": "*",
             "divide": "/",
             "remainder": "%",
+            "bit_and": "&",
+            "bit_or": "|",
+            "bit_xor": "^",
+            "shift_left": "<<",
+            "shift_right": ">>",
             "and": "&&",
             "or": "||",
         }[expression.operator]
@@ -547,7 +552,7 @@ def _render_expression(
                 + ("," if len(rendered_arguments) == 1 else "")
                 + ")"
             )
-            return (
+            attached = (
                 "Python::attach(|py| -> PyResult<"
                 f"{expression.type_ref.render()}> {{ "
                 "let __cw_python_module = PyModule::import(py, "
@@ -557,8 +562,28 @@ def _render_expression(
                 "let __cw_python_result = __cw_python_callable.call1("
                 f"{call_tuple})?; "
                 f"__cw_python_result.extract::<{expression.type_ref.render()}>() "
-                "})?"
+                "})"
             )
+            if expression.python_error_hook is not None:
+                attached += (
+                    ".inspect_err(|_| { "
+                    f"__cw_native_{expression.python_error_hook}(); "
+                    "})"
+                )
+            return f"{attached}?"
+        if expression.parameter_types is not None:
+            rendered_arguments = [
+                (
+                    f"&({rendered}).to_vec()"
+                    if parameter_type.underlying.rust_name == "Buffer"
+                    else rendered
+                )
+                for rendered, parameter_type in zip(
+                    rendered_arguments,
+                    expression.parameter_types,
+                    strict=True,
+                )
+            ]
         arguments = ", ".join(rendered_arguments)
         return f"{'::'.join(expression.path)}({arguments})"
     if isinstance(expression, ConstructorIR):
@@ -602,6 +627,11 @@ def _render_expression(
             return f"std::sync::Mutex::new({values})"
         if expression.constructor == "Channel":
             message_type = expression.type_ref.arguments[0].arguments[0].render()
+            if expression.arguments:
+                capacity = _render_expression(
+                    expression.arguments[0], boundary_names, emission_names
+                )
+                return f"std::sync::mpsc::sync_channel::<{message_type}>({capacity})"
             return f"std::sync::mpsc::channel::<{message_type}>()"
         if expression.constructor == "Spawn":
             return f"std::thread::spawn({values})"
@@ -854,7 +884,7 @@ def _render_expression(
         if expression.receiver.type_ref.rust_name == "RefCell":
             if expression.method == "borrow_copy":
                 return f"*{rendered_receiver}.borrow()"
-        if expression.receiver.type_ref.rust_name == "Sender":
+        if expression.receiver.type_ref.rust_name in {"Sender", "SyncSender"}:
             if expression.method == "send":
                 return f"{rendered_receiver}.send({rendered_arguments[0]}).unwrap()"
         if expression.receiver.type_ref.rust_name == "Receiver":
@@ -1041,7 +1071,11 @@ def _render_expression(
             ):
                 return f"{rendered_receiver}.reduce_with({rendered_arguments[0]})"
         arguments = ", ".join(rendered_arguments)
-        return f"{rendered_receiver}.{expression.method}({arguments})"
+        rendered_call = f"{rendered_receiver}.{expression.method}({arguments})"
+        reaches_python = expression.target_symbol in boundary_names or any(
+            target in boundary_names for target in expression.dispatch_targets
+        )
+        return f"{rendered_call}?" if reaches_python else rendered_call
     if isinstance(expression, TraitCallIR):
         if expression.required_receiver == "owned":
             receiver = _render_expression(

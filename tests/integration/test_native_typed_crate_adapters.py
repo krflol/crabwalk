@@ -6,10 +6,15 @@ import sys
 from pathlib import Path
 
 from crabwalk.compiler.capabilities import capability_contract
-from tests.unit.test_typed_crate_adapters import ADAPTER_SOURCE
+from tests.unit.test_typed_crate_adapters import EXTERNAL_OWNED_SOURCE
 
 
-@capability_contract("crate.typed-value", "crate.typed-callback")
+@capability_contract(
+    "crate.typed-value",
+    "crate.typed-callback",
+    "crate.buffer-adapter",
+    "crate.external-owned-handle",
+)
 def test_typed_path_crate_value_and_callback_run_natively(tmp_path: Path) -> None:
     native = tmp_path / "native"
     source_directory = native / "src"
@@ -46,15 +51,35 @@ where
 {
     callback(callback(value))
 }
+
+pub fn byte_sum(values: &[u8]) -> u64 {
+    values.iter().map(|value| u64::from(*value)).sum()
+}
 """,
         encoding="utf-8",
     )
     source = tmp_path / "adapter.py"
     source.write_text(
-        ADAPTER_SOURCE
+        EXTERNAL_OWNED_SOURCE
         + """\
+@rust.extern(native, path="byte_sum", effects=[rust.Pure])
+def byte_sum(values: rust.Buffer[rust.u8]) -> rust.u64:
+    ...
+
+@rust.fn
+def adapted_buffer(values: rust.Buffer[rust.u8]) -> rust.u64:
+    return byte_sum(values)
+
 print(adapted(40))
 print(adapted.__crabwalk__["gil_released"])
+print(adapted_buffer(b"ABC"))
+counter = make_owned_counter(41)
+print(read_owned_counter(counter), counter.moved)
+print(consume_owned_counter(counter), counter.moved)
+try:
+    counter.to_python()
+except TypeError as error:
+    print("opaque", "no implicit Python representation" in str(error))
 """,
         encoding="utf-8",
     )
@@ -74,4 +99,11 @@ print(adapted.__crabwalk__["gil_released"])
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["42", "True"]
+    assert result.stdout.splitlines() == [
+        "42",
+        "True",
+        "198",
+        "41 False",
+        "41 True",
+        "opaque True",
+    ]

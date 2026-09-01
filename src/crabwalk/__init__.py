@@ -19,7 +19,7 @@ from .diagnostics import (
     CrabwalkRustErrorSource,
     CrabwalkThreadError,
 )
-from .embedding import CompiledSource, compile_source
+from .embedding import CompiledSource, GeneratedArtifacts, compile_source
 from .telemetry import BoundaryTelemetry
 
 __all__ = [
@@ -32,6 +32,7 @@ __all__ = [
     "CrabwalkRustErrorSource",
     "CrabwalkThreadError",
     "CompiledSource",
+    "GeneratedArtifacts",
     "BoundaryTelemetry",
     "GENERATED_WRAPPER_ABI_VERSION",
     "RUNTIME_ABI_VERSION",

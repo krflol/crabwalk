@@ -212,13 +212,10 @@ def read_via_method() -> rust.u64:
     assert returned.value.target_symbol == method.rust_symbol
     assert returned.value.dispatch_targets == (method.rust_symbol,)
 
-    with pytest.raises(CrabwalkCompilationError) as captured:
-        generate_project(ir, "_crabwalk_method_boundary")
-
-    diagnostic = captured.value.diagnostics[0]
-    assert diagnostic.code == "CRAB207"
-    assert diagnostic.span is not None
-    assert "method" in diagnostic.message.lower()
+    generated = generate_project(ir, "_crabwalk_method_boundary")
+    assert "fn read(&self) -> PyResult<u64>" in generated.rust_source
+    assert "return std::result::Result::Ok(counter.value);" in generated.rust_source
+    assert "counter.read()?" in generated.rust_source
 
 
 @pytest.mark.parametrize(

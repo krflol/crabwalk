@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 
+_CARGO_CACHE_TAG = """\
+Signature: 8a477f597d28d172789f06886806bc55
+# This file is a cache directory tag created by cargo.
+# For information about cache directory tags see https://bford.info/cachedir/
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class CargoOutcome:
     command: tuple[str, ...]
@@ -122,6 +129,7 @@ class CargoBuilder:
         cancelled: Callable[[], bool] | None = None,
     ) -> CargoOutcome:
         target_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_cargo_cache_tag(target_dir)
         command = self.command_for(
             target_dir,
             mode,
@@ -187,6 +195,22 @@ class CargoBuilder:
             artifact,
             artifact_fresh,
         )
+
+
+def _ensure_cargo_cache_tag(target_dir: Path) -> None:
+    """Give a Crabwalk-created target Cargo's standard deletion-safety marker."""
+
+    marker = target_dir / "CACHEDIR.TAG"
+    if marker.is_file():
+        return
+    try:
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        return
+    try:
+        os.write(descriptor, _CARGO_CACHE_TAG.encode("utf-8"))
+    finally:
+        os.close(descriptor)
 
 
 def _run_command(

@@ -9,7 +9,11 @@ from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_python_adapters import PYTHON_ADAPTER_SOURCE
 
 
-@capability_contract("python-adapter.success-errors")
+@capability_contract(
+    "python-adapter.success-errors",
+    "python-adapter.explicit-target",
+    "python-adapter.method-placement",
+)
 def test_typed_python_adapter_success_exception_and_invalid_return(
     tmp_path: Path,
 ) -> None:
@@ -20,6 +24,8 @@ def test_typed_python_adapter_success_exception_and_invalid_return(
 print(label(7))
 print(label.__crabwalk__["gil_released"])
 print([str(value) for value in label.__crabwalk__["effects"]])
+print(negate(21))
+print(negate_via_method(22))
 try:
     fail(9)
 except ValueError as error:
@@ -52,5 +58,61 @@ except TypeError as error:
     assert lines[1] == "False"
     assert "PythonRuntime" in lines[2]
     assert "Blocking" in lines[2]
-    assert lines[3] == "ValueError bad-9"
-    assert lines[4] == "TypeError True"
+    assert lines[3] == "-21"
+    assert lines[4] == "-22"
+    assert lines[5] == "ValueError bad-9"
+    assert lines[6] == "TypeError True"
+
+
+@capability_contract("python-adapter.error-hook")
+def test_python_adapter_error_hook_runs_before_original_pyerr_propagates(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "adapter-error-observed.txt"
+    marker_literal = str(marker).replace("\\", "\\\\")
+    source = tmp_path / "native_python_adapter_error_hook.py"
+    source.write_text(
+        f'''\
+from crabwalk import rust
+
+ORIGINAL_ERROR = ValueError("bad-9")
+
+@rust.fn
+def record_error() -> None:
+    marker: rust.PathBuf = rust.PathBuf("{marker_literal}")
+    marker.write_string("observed").is_ok()
+
+@rust.python_adapter(on_error=record_error)
+def python_failure(value: rust.u64) -> rust.u64:
+    raise ORIGINAL_ERROR
+
+@rust.fn
+def fail(value: rust.u64) -> rust.u64:
+    return python_failure(value)
+
+try:
+    fail(9)
+except ValueError as error:
+    print(type(error).__name__, str(error))
+    print(error is ORIGINAL_ERROR)
+''',
+        encoding="utf-8",
+    )
+    root = Path(__file__).resolve().parents[2]
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(root / "src")
+    environment["CRABWALK_PROGRESS"] = "never"
+
+    result = subprocess.run(
+        [sys.executable, "-u", str(source)],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["ValueError bad-9", "True"]
+    assert marker.read_text(encoding="utf-8") == "observed"

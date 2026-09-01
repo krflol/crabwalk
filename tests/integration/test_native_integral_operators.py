@@ -6,18 +6,19 @@ import sys
 from pathlib import Path
 
 from crabwalk.compiler.capabilities import capability_contract
-from tests.unit.test_concurrency import CONCURRENCY_SOURCE
+from tests.unit.test_integral_operators import INTEGRAL_OPERATOR_SOURCE
 
 
-@capability_contract("channels.unbounded", "channels.bounded")
-def test_threads_channels_and_mutex_run_natively(tmp_path: Path) -> None:
-    source = tmp_path / "concurrency.py"
+@capability_contract("compiler.integral-bitwise")
+def test_integral_bitwise_operators_run_natively(tmp_path: Path) -> None:
+    source = tmp_path / "native_integral_operators.py"
     source.write_text(
-        CONCURRENCY_SOURCE
-        + "\nprint(moved_vector_length())\n"
-        + "print(channel_value())\n"
-        + "print(bounded_channel_value())\n"
-        + "print(shared_counter())\n",
+        INTEGRAL_OPERATOR_SOURCE
+        + """
+print(breakpoint_before_enabled(3))
+print(breakpoint_before_enabled(2))
+print(bitwise_pipeline(8))
+""",
         encoding="utf-8",
     )
     root = Path(__file__).resolve().parents[2]
@@ -36,4 +37,4 @@ def test_threads_channels_and_mutex_run_natively(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["3", "42", "84", "1"]
+    assert result.stdout.splitlines() == ["True", "False", "11"]

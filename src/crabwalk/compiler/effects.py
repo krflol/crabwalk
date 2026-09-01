@@ -182,7 +182,7 @@ def direct_expression_effects(expression: ExpressionIR) -> frozenset[Effect]:
             effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
         if receiver == "Receiver" and expression.method in {"recv", "recv_async"}:
             effects.update({Effect.BLOCKING, Effect.MAY_PANIC})
-        if receiver in {"Arc", "Mutex", "RefCell", "Sender"}:
+        if receiver in {"Arc", "Mutex", "RefCell", "Sender", "SyncSender"}:
             effects.add(Effect.MAY_PANIC)
         if (
             receiver in {"HashMap", "BTreeMap"}
@@ -307,6 +307,8 @@ def expression_dispatch_targets(expression: ExpressionIR) -> tuple[str, ...]:
         return (expression.target,)
     if isinstance(expression, BinaryIR) and expression.target_symbol is not None:
         return (expression.target_symbol,)
+    if isinstance(expression, CrateCallIR) and expression.python_error_hook is not None:
+        return (expression.python_error_hook,)
     return ()
 
 

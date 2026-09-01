@@ -2,7 +2,7 @@
 type: reference
 project: Crabwalk
 status: implemented
-updated: 2026-08-30
+updated: 2026-09-01
 tags:
   - project/crabwalk
   - docs/testing
@@ -105,14 +105,15 @@ report plus its SHA-256 to the GitHub release.
 - Exact release portability is established only by the protected tag workflow on
   the immutable candidate SHA.
 
-## Local 1.1.0 release-candidate evidence
+## Local 1.1.1 release-candidate evidence
 
-On 2026-08-30, the release candidate was exercised on CPython 3.11.8,
+On 2026-09-01, the release candidate was exercised on CPython 3.11.8,
 Windows x86-64, and rustc/Cargo 1.97.0:
 
-- **393 unit tests** passed;
-- **64 native integration tests** passed, for **457 tests total**;
-- Ruff formatting/lint passed across 196 Python files;
+- **421 unit tests** passed;
+- **70 integration tests** passed, for **491 tests total** and all **77 executable
+  capability contracts**;
+- Ruff formatting/lint passed across 203 Python files;
 - mypy passed across all 47 configured core source modules, including frontend,
   runtime, Rust surface, CLI, loader, inspection, LSP, telemetry, and tooling;
 - the public PEP 561 consumer smoke passed Pyright with zero diagnostics;
@@ -122,9 +123,9 @@ Windows x86-64, and rustc/Cargo 1.97.0:
   Cargo/rustc absent;
 - the Miri contract crate passed ordinary stable tests locally; the tag workflow
   runs it under pinned nightly Miri;
-- the versioned performance gate passed with no violations: 21.03s cold process,
-  7.16s warm process, 6.29s warm 100k nested-row construction, 0.028s native
-  call, 21,585,920 bytes retained RSS growth, one crossing, and zero native
+- the versioned performance gate passed with no violations: 25.11s cold process,
+  9.36s warm process, 8.50s warm 100k nested-row construction, 0.025s native
+  call, 21,590,016 bytes retained RSS growth, one crossing, and zero native
   clones; and
 - generated capability documentation, Python byte compilation, structured-error,
   100k-domain, Shared reload/GC/shutdown, virtual-package embedding, cancellation,
@@ -134,4 +135,4 @@ These numbers describe this local machine and fixture, not universal application
 performance. The exact final tag must still pass the complete Windows/Linux/macOS
 matrix for CPython 3.11 and 3.14, the 3.12/3.13 unit lanes, quality/generated-Rust
 checks, Miri, performance budgets, artifact smoke installs, and Trusted Publishing
-workflow before 1.1.0 is considered released.
+workflow before 1.1.1 is considered released.

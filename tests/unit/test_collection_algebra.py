@@ -31,6 +31,27 @@ def increment_checked(value: rust.u64) -> rust.u64:
     return checked(value).map(lambda number: number + 1).unwrap_or(0)
 
 @rust.fn
+def clone_string(value: rust.String) -> rust.String:
+    return value.clone()
+
+@rust.fn
+def mutate_option_payload() -> rust.usize:
+    values: rust.Option[rust.Vec[rust.i64]] = rust.Some(rust.Vec([1]))
+    values.as_mut().unwrap().push(2)
+    return values.as_ref().unwrap().len()
+
+@rust.fn
+def error_length(error: rust.String) -> rust.i64:
+    return rust.checked_cast(error.len(), rust.i64).expect("error length overflow")
+
+@rust.fn
+def map_checked_cast_error(
+    value: rust.i64,
+) -> rust.Result[rust.u64, rust.i64]:
+    converted: rust.Result[rust.u64, rust.String] = rust.checked_cast(value, rust.u64)
+    return converted.map_err(error_length)
+
+@rust.fn
 def word_counts() -> rust.HashMap[rust.String, rust.u64]:
     counts: rust.HashMap[rust.String, rust.u64] = rust.HashMap()
     counts.add("rust", 2)
@@ -168,3 +189,10 @@ def test_collection_and_error_algebra_lower_as_typed_compositions(
     )
     assert ".into_iter().map(" in generated.rust_source
     assert ".reserve(4usize)" in generated.rust_source
+    assert "return value.clone();" in generated.rust_source
+    assert "values.as_mut().unwrap().push(2i64)" in generated.rust_source
+    assert re.search(
+        r"converted\.map_err\(\|(?P<item>cw_b_[^|]+)\| "
+        r"__cw_native_[^(]+\((?P=item)\)\)",
+        generated.rust_source,
+    )

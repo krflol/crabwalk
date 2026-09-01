@@ -9,7 +9,10 @@ from pathlib import Path
 from crabwalk.compiler.capabilities import capability_contract
 
 
-@capability_contract("embedding.nonexecuting-source-callable")
+@capability_contract(
+    "embedding.nonexecuting-source-callable",
+    "embedding.generated-artifacts",
+)
 def test_source_compiles_and_binds_without_python_module_execution(
     tmp_path: Path,
 ) -> None:
@@ -42,11 +45,18 @@ compiled = compile_source(
     progress=phases.append,
 )
 normalize = compiled.function("normalize")
+artifacts = compiled.artifacts()
 print(normalize("CrabWalk"))
 print(Path({str(sentinel)!r}).exists())
 print(json.dumps(normalize.__crabwalk__["parameter_boundaries"]["name"], sort_keys=True))
 print(phases.count("Analyzing Python source"))
 print(compiled.functions)
+print(
+    "fn __cw_native_" in artifacts.rust_source,
+    artifacts.cargo_manifest.startswith("[package]"),
+    artifacts.source_map["schema_version"],
+    artifacts.build_inputs["fingerprint"] == compiled.fingerprint,
+)
 """,
         encoding="utf-8",
     )
@@ -81,6 +91,7 @@ print(compiled.functions)
     }
     assert lines[3] == "1"
     assert lines[4] == "('normalize',)"
+    assert lines[5] == "True True 2 True"
 
 
 @capability_contract("embedding.virtual-package", native=True)
@@ -89,6 +100,7 @@ def test_virtual_package_compiles_cross_module_calls_without_execution(
 ) -> None:
     runner = tmp_path / "run_virtual_embedding.py"
     sentinel = tmp_path / "virtual-executed.txt"
+    deep_cache = tmp_path / ("deep-embedding-root-" * 5) / "cache"
     sources = {
         "__init__.py": (
             f"from pathlib import Path\n"
@@ -119,7 +131,7 @@ compiled = compile_source(
     {sources!r},
     module_name="virtual_recipe",
     entry="kernel.py",
-    cache_directory={str(tmp_path / "cache")!r},
+    cache_directory={str(deep_cache)!r},
 )
 print(compiled.function("kernel.triple")(4))
 print({str(sentinel)!r})

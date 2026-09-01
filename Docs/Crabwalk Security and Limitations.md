@@ -61,19 +61,34 @@ general raw-Rust or arbitrary-FFI escape hatch. PyO3 wrappers:
   unsafe-FFI effects;
 - keep the GIL and the exporter lease alive for every `BorrowedBuffer` call.
 
+Containment does not replace Rust's process-wide panic hook. A caught panic may
+therefore still write its panic message to stderr before Crabwalk raises
+`CrabwalkPanicError`. Expected validation, budget exhaustion, cancellation, and
+other routine control outcomes should use typed `Result` values; Crabwalk does not
+silence or globally replace an embedding application's panic hook.
+
+An explicit `@rust.fn(release_gil=True)` can override conservative non-Python
+effects for an audited long-running call. Validation still rejects reachable Python
+runtime work and call-scoped `Buffer`, `Str`, `Ref`, or `Mut` inputs. Owned/shared
+native values are extracted and their Python guards are dropped before detachment;
+the adapter author is responsible for the declared external code's thread safety
+and no-Python guarantee.
+
 `rust.Buffer[T]` never turns Python-owned storage into `&[T]`. The generated
 wrapper retains PyO3's `PyBuffer<T>` lease and exposes its
 `ReadOnlyCell<T>` elements through copied reads, preserving the fact that external
 aliases may exist. Runtime and generated preflights require a read-only,
 one-dimensional, C-contiguous, native-endian numeric exporter before any owned
 argument is moved. Buffer views cannot escape the call or enter spawned/Rayon
-closures.
+closures. A typed external adapter expecting `&[T]` receives a temporary copied
+`Vec<T>` rather than an unsafe immutable view of aliasable exporter memory.
 
 Typed effects propagate across ordinary calls, methods, traits, operators, and
 function-pointer targets. Pre-codegen placement validation rejects Python runtime
 work in workers and generated contexts whose current Rust signature cannot carry a
-`PyResult`, including methods, operators, native async helpers, and iterator
-closures. Receiver capability is also semantic: shared references cannot satisfy
+`PyResult`, including trait/operator methods, native async helpers, and iterator
+closures. Inherent method glue is result-aware and supports synchronous Python
+adapters. Receiver capability is also semantic: shared references cannot satisfy
 mutable or consuming methods, while the root ownership of nested field/index
 places is retained. These checks produce source-spanned diagnostics before rustc.
 
@@ -147,14 +162,22 @@ index, dependency, and provenance policies.
   dynamic `__all__` and import-time mutation remain unsupported.
 - No arbitrary Python objects, reflection, generators, dynamic imports, or
   exceptions-as-control-flow inside `@rust.fn`. Synchronous Python calls require a
-  typed `@rust.python_adapter` and remain forbidden in native closures, methods,
+  typed `@rust.python_adapter`; explicit `module=`/`name=` routing is supported.
+  An adapter may name one native `on_error` observer that runs immediately before
+  the original `PyErr` propagates. The observer must be synchronous, zero-argument,
+  unit-returning, and free of reachable Python or panic effects.
+  Python calls remain forbidden in native closures, trait/operator methods,
   workers, and async helpers whose signatures cannot carry `PyResult`.
 - `compile_source` accepts one source or a virtual multi-module mapping and can
   terminate an active Cargo process tree, but it does not sandbox trusted build
-  execution or preempt already-entered native user code.
+  execution or preempt already-entered native user code. `source_root` affects only
+  relative dependency resolution; `origin_map` metadata is host-supplied and should
+  be JSON-compatible when emitted through JSON/LSP tooling.
 - Exported calls support positional/keyword arguments and lossless literal
   defaults. Positional-only, keyword-only, variadic, and mutable/dynamic defaults
-  remain unsupported. There is still no arbitrary crate reflection, inline Rust,
+  remain unsupported. Direct Python ABI tuples are bounded to the 12-element
+  conversion implemented by PyO3 0.29; native-only tuples may be larger. There is
+  still no arbitrary crate reflection, inline Rust,
   arbitrary macros, raw address dereference, unions, user-authored unsafe traits,
   or general FFI declarations.
 - `rust.Buffer[T]` is input-only and limited to read-only, one-dimensional,
@@ -163,9 +186,10 @@ index, dependency, and provenance policies.
   Zero-length exporters use a canonical empty Rust slice after format and shape
   validation; pointer alignment remains mandatory for every non-empty buffer.
 - Borrowed values cannot be returned or transferred through `async_call`. Explicit
-  `Owned[Domain]`, `Owned[Vec[T]]`, and `Owned[TextColumn]` returns produce
-  move-aware handles. Recursive mappings/sequences cross only through supported,
-  explicitly allocating codecs.
+  `Owned[Domain]`, `Owned[Vec[T]]`, `Owned[TextColumn]`, and
+  `Owned[ExternalType]` returns produce move-aware handles. External handles are
+  opaque and cannot be converted implicitly to Python; recursive mappings/sequences
+  cross only through supported, explicitly allocating codecs.
 - Ordinary ownership handles are thread-affine. `Shared[T]` is limited to immutable
   compiler-approved `Send + Sync` payloads, uses `Arc<T>`, and exposes no mutable
   operation or retained borrow.

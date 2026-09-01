@@ -26,7 +26,7 @@ from .ir import (
     TraitCallIR,
     TypeRef,
 )
-from .types import IteratorExecution, IteratorType
+from .types import ExternalType, IteratorExecution, IteratorType
 from .naming import (
     PYO3_CARGO_ALIAS,
     cargo_dependency_key,
@@ -49,6 +49,7 @@ def validate_package_ir(ir: PackageIR) -> None:
         expressions = tuple(_walk_ir(function.body))
         _validate_unicode_literals(expressions)
         _validate_effect_annotations(function, expressions)
+        _validate_release_gil_policy(function)
         _validate_function_boundary_placement(function, functions)
         worker_closures = {
             id(closure)
@@ -57,6 +58,37 @@ def validate_package_ir(ir: PackageIR) -> None:
         }
         for expression in expressions:
             _validate_closure_contract(expression)
+            if (
+                isinstance(expression, CrateCallIR)
+                and expression.python_error_hook is not None
+            ):
+                hook = functions.get(expression.python_error_hook)
+                if hook is None:
+                    raise AssertionError("resolved Python adapter error hook is absent")
+                forbidden = {
+                    Effect.PYTHON_RUNTIME,
+                    Effect.MAY_PANIC,
+                }.intersection(hook.effects)
+                if forbidden:
+                    rendered = ", ".join(
+                        effect.value for effect in sorted(forbidden, key=str)
+                    )
+                    raise CrabwalkCompilationError(
+                        Diagnostic(
+                            "CRAB238",
+                            "Python adapter error hook cannot preserve PyErr",
+                            (
+                                f"{hook.qualified_name} has {rendered} effects; an "
+                                "on_error hook must complete natively without Python "
+                                "or panic before the original exception propagates."
+                            ),
+                            expression.span,
+                            (
+                                "Use a zero-argument native handler whose fallible "
+                                "operations are handled without unwrap or expect."
+                            ),
+                        )
+                    )
             closure = _worker_closure(expression)
             closures = (() if closure is None else (closure,)) + _parallel_closures(
                 expression
@@ -582,7 +614,8 @@ def _validate_emitted_identifiers(ir: PackageIR) -> None:
     for enum in ir.enums:
         type_table.append((enum.symbol, enum, enum.qualified_name))
     for trait in ir.traits:
-        type_table.append((trait.symbol, trait, trait.qualified_name))
+        if trait.external_path is None:
+            type_table.append((trait.symbol, trait, trait.qualified_name))
     for function in ir.functions:
         if function.method_for is None or function.method_name is None:
             continue
@@ -610,6 +643,21 @@ def _validate_emitted_identifiers(ir: PackageIR) -> None:
     ]
     owned_types.extend(struct.type_ref for struct in ir.structs)
     owned_types.extend(enum.type_ref for enum in ir.enums if not enum.is_error)
+    owned_types.extend(
+        parameter.type_ref.underlying
+        for function in ir.functions
+        if function.exported
+        for parameter in function.parameters
+        if parameter.type_ref.ownership is not None
+        and isinstance(parameter.type_ref.underlying, ExternalType)
+    )
+    owned_types.extend(
+        function.return_type.underlying
+        for function in ir.functions
+        if function.exported
+        and function.return_type.ownership == "Owned"
+        and isinstance(function.return_type.underlying, ExternalType)
+    )
     emitted_owned: set[str] = set()
     for type_ref in owned_types:
         _, rust_name = owned_class_names(type_ref)
@@ -688,19 +736,19 @@ def _validate_function_boundary_placement(
     if Effect.PYTHON_RUNTIME not in function.effects:
         return
     offender = _python_runtime_offender_in_body(function, functions)
-    if function.method_for is not None:
+    if function.method_for is not None and (
+        function.trait_symbol is not None or function.operator_kind is not None
+    ):
         kind = (
             "operator implementation"
             if function.operator_kind is not None
             else "trait implementation"
-            if function.trait_symbol is not None
-            else "method"
         )
         _boundary_error(
             f"Python-runtime effect inside a native {kind} is unsupported",
             (
-                "Generated Rust method and operator signatures return ordinary "
-                "values, not PyResult."
+                "The implemented Rust trait/operator signature returns an ordinary "
+                "value, not PyResult."
             ),
             offender or function,
             "Keep the implementation native-only and cross Python in an exported wrapper.",
@@ -712,6 +760,60 @@ def _validate_function_boundary_placement(
             offender or function,
             "Cross Python before or after rust.block_on, outside the async helper.",
         )
+
+
+def _validate_release_gil_policy(function: FunctionIR) -> None:
+    if not function.release_gil:
+        return
+    if not function.exported:
+        raise AssertionError("explicit GIL release reached a non-exported function")
+    if Effect.PYTHON_RUNTIME in function.effects:
+        raise CrabwalkCompilationError(
+            Diagnostic(
+                "CRAB236",
+                "Audited GIL release reaches Python",
+                (
+                    f"{function.qualified_name} cannot release the GIL because its "
+                    "native call graph reaches Python runtime state."
+                ),
+                function.span,
+                "Remove release_gil=True or move the Python operation outside the native call.",
+            )
+        )
+    borrowed = next(
+        (
+            parameter
+            for parameter in function.parameters
+            if _type_retains_python_borrow(parameter.type_ref)
+        ),
+        None,
+    )
+    if borrowed is not None:
+        raise CrabwalkCompilationError(
+            Diagnostic(
+                "CRAB236",
+                "Audited GIL release retains a Python borrow",
+                (
+                    f"Parameter '{borrowed.name}' uses {borrowed.type_ref.display()}, "
+                    "whose value is valid only while its Python guard remains attached."
+                ),
+                borrowed.span,
+                (
+                    "Transfer data through rust.Owned, use an immutable rust.Shared "
+                    "handle, or keep the GIL held."
+                ),
+            )
+        )
+
+
+def _type_retains_python_borrow(type_ref: TypeRef) -> bool:
+    if type_ref.ownership in {"Owned", "Shared"}:
+        return False
+    if type_ref.ownership in {"Ref", "Mut"}:
+        return True
+    if type_ref.rust_name in {"Buffer", "Str", "LifetimeRef"}:
+        return True
+    return any(_type_retains_python_borrow(value) for value in type_ref.arguments)
 
 
 def _boundary_error(
@@ -853,6 +955,8 @@ def _dispatch_targets(expression: object) -> tuple[str, ...]:
         return (expression.target,)
     if isinstance(expression, BinaryIR) and expression.target_symbol is not None:
         return (expression.target_symbol,)
+    if isinstance(expression, CrateCallIR) and expression.python_error_hook is not None:
+        return (expression.python_error_hook,)
     return ()
 
 

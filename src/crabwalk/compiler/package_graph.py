@@ -23,6 +23,7 @@ _CRABWALK_DECLARATION_MEMBERS = frozenset(
         "crate",
         "enum",
         "extern",
+        "extern_trait",
         "extern_type",
         "fn",
         "generic",

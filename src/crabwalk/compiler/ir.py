@@ -141,6 +141,7 @@ class TraitIR:
     methods: tuple[TraitMethodIR, ...]
     span: SourceSpan
     symbol_id: SymbolId | None = None
+    external_path: tuple[str, ...] | None = None
 
     @property
     def qualified_name(self) -> str:
@@ -263,6 +264,11 @@ class BinaryIR:
         "multiply",
         "divide",
         "remainder",
+        "bit_and",
+        "bit_or",
+        "bit_xor",
+        "shift_left",
+        "shift_right",
         "and",
         "or",
     ]
@@ -298,6 +304,8 @@ class CrateCallIR:
     span: SourceSpan
     declared_effects: tuple[Effect, ...] | None = None
     adapter_name: str | None = None
+    parameter_types: tuple[TypeRef, ...] | None = None
+    python_error_hook: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -809,6 +817,7 @@ class FunctionIR:
     trait_symbol: str | None = None
     operator_kind: str | None = None
     symbol_id: SymbolId | None = None
+    release_gil: bool = False
 
     @property
     def rust_symbol(self) -> str:

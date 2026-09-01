@@ -26,6 +26,7 @@ from .ir import (
 from .cargo_emission import render_build_rs, render_cargo_toml
 from .emission import EmissionNames, Writer as _Writer
 from .rust_emission import write_native_function as _write_native_function
+from .types import ExternalType
 from .naming import (
     PYO3_CARGO_ALIAS,
     cargo_dependency_key,
@@ -33,7 +34,7 @@ from .naming import (
     shared_class_names,
 )
 
-CODEGEN_SCHEMA_VERSION = 43
+CODEGEN_SCHEMA_VERSION = 46
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
@@ -120,8 +121,9 @@ def generate_project(
         writer.line()
 
     for trait in ir.traits:
-        _write_native_trait(writer, trait)
-        writer.line()
+        if trait.external_path is None:
+            _write_native_trait(writer, trait)
+            writer.line()
 
     for enum in ir.enums:
         _write_native_enum(writer, enum)
@@ -160,6 +162,11 @@ def generate_project(
         )
         writer.line()
 
+    owned_external_types = _owned_external_types(ir)
+    for external_type in owned_external_types:
+        _write_owned_external_class(writer, external_type)
+        writer.line()
+
     shared_types = _shared_types(ir)
     for shared_type in shared_types:
         _write_shared_class(writer, shared_type)
@@ -196,6 +203,9 @@ def generate_project(
         )
     for vector_type in owned_vectors:
         _, rust_class = owned_class_names(vector_type)
+        writer.line(f"m.add_class::<{rust_class}>()?;")
+    for external_type in owned_external_types:
+        _, rust_class = owned_class_names(external_type)
         writer.line(f"m.add_class::<{rust_class}>()?;")
     if owned_text_column is not None:
         _, rust_class = owned_class_names(owned_text_column)
@@ -458,9 +468,14 @@ def _write_method_glue(
     arguments = ", ".join(
         ("self", *(parameter.rust_name for parameter in function.parameters[1:]))
     )
+    return_type = (
+        f"PyResult<{function.return_type.render()}>"
+        if function.python_boundary
+        else function.return_type.render()
+    )
     writer.line(
         f"fn {emitted_method_name or function.method_name}{generics}({parameters}) "
-        f"-> {function.return_type.render()} {{",
+        f"-> {return_type} {{",
         function.span,
         "method_impl",
     )
@@ -1363,8 +1378,19 @@ def _write_export_wrapper(
             python_token,
             untyped_buffers.get(parameter.rust_name),
         )
+    if releases_gil:
+        for parameter in function.parameters:
+            if parameter.type_ref.ownership in {"Owned", "Shared"}:
+                writer.line(
+                    f"drop({parameter.rust_name});",
+                    parameter.span,
+                    "gil_release_guard_drop",
+                )
     if owned_return:
         native_call = f"__cw_native_{function.rust_symbol}({arguments})"
+        if releases_gil:
+            assert python_token is not None
+            native_call = f"{python_token}.detach(move || {native_call})"
         caught_result = emission_names.temporary("caught_result")
         writer.line(
             f"let {caught_result} = __cw_catch_panic(|| {native_call})?;",
@@ -1482,6 +1508,7 @@ def _write_buffer_support(writer: _Writer) -> None:
         "fn iter(&self) -> impl Iterator<Item = T> + '_ { "
         "self.values.iter().map(pyo3::buffer::ReadOnlyCell::get) }"
     )
+    writer.line("fn to_vec(&self) -> Vec<T> { self.iter().collect() }")
     writer.leave()
     writer.line("}")
 
@@ -2012,6 +2039,15 @@ def function_releases_gil(function: FunctionIR) -> bool:
     """Whether an exported wrapper can detach from Python for the native call."""
 
     effects = set(function.effects)
+    if function.release_gil:
+        return (
+            function.exported
+            and Effect.PYTHON_RUNTIME not in effects
+            and all(
+                not _type_retains_python_borrow_for_detach(parameter.type_ref)
+                for parameter in function.parameters
+            )
+        )
     if effects & {
         Effect.BORROWED_BUFFER,
         Effect.OPAQUE_CRATE_CALL,
@@ -2055,6 +2091,18 @@ def function_releases_gil(function: FunctionIR) -> bool:
     )
 
 
+def _type_retains_python_borrow_for_detach(type_ref: TypeRef) -> bool:
+    if type_ref.ownership in {"Owned", "Shared"}:
+        return False
+    if type_ref.ownership in {"Ref", "Mut"}:
+        return True
+    if type_ref.rust_name in {"Buffer", "Str", "LifetimeRef"}:
+        return True
+    return any(
+        _type_retains_python_borrow_for_detach(value) for value in type_ref.arguments
+    )
+
+
 def _owned_vector_types(ir: PackageIR) -> tuple[TypeRef, ...]:
     values: dict[str, TypeRef] = {}
     for function in ir.functions:
@@ -2092,6 +2140,57 @@ def _owned_text_column_type(ir: PackageIR) -> TypeRef | None:
         ):
             return TypeRef("TextColumn")
     return None
+
+
+def _owned_external_types(ir: PackageIR) -> tuple[ExternalType, ...]:
+    values: dict[str, ExternalType] = {}
+    for function in ir.functions:
+        if not function.exported:
+            continue
+        for parameter in function.parameters:
+            underlying = parameter.type_ref.underlying
+            if parameter.type_ref.ownership is not None and isinstance(
+                underlying, ExternalType
+            ):
+                values[underlying.render()] = underlying
+        return_type = function.return_type.underlying
+        if function.return_type.ownership == "Owned" and isinstance(
+            return_type, ExternalType
+        ):
+            values[return_type.render()] = return_type
+    return tuple(values[key] for key in sorted(values))
+
+
+def _write_owned_external_class(writer: _Writer, type_ref: ExternalType) -> None:
+    """Emit one opaque, move-aware Python holder without crate trait assumptions."""
+
+    python_name, rust_name = owned_class_names(type_ref)
+    rendered = type_ref.render()
+    display = type_ref.display()
+    writer.line(f'#[pyclass(unsendable, name = "{python_name}")]')
+    writer.line(f"struct {rust_name} {{")
+    writer.enter()
+    writer.line(f"value: Option<{rendered}>,")
+    writer.leave()
+    writer.line("}")
+    writer.line("#[pymethods]")
+    writer.line(f"impl {rust_name} {{")
+    writer.enter()
+    writer.line("fn is_moved(&self) -> bool {")
+    writer.enter()
+    writer.line("self.value.is_none()")
+    writer.leave()
+    writer.line("}")
+    writer.line("fn __repr__(&self) -> String {")
+    writer.enter()
+    writer.line(
+        f'if self.value.is_some() {{ String::from("{display}(<opaque>)") }} '
+        f'else {{ String::from("{display}(<moved>)") }}'
+    )
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
 
 
 def _shared_types(ir: PackageIR) -> tuple[TypeRef, ...]:

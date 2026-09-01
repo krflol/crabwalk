@@ -89,6 +89,30 @@ def combined(
     )
 
 
+def test_external_buffer_adapter_uses_a_safe_owned_slice_copy(tmp_path: Path) -> None:
+    source = _write_source(
+        tmp_path,
+        """\
+from crabwalk import rust
+
+native = rust.crate("native-buffer", path="./native")
+
+@rust.extern(native, path="byte_sum", effects=[rust.Pure])
+def byte_sum(values: rust.Buffer[rust.u8]) -> rust.u64:
+    ...
+
+@rust.fn
+def total(values: rust.Buffer[rust.u8]) -> rust.u64:
+    return byte_sum(values)
+""",
+    )
+
+    generated = generate_project(analyze_path(source), "_crabwalk_buffer_adapter")
+
+    assert "fn to_vec(&self) -> Vec<T>" in generated.rust_source
+    assert "::byte_sum(&(values).to_vec())" in generated.rust_source
+
+
 @capability_contract(
     "buffer.invalid-input-rejected",
     native=False,

@@ -21,18 +21,28 @@ from crabwalk.tooling import (
 @capability_contract("tooling.diagnostics-explain-lsp", native=False)
 def test_machine_diagnostics_explain_and_lsp_contract(tmp_path: Path) -> None:
     span = SourceSpan(str(tmp_path / "kernel.py"), 2, 3, 2, 8)
-    diagnostic = Diagnostic("CRAB102", "Unsupported construct", "bad call", span)
+    diagnostic = Diagnostic(
+        "CRAB102",
+        "Unsupported construct",
+        "bad call",
+        span,
+        external_origin={"node": "node-42"},
+    )
     payload = diagnostic_document((diagnostic,), operation="check")
     assert payload["schema_version"] == DIAGNOSTIC_SCHEMA_VERSION
     diagnostics = payload["diagnostics"]
     assert isinstance(diagnostics, list)
     assert diagnostics[0]["code"] == "CRAB102"
+    assert diagnostics[0]["external_origin"] == {"node": "node-42"}
     assert explain_diagnostic("crab102") is not None
+    assert explain_diagnostic("crab236") is not None
+    assert explain_diagnostic("crab237") is not None
     lsp = _lsp_diagnostic(diagnostic)
     assert lsp["range"] == {
         "start": {"line": 1, "character": 2},
         "end": {"line": 1, "character": 7},
     }
+    assert lsp["data"]["external_origin"] == {"node": "node-42"}
 
 
 def test_lsp_stdio_initialization_and_shutdown_are_framed() -> None:

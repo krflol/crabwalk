@@ -6,18 +6,14 @@ import sys
 from pathlib import Path
 
 from crabwalk.compiler.capabilities import capability_contract
-from tests.unit.test_concurrency import CONCURRENCY_SOURCE
+from tests.unit.test_borrowed_returns import BORROWED_RETURN_SOURCE
 
 
-@capability_contract("channels.unbounded", "channels.bounded")
-def test_threads_channels_and_mutex_run_natively(tmp_path: Path) -> None:
-    source = tmp_path / "concurrency.py"
+@capability_contract("ownership.borrowed-return-identity")
+def test_borrowed_collection_return_runs_natively(tmp_path: Path) -> None:
+    source = tmp_path / "native_borrowed_returns.py"
     source.write_text(
-        CONCURRENCY_SOURCE
-        + "\nprint(moved_vector_length())\n"
-        + "print(channel_value())\n"
-        + "print(bounded_channel_value())\n"
-        + "print(shared_counter())\n",
+        BORROWED_RETURN_SOURCE + "\nprint(observe_lengths())\n",
         encoding="utf-8",
     )
     root = Path(__file__).resolve().parents[2]
@@ -36,4 +32,4 @@ def test_threads_channels_and_mutex_run_natively(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["3", "42", "84", "1"]
+    assert result.stdout.splitlines() == ["15"]
