@@ -24,6 +24,9 @@ def test_collections_results_and_string_etl_run_natively(tmp_path: Path) -> None
         + """
 print(classify(7), classify(0))
 print(increment_checked(4), increment_checked(0))
+print(clone_string("Crabwalk"))
+print(mutate_option_payload())
+print(map_checked_cast_error(7))
 print(sorted(word_counts().items()))
 print(sorted(count_keys()))
 print(sorted(rebuilt_counts().items()))
@@ -59,6 +62,9 @@ print(reserve_values())
     assert result.stdout.splitlines() == [
         "7 0",
         "5 0",
+        "Crabwalk",
+        "2",
+        "7",
         "[('python', 1), ('rust', 2)]",
         "['python', 'rust']",
         "[('python', 1), ('rust', 2)]",

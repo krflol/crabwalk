@@ -6,6 +6,15 @@ All notable Crabwalk changes are recorded here.
 
 ### Added
 
+- `CompiledSource.artifacts()` exposes generated Rust, Cargo manifest/lock, build
+  script, semantic IR, build inputs, and source maps without private filename
+  knowledge.
+- Declared external crate values can cross exported `rust.Owned[ExternalType]`
+  returns as opaque, move-aware, fingerprint-bound handles and later enter
+  `Owned`/`Ref`/`Mut` calls without requiring `Clone`, `Debug`, or `Send`.
+- `String.clone()`, `Option.as_mut()`, compatible unary native function items in
+  callable adapters, and `rust.channel(T, capacity)` with `SyncSender[T]` complete
+  the corresponding integration contracts.
 - `compile_source(..., source_root=..., origin_map=...)` preserves the authored
   base directory for relative path dependencies while retaining immutable source
   snapshots, and attaches host graph/source identities to structured diagnostic
@@ -30,6 +39,10 @@ All notable Crabwalk changes are recorded here.
 
 ### Fixed
 
+- Content-addressed embedding snapshot publication retries bounded transient
+  Windows sharing violations and recognizes an identical competing publisher.
+- Mutable access through `Option.as_mut()` marks the root Rust local mutable before
+  emission instead of deferring an accepted program to rustc `E0596`.
 - Generated Cargo target directories carry Cargo's standard `CACHEDIR.TAG` marker.
 - Windows places both generated Cargo projects and target state beneath deterministic
   short roots, preventing deep embedding snapshots from reaching MSVC linker limits.

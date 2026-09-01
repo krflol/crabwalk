@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import keyword
 import os
 import re
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -19,6 +21,23 @@ from crabwalk.runtime import RustFunction, _bind_compilation_function
 from crabwalk.service import CompilationResult, default_service
 
 _MODULE_COMPONENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SNAPSHOT_REPLACE_ATTEMPTS = 20
+_SNAPSHOT_REPLACE_INITIAL_DELAY = 0.005
+_SNAPSHOT_REPLACE_MAX_DELAY = 0.05
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedArtifacts:
+    """Stable in-memory view of one generated Cargo project."""
+
+    schema_version: int
+    rust_source: str
+    cargo_manifest: str
+    cargo_lock: str | None
+    build_script: str
+    ir: dict[str, object]
+    source_map: dict[str, object]
+    build_inputs: dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +85,50 @@ class CompiledSource:
         """Return the same structured compilation report as `crabwalk inspect`."""
 
         return compilation_inspection(self._compilation)
+
+    def artifacts(self) -> GeneratedArtifacts:
+        """Read generated Rust, Cargo, IR, build-input, and source-map artifacts.
+
+        This is the stable embedding counterpart to ``crabwalk expand``. Callers
+        do not need to know generated-directory filenames, and the returned JSON
+        values are detached in-memory dictionaries rather than live file handles.
+        """
+
+        directory = self._compilation.generated_dir
+        lock_path = directory / "Cargo.lock"
+        return GeneratedArtifacts(
+            schema_version=1,
+            rust_source=_read_generated_text(directory / "src" / "lib.rs"),
+            cargo_manifest=_read_generated_text(directory / "Cargo.toml"),
+            cargo_lock=(
+                _read_generated_text(lock_path) if lock_path.is_file() else None
+            ),
+            build_script=_read_generated_text(directory / "build.rs"),
+            ir=_read_generated_json(directory / "crabwalk-ir.json"),
+            source_map=_read_generated_json(directory / "crabwalk-source-map.json"),
+            build_inputs=_read_generated_json(directory / "crabwalk-build-inputs.json"),
+        )
+
+
+def _read_generated_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise RuntimeError(
+            f"cannot read generated artifact {path.name}: {error}"
+        ) from error
+
+
+def _read_generated_json(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(_read_generated_text(path))
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"generated artifact {path.name} is not valid JSON"
+        ) from error
+    if not isinstance(value, dict):
+        raise RuntimeError(f"generated artifact {path.name} must contain a JSON object")
+    return value
 
 
 def compile_source(
@@ -397,7 +460,7 @@ def _materialize_source(
             return path
         temporary = root / (f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         temporary.write_bytes(encoded)
-        os.replace(temporary, path)
+        _publish_snapshot(temporary, path, encoded)
         return path
     except OSError as error:
         raise CrabwalkCompilationError(
@@ -441,7 +504,7 @@ def _materialize_virtual_package(
                 f".{destination.name}.{os.getpid()}.{threading.get_ident()}.tmp"
             )
             temporary.write_bytes(payload)
-            os.replace(temporary, destination)
+            _publish_snapshot(temporary, destination, payload)
         return package
     except OSError as error:
         raise CrabwalkCompilationError(
@@ -459,3 +522,30 @@ def _materialize_virtual_package(
                 temporary_value.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+def _publish_snapshot(temporary: Path, destination: Path, payload: bytes) -> None:
+    """Publish immutable source bytes despite transient Windows sharing violations.
+
+    Snapshot paths are content-addressed, so another process publishing the exact
+    same bytes is a successful outcome. Windows file watchers and antivirus tools
+    can briefly deny ``os.replace`` even when no writer owns the destination; keep
+    that retry bounded and never suppress a different I/O failure.
+    """
+
+    delay = _SNAPSHOT_REPLACE_INITIAL_DELAY
+    for attempt in range(_SNAPSHOT_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temporary, destination)
+            return
+        except PermissionError:
+            try:
+                if destination.is_file() and destination.read_bytes() == payload:
+                    temporary.unlink(missing_ok=True)
+                    return
+            except OSError:
+                pass
+            if attempt + 1 == _SNAPSHOT_REPLACE_ATTEMPTS:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, _SNAPSHOT_REPLACE_MAX_DELAY)

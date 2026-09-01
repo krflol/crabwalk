@@ -102,7 +102,10 @@ transform = compiled.function("transform")
 ```
 
 The returned `CompiledSource` exposes `functions`, `function(name)`, `fingerprint`,
-`source_hash`, `source_path`, and `inspect()`. Crabwalk normalizes the text to UTF-8,
+`source_hash`, `source_path`, `inspect()`, and `artifacts()`. `artifacts()` returns
+generated Rust, Cargo manifest/lock, build script, IR, build inputs, and source-map
+data directly, so an embedding host does not depend on generated filenames.
+Crabwalk normalizes the text to UTF-8,
 stores an immutable content-addressed snapshot, performs static analysis, builds and
 loads the extension, and binds exported `RustFunction` objects directly from IR.
 It never imports the source module, so unrelated top-level Python statements do not

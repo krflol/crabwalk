@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -11,7 +12,7 @@ import crabwalk.embedding as embedding
 from crabwalk.compiler.frontend import analyze_project_path
 from crabwalk.compiler.capabilities import ContractKind, capability_contract
 from crabwalk.diagnostics import CrabwalkCompilationError, Diagnostic, SourceSpan
-from crabwalk.embedding import CompiledSource, compile_source
+from crabwalk.embedding import CompiledSource, GeneratedArtifacts, compile_source
 from crabwalk.runtime import RustFunction
 from crabwalk.service import CompilationResult
 
@@ -35,12 +36,36 @@ class _StaticCompiler:
         progress = options.get("progress")
         assert callable(progress)
         progress("Fake native build")
+        generated_dir = path.parent / "generated"
+        (generated_dir / "src").mkdir(parents=True, exist_ok=True)
+        (generated_dir / "Cargo.toml").write_text(
+            '[package]\nname = "embedded-test"\n',
+            encoding="utf-8",
+        )
+        (generated_dir / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+        (generated_dir / "build.rs").write_text("fn main() {}\n", encoding="utf-8")
+        (generated_dir / "src" / "lib.rs").write_text(
+            "fn generated() {}\n",
+            encoding="utf-8",
+        )
+        (generated_dir / "crabwalk-ir.json").write_text(
+            json.dumps({"schema_version": 1}),
+            encoding="utf-8",
+        )
+        (generated_dir / "crabwalk-source-map.json").write_text(
+            json.dumps({"schema_version": 2, "entries": []}),
+            encoding="utf-8",
+        )
+        (generated_dir / "crabwalk-build-inputs.json").write_text(
+            json.dumps({"fingerprint": "a" * 64, "inputs": {}}),
+            encoding="utf-8",
+        )
         return CompilationResult(
             ir=ir,
             fingerprint="a" * 64,
             extension_name=module.__name__,
             project_root=path.parent,
-            generated_dir=path.parent / "generated",
+            generated_dir=generated_dir,
             artifact=path.parent / "native.pyd",
             cache_hit=False,
             module=module,
@@ -98,6 +123,32 @@ def increment(value: rust.u64) -> rust.u64:
 
 def test_compile_source_is_public() -> None:
     assert crabwalk.compile_source is compile_source
+    assert crabwalk.GeneratedArtifacts is GeneratedArtifacts
+
+
+@capability_contract("embedding.generated-artifacts", native=False)
+def test_compiled_source_exposes_generated_artifacts_without_filename_knowledge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler = _StaticCompiler()
+    monkeypatch.setattr(embedding, "default_service", compiler)
+    compiled = compile_source(
+        "from crabwalk import rust\n\n@rust.fn\ndef increment(value: rust.u64) -> rust.u64:\n    return value + 1\n",
+        cache_directory=tmp_path,
+    )
+
+    artifacts = compiled.artifacts()
+
+    assert isinstance(artifacts, GeneratedArtifacts)
+    assert artifacts.schema_version == 1
+    assert artifacts.rust_source == "fn generated() {}\n"
+    assert artifacts.cargo_manifest.startswith("[package]")
+    assert artifacts.cargo_lock == "version = 4\n"
+    assert artifacts.build_script == "fn main() {}\n"
+    assert artifacts.ir == {"schema_version": 1}
+    assert artifacts.source_map == {"schema_version": 2, "entries": []}
+    assert artifacts.build_inputs["fingerprint"] == "a" * 64
 
 
 @capability_contract("embedding.virtual-package", native=False)
@@ -224,3 +275,52 @@ def test_compile_source_rejects_ambiguous_filenames(
             filename=filename,
             cache_directory=tmp_path,
         )
+
+
+def test_snapshot_publication_retries_transient_permission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "snapshot.py"
+    temporary = tmp_path / ".snapshot.py.tmp"
+    payload = b"from crabwalk import rust\n"
+    temporary.write_bytes(payload)
+    real_replace = embedding.os.replace
+    attempts = 0
+
+    def transient_replace(source: Path, target: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("simulated Windows sharing violation")
+        real_replace(source, target)
+
+    monkeypatch.setattr(embedding.os, "replace", transient_replace)
+    monkeypatch.setattr(embedding.time, "sleep", lambda _delay: None)
+
+    embedding._publish_snapshot(temporary, destination, payload)
+
+    assert attempts == 3
+    assert destination.read_bytes() == payload
+    assert not temporary.exists()
+
+
+def test_snapshot_publication_accepts_identical_concurrent_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "snapshot.py"
+    temporary = tmp_path / ".snapshot.py.tmp"
+    payload = b"from crabwalk import rust\n"
+    temporary.write_bytes(payload)
+
+    def concurrent_winner(_source: Path, target: Path) -> None:
+        target.write_bytes(payload)
+        raise PermissionError("simulated competing publisher")
+
+    monkeypatch.setattr(embedding.os, "replace", concurrent_winner)
+
+    embedding._publish_snapshot(temporary, destination, payload)
+
+    assert destination.read_bytes() == payload
+    assert not temporary.exists()

@@ -72,6 +72,7 @@ _CONTAINER_ARITY: dict[str, int] = {
     "RefCell": 1,
     "Result": 2,
     "Sender": 1,
+    "SyncSender": 1,
     "ThreadHandle": 1,
     "Vec": 1,
 }

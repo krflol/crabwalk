@@ -26,6 +26,7 @@ from .ir import (
 from .cargo_emission import render_build_rs, render_cargo_toml
 from .emission import EmissionNames, Writer as _Writer
 from .rust_emission import write_native_function as _write_native_function
+from .types import ExternalType
 from .naming import (
     PYO3_CARGO_ALIAS,
     cargo_dependency_key,
@@ -33,7 +34,7 @@ from .naming import (
     shared_class_names,
 )
 
-CODEGEN_SCHEMA_VERSION = 44
+CODEGEN_SCHEMA_VERSION = 45
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),
@@ -161,6 +162,11 @@ def generate_project(
         )
         writer.line()
 
+    owned_external_types = _owned_external_types(ir)
+    for external_type in owned_external_types:
+        _write_owned_external_class(writer, external_type)
+        writer.line()
+
     shared_types = _shared_types(ir)
     for shared_type in shared_types:
         _write_shared_class(writer, shared_type)
@@ -197,6 +203,9 @@ def generate_project(
         )
     for vector_type in owned_vectors:
         _, rust_class = owned_class_names(vector_type)
+        writer.line(f"m.add_class::<{rust_class}>()?;")
+    for external_type in owned_external_types:
+        _, rust_class = owned_class_names(external_type)
         writer.line(f"m.add_class::<{rust_class}>()?;")
     if owned_text_column is not None:
         _, rust_class = owned_class_names(owned_text_column)
@@ -2131,6 +2140,57 @@ def _owned_text_column_type(ir: PackageIR) -> TypeRef | None:
         ):
             return TypeRef("TextColumn")
     return None
+
+
+def _owned_external_types(ir: PackageIR) -> tuple[ExternalType, ...]:
+    values: dict[str, ExternalType] = {}
+    for function in ir.functions:
+        if not function.exported:
+            continue
+        for parameter in function.parameters:
+            underlying = parameter.type_ref.underlying
+            if parameter.type_ref.ownership is not None and isinstance(
+                underlying, ExternalType
+            ):
+                values[underlying.render()] = underlying
+        return_type = function.return_type.underlying
+        if function.return_type.ownership == "Owned" and isinstance(
+            return_type, ExternalType
+        ):
+            values[return_type.render()] = return_type
+    return tuple(values[key] for key in sorted(values))
+
+
+def _write_owned_external_class(writer: _Writer, type_ref: ExternalType) -> None:
+    """Emit one opaque, move-aware Python holder without crate trait assumptions."""
+
+    python_name, rust_name = owned_class_names(type_ref)
+    rendered = type_ref.render()
+    display = type_ref.display()
+    writer.line(f'#[pyclass(unsendable, name = "{python_name}")]')
+    writer.line(f"struct {rust_name} {{")
+    writer.enter()
+    writer.line(f"value: Option<{rendered}>,")
+    writer.leave()
+    writer.line("}")
+    writer.line("#[pymethods]")
+    writer.line(f"impl {rust_name} {{")
+    writer.enter()
+    writer.line("fn is_moved(&self) -> bool {")
+    writer.enter()
+    writer.line("self.value.is_none()")
+    writer.leave()
+    writer.line("}")
+    writer.line("fn __repr__(&self) -> String {")
+    writer.enter()
+    writer.line(
+        f'if self.value.is_some() {{ String::from("{display}(<opaque>)") }} '
+        f'else {{ String::from("{display}(<moved>)") }}'
+    )
+    writer.leave()
+    writer.line("}")
+    writer.leave()
+    writer.line("}")
 
 
 def _shared_types(ir: PackageIR) -> tuple[TypeRef, ...]:

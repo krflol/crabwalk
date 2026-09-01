@@ -188,7 +188,9 @@ transform = compiled.function("transform")
 Cargo source maps, then binds `RustFunction` objects directly from the static IR
 and loaded extension. Top-level Python statements in the authored source are not
 executed. It also accepts a mapping of package-relative `.py` paths plus an `entry`
-for content-addressed multi-module embedding. This is not a sandbox for Cargo
+for content-addressed multi-module embedding. `compiled.artifacts()` returns the
+generated Rust, Cargo manifest/lock, build script, IR, build inputs, and source map
+through a stable in-memory API. This is not a sandbox for Cargo
 dependencies, build scripts, proc macros, or linkers; apply an application-specific
 source/effect/crate policy before building untrusted input. Cancellation is checked
 between phases and terminates an active Cargo process tree before returning

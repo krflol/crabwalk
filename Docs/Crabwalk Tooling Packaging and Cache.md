@@ -108,6 +108,12 @@ roots when host policy requires specific locations; both settings participate in
 build identity. Every created target root receives Cargo's standard `CACHEDIR.TAG`
 signature and explanatory marker.
 
+Content-addressed embedding snapshots are safe under competing publishers.
+Publication retries only transient Windows `PermissionError` sharing violations,
+accepts an identical destination written by another process, and keeps all other
+I/O failures visible. The retry window is bounded; single-source and virtual-package
+snapshots share the same publication path.
+
 Every external artifact hit still invokes Cargo, allowing its dependency,
 build-script, and incremental rules to validate inputs. Crabwalk's
 cache identity remains content-addressed over the documented/default inputs plus

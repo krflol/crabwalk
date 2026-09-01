@@ -211,6 +211,7 @@ _GENERIC_ARITY = {
     "Receiver": 1,
     "RefCell": 1,
     "Sender": 1,
+    "SyncSender": 1,
     "ThreadHandle": 1,
     "Vec": 1,
     "HashMap": 2,
@@ -3923,11 +3924,14 @@ class _FunctionLowerer(PatternLoweringMixin):
             return ConstructorIR(cast(Any, name), (value,), expected, span)
 
         if name == "channel":
-            if len(node.args) != 1:
+            if len(node.args) not in {1, 2}:
                 _fail(
                     "CRAB187",
-                    "Channel needs one Rust message type",
-                    "Use rust.channel(rust.u64) in a typed Sender/Receiver tuple context.",
+                    "Channel needs a message type and optional capacity",
+                    (
+                        "Use rust.channel(rust.u64) for an unbounded channel or "
+                        "rust.channel(rust.u64, capacity) for a bounded channel."
+                    ),
                     self.path,
                     node,
                 )
@@ -3937,16 +3941,27 @@ class _FunctionLowerer(PatternLoweringMixin):
                 node.args[0],
                 self.domain_types,
             )
+            bounded = len(node.args) == 2
+            capacity = (
+                self._lower_expression(node.args[1], environment, USIZE)
+                if bounded
+                else None
+            )
             result_type = TypeRef(
                 "Tuple",
                 (
-                    TypeRef("Sender", (message_type,)),
+                    TypeRef("SyncSender" if bounded else "Sender", (message_type,)),
                     TypeRef("Receiver", (message_type,)),
                 ),
             )
             if expected is not None:
                 _require_type(result_type, expected, self.path, node)
-            return ConstructorIR("Channel", (), result_type, span)
+            return ConstructorIR(
+                "Channel",
+                (capacity,) if capacity is not None else (),
+                result_type,
+                span,
+            )
 
         if name == "spawn":
             if len(node.args) != 1:
@@ -4574,7 +4589,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                     self.path,
                     f"RefCell.{method} is not in the Crabwalk capability table.",
                 )
-        elif receiver_type.rust_name == "Sender":
+        elif receiver_type.rust_name in {"Sender", "SyncSender"}:
             message_type = receiver_type.arguments[0]
             if method == "send" and len(node.args) == 1:
                 arguments = (
@@ -4585,7 +4600,10 @@ class _FunctionLowerer(PatternLoweringMixin):
                 _unsupported(
                     node,
                     self.path,
-                    f"Sender.{method} is not in the Crabwalk capability table.",
+                    (
+                        f"{receiver_type.rust_name}.{method} is not in the "
+                        "Crabwalk capability table."
+                    ),
                 )
         elif receiver_type.rust_name == "Receiver":
             if method == "recv" and not node.args:
@@ -4819,7 +4837,10 @@ class _FunctionLowerer(PatternLoweringMixin):
                     ),
                 )
         elif receiver_type in {STRING, STR}:
-            if method == "len" and not node.args:
+            if receiver_type == STRING and method == "clone" and not node.args:
+                arguments = ()
+                result = STRING
+            elif method == "len" and not node.args:
                 arguments = ()
                 result = USIZE
             elif method == "is_empty" and not node.args:
@@ -5038,6 +5059,9 @@ class _FunctionLowerer(PatternLoweringMixin):
             elif method == "as_ref" and not node.args:
                 arguments = ()
                 result = TypeRef("Option", (TypeRef("Ref", (inner,)),))
+            elif method == "as_mut" and not node.args:
+                arguments = ()
+                result = TypeRef("Option", (TypeRef("Mut", (inner,)),))
             elif (
                 method in {"copied", "cloned"}
                 and not node.args
@@ -5518,6 +5542,15 @@ class _FunctionLowerer(PatternLoweringMixin):
             default_trait="inferred",
         )
         if lambda_node is None:
+            function_item = self._lower_function_item_closure(
+                node,
+                parameter_type,
+                borrowed_parameter=borrowed_parameter,
+                expected_result=expected_result,
+                parameter_projection=parameter_projection,
+            )
+            if function_item is not None:
+                return function_item
             _fail(
                 "CRAB185",
                 "Iterator adapter requires a lambda",
@@ -5587,6 +5620,93 @@ class _FunctionLowerer(PatternLoweringMixin):
             prefix=prefix,
             capture_mode=capture_mode,
             call_trait=call_trait,
+        )
+
+    def _lower_function_item_closure(
+        self,
+        node: ast.expr,
+        parameter_type: TypeRef,
+        *,
+        borrowed_parameter: bool,
+        expected_result: TypeRef | None,
+        parameter_projection: Literal["direct", "deref", "borrow"],
+    ) -> ClosureIR | None:
+        """Lower one statically named native function as a unary Rust callable."""
+
+        signature = (
+            self.signatures.get(node.id)
+            if isinstance(node, ast.Name)
+            else self.qualified_signatures.get(_attribute_parts(node))
+            if isinstance(node, ast.Attribute)
+            else None
+        )
+        if signature is None:
+            return None
+        if (
+            signature.method_for is not None
+            or signature.is_async
+            or signature.type_parameters
+            or len(signature.parameters) != 1
+        ):
+            _fail(
+                "CRAB185",
+                "Native function item is not a unary adapter",
+                (
+                    f"'{signature.name}' must be a synchronous, non-generic native "
+                    "function with exactly one parameter."
+                ),
+                self.path,
+                node,
+                "Wrap a compatible call in an explicit lambda when adaptation is needed.",
+            )
+        declared_parameter = signature.parameters[0].type_ref
+        if declared_parameter != parameter_type:
+            _fail(
+                "CRAB185",
+                "Native function item parameter type mismatch",
+                (
+                    f"'{signature.name}' accepts {declared_parameter.display()}, but "
+                    f"this adapter yields {parameter_type.display()}."
+                ),
+                self.path,
+                node,
+                "Use a lambda to borrow, clone, or otherwise convert the adapter value.",
+            )
+        result_type = signature.return_type.underlying
+        if expected_result is not None:
+            _require_type(result_type, expected_result, self.path, node)
+        parameter = "__cw_function_item_argument"
+        argument = NameIR(
+            parameter,
+            parameter_type,
+            SourceSpan.from_ast(self.path, node),
+        )
+        body: ExpressionIR = (
+            CrateCallIR(
+                signature.external_path,
+                (argument,),
+                result_type,
+                SourceSpan.from_ast(self.path, node),
+                signature.external_effects,
+                signature.name,
+                (declared_parameter,),
+            )
+            if signature.external_path is not None
+            else CallIR(
+                signature.rust_symbol,
+                (argument,),
+                result_type,
+                SourceSpan.from_ast(self.path, node),
+            )
+        )
+        return ClosureIR(
+            parameter,
+            parameter_type,
+            body,
+            borrowed_parameter,
+            TypeRef("Closure", (parameter_type, result_type)),
+            SourceSpan.from_ast(self.path, node),
+            parameter_projection=parameter_projection,
         )
 
     def _lower_zero_closure(
@@ -6561,18 +6681,27 @@ def _analyze_signature(
                 and not isinstance(underlying, ErrorDomainType)
             )
             valid_text_column = underlying.rust_name == "TextColumn"
-            if not (valid_owned_vector or valid_domain or valid_text_column):
+            valid_external = isinstance(underlying, ExternalType)
+            if not (
+                valid_owned_vector
+                or valid_domain
+                or valid_text_column
+                or valid_external
+            ):
                 _fail(
                     "CRAB142",
                     "Unsupported Python-crossing ownership type",
                     (
                         "The ownership preview currently supports Owned, Ref, and "
                         "Mut around concrete Vec[T], rust.TextColumn, or a generated "
-                        "domain type."
+                        "domain/external type."
                     ),
                     path,
                     argument.annotation or argument,
-                    "Use a supported concrete Vec, rust.TextColumn, or @rust.struct type.",
+                    (
+                        "Use a supported concrete Vec, rust.TextColumn, @rust.struct, "
+                        "or rust.extern_type value."
+                    ),
                 )
             if parameter.type_ref.ownership == "Shared" and not (
                 _shareable_handle_type_supported(
@@ -6804,6 +6933,7 @@ def _analyze_signature(
                 and not isinstance(underlying, ErrorDomainType)
             )
             or underlying.rust_name == "TextColumn"
+            or isinstance(underlying, ExternalType)
             or (
                 underlying.rust_name == "Vec"
                 and len(underlying.arguments) == 1
@@ -6824,7 +6954,10 @@ def _analyze_signature(
             _fail(
                 "CRAB141",
                 "Unsupported owned return boundary",
-                "Exported returns support rust.Owned around a domain value or supported Vec.",
+                (
+                    "Exported returns support rust.Owned around a domain, declared "
+                    "external type, rust.TextColumn, or supported Vec."
+                ),
                 path,
                 node.returns or node,
             )
@@ -8428,6 +8561,7 @@ def _mutated_receiver_names(
                 "insert",
                 "remove",
                 "get_mut",
+                "as_mut",
                 "entry_or_insert",
                 "add",
                 "split_at_mut_sum",

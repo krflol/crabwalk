@@ -615,6 +615,11 @@ def _render_expression(
             return f"std::sync::Mutex::new({values})"
         if expression.constructor == "Channel":
             message_type = expression.type_ref.arguments[0].arguments[0].render()
+            if expression.arguments:
+                capacity = _render_expression(
+                    expression.arguments[0], boundary_names, emission_names
+                )
+                return f"std::sync::mpsc::sync_channel::<{message_type}>({capacity})"
             return f"std::sync::mpsc::channel::<{message_type}>()"
         if expression.constructor == "Spawn":
             return f"std::thread::spawn({values})"
@@ -867,7 +872,7 @@ def _render_expression(
         if expression.receiver.type_ref.rust_name == "RefCell":
             if expression.method == "borrow_copy":
                 return f"*{rendered_receiver}.borrow()"
-        if expression.receiver.type_ref.rust_name == "Sender":
+        if expression.receiver.type_ref.rust_name in {"Sender", "SyncSender"}:
             if expression.method == "send":
                 return f"{rendered_receiver}.send({rendered_arguments[0]}).unwrap()"
         if expression.receiver.type_ref.rust_name == "Receiver":

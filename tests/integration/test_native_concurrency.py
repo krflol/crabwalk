@@ -5,15 +5,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+from crabwalk.compiler.capabilities import capability_contract
 from tests.unit.test_concurrency import CONCURRENCY_SOURCE
 
 
+@capability_contract("channels.unbounded", "channels.bounded")
 def test_threads_channels_and_mutex_run_natively(tmp_path: Path) -> None:
     source = tmp_path / "concurrency.py"
     source.write_text(
         CONCURRENCY_SOURCE
         + "\nprint(moved_vector_length())\n"
         + "print(channel_value())\n"
+        + "print(bounded_channel_value())\n"
         + "print(shared_counter())\n",
         encoding="utf-8",
     )
@@ -33,4 +36,4 @@ def test_threads_channels_and_mutex_run_natively(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == ["3", "42", "1"]
+    assert result.stdout.splitlines() == ["3", "42", "84", "1"]

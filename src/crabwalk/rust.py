@@ -277,6 +277,7 @@ RefCell = RustGeneric("RefCell", 1)
 Arc = RustGeneric("Arc", 1)
 Mutex = RustGeneric("Mutex", 1)
 Sender = RustGeneric("Sender", 1)
+SyncSender = RustGeneric("SyncSender", 1)
 Receiver = RustGeneric("Receiver", 1)
 ThreadHandle = RustGeneric("ThreadHandle", 1)
 TcpListener = RustType("TcpListener")
@@ -1000,6 +1001,7 @@ __all__ = [
     "RustType",
     "RustVariantConstructor",
     "Sender",
+    "SyncSender",
     "Some",
     "Str",
     "String",

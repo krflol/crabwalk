@@ -183,9 +183,10 @@ index, dependency, and provenance policies.
   Zero-length exporters use a canonical empty Rust slice after format and shape
   validation; pointer alignment remains mandatory for every non-empty buffer.
 - Borrowed values cannot be returned or transferred through `async_call`. Explicit
-  `Owned[Domain]`, `Owned[Vec[T]]`, and `Owned[TextColumn]` returns produce
-  move-aware handles. Recursive mappings/sequences cross only through supported,
-  explicitly allocating codecs.
+  `Owned[Domain]`, `Owned[Vec[T]]`, `Owned[TextColumn]`, and
+  `Owned[ExternalType]` returns produce move-aware handles. External handles are
+  opaque and cannot be converted implicitly to Python; recursive mappings/sequences
+  cross only through supported, explicitly allocating codecs.
 - Ordinary ownership handles are thread-affine. `Shared[T]` is limited to immutable
   compiler-approved `Send + Sync` payloads, uses `Arc<T>`, and exposes no mutable
   operation or retained borrow.

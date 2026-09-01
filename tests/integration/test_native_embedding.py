@@ -9,7 +9,10 @@ from pathlib import Path
 from crabwalk.compiler.capabilities import capability_contract
 
 
-@capability_contract("embedding.nonexecuting-source-callable")
+@capability_contract(
+    "embedding.nonexecuting-source-callable",
+    "embedding.generated-artifacts",
+)
 def test_source_compiles_and_binds_without_python_module_execution(
     tmp_path: Path,
 ) -> None:
@@ -42,11 +45,18 @@ compiled = compile_source(
     progress=phases.append,
 )
 normalize = compiled.function("normalize")
+artifacts = compiled.artifacts()
 print(normalize("CrabWalk"))
 print(Path({str(sentinel)!r}).exists())
 print(json.dumps(normalize.__crabwalk__["parameter_boundaries"]["name"], sort_keys=True))
 print(phases.count("Analyzing Python source"))
 print(compiled.functions)
+print(
+    "fn __cw_native_" in artifacts.rust_source,
+    artifacts.cargo_manifest.startswith("[package]"),
+    artifacts.source_map["schema_version"],
+    artifacts.build_inputs["fingerprint"] == compiled.fingerprint,
+)
 """,
         encoding="utf-8",
     )
@@ -81,6 +91,7 @@ print(compiled.functions)
     }
     assert lines[3] == "1"
     assert lines[4] == "('normalize',)"
+    assert lines[5] == "True True 2 True"
 
 
 @capability_contract("embedding.virtual-package", native=True)

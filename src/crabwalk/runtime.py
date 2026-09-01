@@ -29,6 +29,7 @@ from crabwalk.build.loader import load_extension
 from crabwalk.compiler.codegen import function_releases_gil
 from crabwalk.compiler.ir import FunctionIR, ParameterIR, TypeRef
 from crabwalk.compiler.naming import owned_class_names, shared_class_names
+from crabwalk.compiler.types import ExternalType
 from crabwalk.compiler.frontend import (
     analyze_project_path,
     project_source_anchor,
@@ -251,6 +252,11 @@ class _RustOwnedValue:
     def to_python(self) -> object:
         self._check_thread()
         self._check_borrow_access("shared")
+        if isinstance(self._registration.type_ref, ExternalType):
+            raise TypeError(
+                f"{self._registration.type_ref.display()} is an opaque external "
+                "Rust value and has no implicit Python representation"
+            )
         if self._enum_variants:
             try:
                 variant = self._native.variant()

@@ -26,7 +26,7 @@ from .ir import (
     TraitCallIR,
     TypeRef,
 )
-from .types import IteratorExecution, IteratorType
+from .types import ExternalType, IteratorExecution, IteratorType
 from .naming import (
     PYO3_CARGO_ALIAS,
     cargo_dependency_key,
@@ -612,6 +612,21 @@ def _validate_emitted_identifiers(ir: PackageIR) -> None:
     ]
     owned_types.extend(struct.type_ref for struct in ir.structs)
     owned_types.extend(enum.type_ref for enum in ir.enums if not enum.is_error)
+    owned_types.extend(
+        parameter.type_ref.underlying
+        for function in ir.functions
+        if function.exported
+        for parameter in function.parameters
+        if parameter.type_ref.ownership is not None
+        and isinstance(parameter.type_ref.underlying, ExternalType)
+    )
+    owned_types.extend(
+        function.return_type.underlying
+        for function in ir.functions
+        if function.exported
+        and function.return_type.ownership == "Owned"
+        and isinstance(function.return_type.underlying, ExternalType)
+    )
     emitted_owned: set[str] = set()
     for type_ref in owned_types:
         _, rust_name = owned_class_names(type_ref)

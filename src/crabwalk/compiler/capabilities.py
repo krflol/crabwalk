@@ -92,6 +92,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "embedding.nonexecuting-source-callable",
             "embedding.phase-cancellation",
             "embedding.virtual-package",
+            "embedding.generated-artifacts",
         ),
     ),
     Capability(
@@ -279,6 +280,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "crate.typed-callback",
             "crate.builder-method-error",
             "crate.buffer-adapter",
+            "crate.external-owned-handle",
         ),
     ),
     Capability(
@@ -321,6 +323,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         "focused Rust Book subprocess tests",
         "busy-polling; no reactor, cancellation, Tokio, or Python future ABI",
         ("futures.split-local-block-on",),
+    ),
+    Capability(
+        "native-channels",
+        "Typed native channels",
+        Maturity.BOUNDED,
+        "unbounded Sender/Receiver and capacity-bearing SyncSender channels",
+        "native send/receive coverage for both std mpsc channel families",
+        "blocking std channels only; no async wake integration, fairness, or cancellation",
+        ("channels.unbounded", "channels.bounded"),
     ),
     Capability(
         "threadpool-tcp",

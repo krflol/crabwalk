@@ -28,7 +28,7 @@ xfail-only contract does not satisfy a maturity claim.
 | Capability | Maturity | Supported contract | Evidence | Important limit |
 |---|---|---|---|---|
 | Static compiler pipeline | Compositional | Source-spanned typed IR, validation, deterministic Rust/PyO3 emission | unit, native, package, diagnostic, and generated-Rust tests<br>Contracts: `compiler.package-native`, `compiler.generated-identities`, `compiler.pattern-identity` | an explicit Python subset; rustc remains authoritative |
-| Non-executing source embedding | Bounded | content-addressed single-source/virtual-package compilation and direct native callable binding | native cross-module non-execution, callable binding, and process cancellation tests<br>Contracts: `embedding.nonexecuting-source-callable`, `embedding.phase-cancellation`, `embedding.virtual-package` | Cargo dependencies remain a trusted build boundary; virtual mappings are regularized into immutable package snapshots |
+| Non-executing source embedding | Bounded | content-addressed single-source/virtual-package compilation and direct native callable binding | native cross-module non-execution, callable binding, and process cancellation tests<br>Contracts: `embedding.nonexecuting-source-callable`, `embedding.phase-cancellation`, `embedding.virtual-package`, `embedding.generated-artifacts` | Cargo dependencies remain a trusted build boundary; virtual mappings are regularized into immutable package snapshots |
 | Ownership boundary | Compositional | Owned/Ref/Mut plus immutable Shared, move state, borrows, reload and fingerprint identity | multi-argument, alias, reload, thread, domain, and vector tests<br>Contracts: `ownership.failure-atomic`, `ownership.reload-fingerprint`, `ownership.domain-schema`, `ownership.shared-send-sync`, `ownership.audited-gil-release` | ordinary handles are thread-affine; Shared is immutable Send + Sync only; no retained cross-call borrows |
 | Cargo build and cache | Production | locks, complete modeled fingerprints, hashing, leases, atomic publish, cancellation, and release budgets | dependency, corruption, replan, prune, race, cancellation, wheel, and versioned performance gates<br>Contracts: `cache.corruption-repair`, `cache.concurrent-publication`, `cache.prune-load-lease`, `build.hard-cancellation`, `build.performance-budgets` | trusted build scripts may require declared extra inputs |
 | Application packaging | Bounded | PEP 517 wheel/sdist metadata merging with regular, namespace, and multiple top-level packages | clean dependency-resolving install of a native multi-package wheel without a Rust toolchain<br>Contracts: `packaging.metadata-sdist`, `packaging.pep517-multi-package` | platform wheels remain CPython-specific and must be built per supported target |
@@ -41,10 +41,11 @@ xfail-only contract does not satisfy a maturity claim.
 | Native standard-library ETL | Bounded | checked casts, isize, slices/chunks/windows, ordered/hash collections, sorting, numeric formatting, UTF-8 bytes, PathBuf, and buffered I/O | native parse-validate-group-sort-format-emit application acceptance<br>Contracts: `etl.native-standard-library`, `etl.ordered-grouping` | finite UTF-8/path surface; no arbitrary filesystem traversal policy |
 | Native filesystem results | Proof | typed File::open and whole-file String reads with io::Error propagation | native success, open-error, and read-error Result propagation test<br>Contracts: `filesystem.result-propagation` | read-only whole-file teaching surface; no general path or filesystem API |
 | Structured native errors | Bounded | declared From conversions, custom error enums, fields, and cause chains | native file, parse, and validation errors through one application error<br>Contracts: `errors.from-structured`, `errors.undeclared-from-rejected` | error payloads are displayable scalar/string/io/error values; no arbitrary Error trait discovery |
-| Typed crate adapters | Bounded | external types/functions/traits, borrow signatures, closures, declared effects | real path-crate value, generic callback, buffer, and trait native tests<br>Contracts: `crate.typed-value`, `crate.typed-callback`, `crate.builder-method-error`, `crate.buffer-adapter` | no automatic crate API discovery or manifest generation |
+| Typed crate adapters | Bounded | external types/functions/traits, borrow signatures, closures, declared effects | real path-crate value, generic callback, buffer, and trait native tests<br>Contracts: `crate.typed-value`, `crate.typed-callback`, `crate.builder-method-error`, `crate.buffer-adapter`, `crate.external-owned-handle` | no automatic crate API discovery or manifest generation |
 | Typed Python-call adapters | Bounded | static Python signatures, explicit effects, PyErr propagation, and checked return extraction | native success/exception/invalid-return plus closure-placement diagnostics<br>Contracts: `python-adapter.success-errors`, `python-adapter.explicit-target`, `python-adapter.method-placement`, `python-adapter.invalid-placement` | synchronous calls only; rejected in closures, trait/operator methods, workers, and async helpers |
 | Traits, generics, operators | Bounded | per-parameter generic bounds; typed trait arguments; ref/mut/owned receivers; generic and associated outputs; arithmetic operators | focused lowering and native compositional conformance tests<br>Contracts: `traits.dynamic-dispatch`, `generics.concrete-export`, `traits.arguments-receivers-associated`, `traits.external-implementation`, `closures.capture-contracts` | finite safe trait/operator surface; no unsafe traits or specialization |
 | std-only native futures | Proof | Future/await/join/select lowering through a teaching executor | focused Rust Book subprocess tests<br>Contracts: `futures.split-local-block-on` | busy-polling; no reactor, cancellation, Tokio, or Python future ABI |
+| Typed native channels | Bounded | unbounded Sender/Receiver and capacity-bearing SyncSender channels | native send/receive coverage for both std mpsc channel families<br>Contracts: `channels.unbounded`, `channels.bounded` | blocking std channels only; no async wake integration, fairness, or cancellation |
 | Thread pool and TCP | Proof | finite unit-job pool and loopback HTTP teaching operations | panic-containment and Rust Book web-server subprocess tests<br>Contracts: `threadpool.loopback-http` | no general server, task handles, backpressure, TLS, or cancellation |
 | Advanced and unsafe intrinsics | Proof | audited operations for individual Rust Book concepts | subprocess panic/unsafe and exact code-generation tests<br>Contracts: `advanced.audited-intrinsics` | not general inline Rust, FFI, unsafe, macro, or pointer support |
 | Exported Python call ergonomics | Bounded | positional-or-keyword calls and lossless literal defaults | native external and compiled-internal keyword/default contract<br>Contracts: `calls.keywords-defaults`, `calls.invalid-default` | no positional-only, keyword-only, or variadic signatures |
@@ -88,6 +89,7 @@ xfail-only contract does not satisfy a maturity claim.
 | `rust.TextColumn` | owned UTF-8 bytes plus offsets | explicit one-crossing construction; move-aware handle; `to_python()` returns packed bytes and offsets |
 | `rust.HashMap[K, V]` | `HashMap<K, V>` | checked Python mapping input and recursively normalized dict output when keys are injective/hashable |
 | generated domain | generated Rust struct/enum | explicit handle/mapping input in recursive codecs; `Owned[Domain]` return preserves native identity |
+| declared `rust.extern_type` | crate-owned Rust type | opaque `Owned` return plus later `Owned`/`Ref`/`Mut` handle input; no implicit Python value conversion |
 | `rust.Shared[T]` | `Arc<T>` | immutable cross-thread handle for compiler-approved `Send + Sync` payloads |
 | `rust.Option[T]` | `Option<T>` | `None` or the supported conversion for `T`; `T` must not itself normalize to `None` |
 | `rust.Result[T, E]` | `Result<T, E>` | top-level exported return control type only; `Ok` converts `T`; `Err` raises `CrabwalkRustError` |
@@ -201,8 +203,8 @@ raised as `CrabwalkPanicError`; it never unwinds into Python.
 | `Buffer[numeric T]` | read-only `len`, `is_empty`, indexing, and copied `iter`; top-level exported input only |
 | `Vec[T]` | `push`, `pop`, `reserve`, `len`, `is_empty`, `iter`, `iter_ref`, `as_slice`, indexing, sorting/reverse/dedup/truncate, consuming `into_iter`; typed `par_iter` with declared Rayon; numeric teaching intrinsic `split_at_mut_sum` |
 | typed iterator | `map`, `filter`, `filter_map`, `copied`, `cloned`, `collect_vec`, `collect_map`, `sum`, `count`, `any`, `all`, sequential `find`, parallel `find_any`/`find_first`/`find_last`, `fold`, `reduce`, `enumerate`, `zip`; item ownership, execution, and Rayon indexed capability remain explicit |
-| `String`, `Str` | `len`, `is_empty`, `lines`, `as_str`, `to_lowercase`, `contains`, `starts_with`, `ends_with`, `push_str`, `replace`, `find`, `trim`, `trim_start`, `trim_end`, `split`, `split_once`, `split_whitespace`, `strip_prefix`, `strip_suffix`, `chars`, `bytes`, typed numeric `parse`, and `join` |
-| `Option[T]` | `is_some`, `is_none`, `unwrap`, `expect`, `unwrap_or`, `map`, `and_then`, `or_else`, `as_ref`, `copied`, `cloned` |
+| `String`, `Str` | `len`, `is_empty`, `lines`, `as_str`, explicit owned `String.clone`, `to_lowercase`, `contains`, `starts_with`, `ends_with`, `push_str`, `replace`, `find`, `trim`, `trim_start`, `trim_end`, `split`, `split_once`, `split_whitespace`, `strip_prefix`, `strip_suffix`, `chars`, `bytes`, typed numeric `parse`, and `join` |
+| `Option[T]` | `is_some`, `is_none`, `unwrap`, `expect`, `unwrap_or`, `map`, `and_then`, `or_else`, `as_ref`, `as_mut`, `copied`, `cloned` |
 | `Result[T, E]` | `is_ok`, `is_err`, `unwrap`, `expect`, `unwrap_or`, `map`, `map_err`, `and_then`, `or_else`, `as_ref`, `ok`, `err`; `rust.Ok`/`rust.Err` patterns |
 | `HashMap[K, V]` | `insert`, `contains_key`, `remove`, `get`, `get_mut`, `get_or`, `entry_or_insert`, numeric `add`, `len`, `is_empty`, `iter`, `iter_ref`, `keys`, `values`, `into_iter` |
 | `BTreeMap[K, V]` | ordered `insert`, lookup/mutation, numeric `add`, length/query, iterator/key/value/consuming iteration |
@@ -210,7 +212,7 @@ raised as `CrabwalkPanicError`; it never unwinds into Python.
 | `TextColumn` | immutable `len`, `is_empty`, `get`, `contains_at`, `total_bytes` |
 | `Box`, `Rc`, `RefCell` | focused construction, copy dereference/count/interior-mutation operations used by the Book suite |
 | `Arc<Mutex<T>>` | `clone`, `strong_count`, numeric `add_locked`, `get_locked` |
-| `Sender`, `Receiver`, `ThreadHandle` | `send`, `recv`, `recv_async`, `join` |
+| `Sender`, `SyncSender`, `Receiver`, `ThreadHandle` | `send`, `recv`, `recv_async`, `join`; `rust.channel(T, capacity)` returns a bounded `SyncSender[T]` pair |
 | `TcpListener` | `local_port`, bounded `serve_http_once` |
 | `TcpStream` | `write_get`, `shutdown_write`, `read_to_string` |
 | `File` | `rust.File.open(path) -> Result[File, IoError]`; mutable `read_to_string() -> Result[String, IoError]` |
@@ -244,6 +246,16 @@ outputs, and reviewed effects. Rustc remains authoritative for the actual crate 
 external receiver type with explicit shared/mutable/owned receiver semantics. This
 supports typed builder values, consuming `Result` transitions, and closure-taking
 methods without falling back to inferred intermediate chains.
+
+Adapter positions such as `Result.map_err` accept either an expression lambda or a
+compatible synchronous unary native function item. The complete parameter and
+return types are checked before emission; use a lambda when borrowing, conversion,
+capture, or arity adaptation is required.
+
+`rust.Owned[ExternalType]` may cross an exported return boundary as an opaque,
+fingerprint-bound handle and later enter `Owned`, `Ref`, or `Mut` parameters without
+copying. The external type need not implement `Clone`, `Debug`, or `Send`. Because
+no Python codec was declared for it, `to_python()` is intentionally rejected.
 
 A `Buffer[T]` passed to an external adapter declared as `rust.Buffer[T]` is copied
 into temporary owned Rust storage before the adapter receives `&[T]`.
@@ -381,6 +393,12 @@ These operations are sufficient for the native parse → validate → group → 
 format → emit acceptance workload. They are not a filesystem traversal/security
 policy or arbitrary streaming framework; applications still own path authorization,
 resource limits, atomic replacement, and untrusted-input policy.
+
+`rust.channel(T)` emits an unbounded `std::sync::mpsc::Sender[T]`/`Receiver[T]`
+pair. `rust.channel(T, capacity)` emits a bounded synchronous channel whose sender
+is `rust.SyncSender[T]`; a full channel applies Rust's blocking backpressure. Both
+forms are process-local blocking std channels, not an async reactor or cancellation
+protocol.
 
 `rust.TcpListener`, `rust.TcpStream`, and `rust.ThreadPool` are native-only local
 types for the bounded Rust Book server proof. The listener binds an explicit

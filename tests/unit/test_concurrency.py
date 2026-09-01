@@ -20,6 +20,16 @@ def channel_value() -> rust.u64:
     return receiver.recv()
 
 @rust.fn
+def bounded_channel_value() -> rust.u64:
+    pair: rust.Tuple[
+        rust.SyncSender[rust.u64],
+        rust.Receiver[rust.u64],
+    ] = rust.channel(rust.u64, 1)
+    sender, receiver = pair
+    sender.send(84)
+    return receiver.recv()
+
+@rust.fn
 def shared_counter() -> rust.u64:
     counter: rust.Arc[rust.Mutex[rust.u64]] = rust.Arc(rust.Mutex(0))
     worker_counter: rust.Arc[rust.Mutex[rust.u64]] = counter.clone()
@@ -39,6 +49,8 @@ def test_threads_channels_and_shared_state_lower_to_std(tmp_path: Path) -> None:
         generated.rust_source
     )
     assert "std::sync::mpsc::channel::<u64>()" in generated.rust_source
+    assert "std::sync::mpsc::sync_channel::<u64>(1usize)" in generated.rust_source
+    assert "std::sync::mpsc::SyncSender<u64>" in generated.rust_source
     assert "std::thread::spawn(move || sender.send(42u64).unwrap())" in (
         generated.rust_source
     )
