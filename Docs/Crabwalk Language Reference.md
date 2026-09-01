@@ -27,9 +27,9 @@ xfail-only contract does not satisfy a maturity claim.
 <!-- crabwalk-capabilities:start -->
 | Capability | Maturity | Supported contract | Evidence | Important limit |
 |---|---|---|---|---|
-| Static compiler pipeline | Compositional | Source-spanned typed IR, validation, deterministic Rust/PyO3 emission | unit, native, package, diagnostic, and generated-Rust tests<br>Contracts: `compiler.package-native`, `compiler.generated-identities`, `compiler.pattern-identity` | an explicit Python subset; rustc remains authoritative |
+| Static compiler pipeline | Compositional | Source-spanned typed IR, validation, deterministic Rust/PyO3 emission | unit, native, package, diagnostic, and generated-Rust tests<br>Contracts: `compiler.package-native`, `compiler.generated-identities`, `compiler.pattern-identity`, `compiler.integral-bitwise` | an explicit Python subset; rustc remains authoritative |
 | Non-executing source embedding | Bounded | content-addressed single-source/virtual-package compilation and direct native callable binding | native cross-module non-execution, callable binding, and process cancellation tests<br>Contracts: `embedding.nonexecuting-source-callable`, `embedding.phase-cancellation`, `embedding.virtual-package`, `embedding.generated-artifacts` | Cargo dependencies remain a trusted build boundary; virtual mappings are regularized into immutable package snapshots |
-| Ownership boundary | Compositional | Owned/Ref/Mut plus immutable Shared, move state, borrows, reload and fingerprint identity | multi-argument, alias, reload, thread, domain, and vector tests<br>Contracts: `ownership.failure-atomic`, `ownership.reload-fingerprint`, `ownership.domain-schema`, `ownership.shared-send-sync`, `ownership.audited-gil-release` | ordinary handles are thread-affine; Shared is immutable Send + Sync only; no retained cross-call borrows |
+| Ownership boundary | Compositional | Owned/Ref/Mut plus immutable Shared, move state, borrows, reload and fingerprint identity | multi-argument, alias, reload, thread, domain, and vector tests<br>Contracts: `ownership.failure-atomic`, `ownership.reload-fingerprint`, `ownership.domain-schema`, `ownership.shared-send-sync`, `ownership.audited-gil-release`, `ownership.borrowed-return-identity` | ordinary handles are thread-affine; Shared is immutable Send + Sync only; no retained cross-call borrows |
 | Cargo build and cache | Production | locks, complete modeled fingerprints, hashing, leases, atomic publish, cancellation, and release budgets | dependency, corruption, replan, prune, race, cancellation, wheel, and versioned performance gates<br>Contracts: `cache.corruption-repair`, `cache.concurrent-publication`, `cache.prune-load-lease`, `build.hard-cancellation`, `build.performance-budgets` | trusted build scripts may require declared extra inputs |
 | Application packaging | Bounded | PEP 517 wheel/sdist metadata merging with regular, namespace, and multiple top-level packages | clean dependency-resolving install of a native multi-package wheel without a Rust toolchain<br>Contracts: `packaging.metadata-sdist`, `packaging.pep517-multi-package` | platform wheels remain CPython-specific and must be built per supported target |
 | Sequential iterators | Compositional | owned/shared items; map/filter/filter_map/fold/reduce/collect and queries | Copy, String, &str, tuple, domain, one- and three-stage native pipelines<br>Contracts: `iterator.copy-inline`, `iterator.string-inline`, `iterator.string-split-local`, `iterator.opaque-shadow`, `iterator.borrowed-for-loop`, `iterator.borrowed-for-loop-native`, `iterator.vec-consuming` | expression lambdas only; no retained iterator boundary |
@@ -42,7 +42,7 @@ xfail-only contract does not satisfy a maturity claim.
 | Native filesystem results | Proof | typed File::open and whole-file String reads with io::Error propagation | native success, open-error, and read-error Result propagation test<br>Contracts: `filesystem.result-propagation` | read-only whole-file teaching surface; no general path or filesystem API |
 | Structured native errors | Bounded | declared From conversions, custom error enums, fields, and cause chains | native file, parse, and validation errors through one application error<br>Contracts: `errors.from-structured`, `errors.undeclared-from-rejected` | error payloads are displayable scalar/string/io/error values; no arbitrary Error trait discovery |
 | Typed crate adapters | Bounded | external types/functions/traits, borrow signatures, closures, declared effects | real path-crate value, generic callback, buffer, and trait native tests<br>Contracts: `crate.typed-value`, `crate.typed-callback`, `crate.builder-method-error`, `crate.buffer-adapter`, `crate.external-owned-handle` | no automatic crate API discovery or manifest generation |
-| Typed Python-call adapters | Bounded | static Python signatures, explicit effects, PyErr propagation, and checked return extraction | native success/exception/invalid-return plus closure-placement diagnostics<br>Contracts: `python-adapter.success-errors`, `python-adapter.explicit-target`, `python-adapter.method-placement`, `python-adapter.invalid-placement` | synchronous calls only; rejected in closures, trait/operator methods, workers, and async helpers |
+| Typed Python-call adapters | Bounded | static Python signatures, explicit effects, PyErr propagation, and checked return extraction | native success/exception/invalid-return, typed pre-propagation hooks, and closure-placement diagnostics<br>Contracts: `python-adapter.success-errors`, `python-adapter.explicit-target`, `python-adapter.method-placement`, `python-adapter.invalid-placement`, `python-adapter.error-hook` | synchronous calls only; rejected in closures, trait/operator methods, workers, and async helpers; hooks are zero-argument native functions |
 | Traits, generics, operators | Bounded | per-parameter generic bounds; typed trait arguments; ref/mut/owned receivers; generic and associated outputs; arithmetic operators | focused lowering and native compositional conformance tests<br>Contracts: `traits.dynamic-dispatch`, `generics.concrete-export`, `traits.arguments-receivers-associated`, `traits.external-implementation`, `closures.capture-contracts` | finite safe trait/operator surface; no unsafe traits or specialization |
 | std-only native futures | Proof | Future/await/join/select lowering through a teaching executor | focused Rust Book subprocess tests<br>Contracts: `futures.split-local-block-on` | busy-polling; no reactor, cancellation, Tokio, or Python future ABI |
 | Typed native channels | Bounded | unbounded Sender/Receiver and capacity-bearing SyncSender channels | native send/receive coverage for both std mpsc channel families<br>Contracts: `channels.unbounded`, `channels.bounded` | blocking std channels only; no async wake integration, fairness, or cancellation |
@@ -178,6 +178,8 @@ typed tuples/arrays and the explicit `rust.Vec([...])` constructor.
 
 - Integer, float, bool, string, and context-typed `None` literals.
 - Numeric `+`, `-`, `*`, `/`, `%`; Rust typed division is intentional.
+- Integer-only bitwise `&`, `|`, `^`, `<<`, and `>>`, including augmented
+  assignment forms.
 - Unary `+`, `-`, and bool `not`.
 - `==`, `!=`, `<`, `<=`, `>`, `>=`; chained comparisons are rejected.
 - Bool-only `and`/`or`; Python truthiness and operand-return semantics do not apply.
@@ -301,6 +303,16 @@ never counts as a mutable reference. Places retain their root through field and
 index projections, so `bucket.items.push(value)` and mutable field reborrows mark
 the owned `bucket` root mutable while the same operation through a shared root is
 rejected as `CRAB208`.
+
+Native-only helpers and methods may return a borrow tied to an input. Use
+`rust.Borrow[a, T]` on both the source parameter and return for an explicit named
+lifetime. For an ordinary `rust.Ref[T]` return with several borrowed inputs,
+Crabwalk infers a lifetime only when exactly one compatible input can be the
+source; ambiguous returns fail as `CRAB183`. Calls automatically borrow compatible
+owned locals and preserve an existing `Ref` from expressions such as
+`slot.as_ref().unwrap()`. This is a generated-Rust lifetime contract only: borrowed
+values still cannot cross an exported Python return boundary or outlive the native
+call.
 
 Trait conformance is also checked before emission: every declared method must be
 implemented exactly once; receiver ownership, argument arity/types, generic
@@ -493,6 +505,13 @@ signature and explicit extra effects; generated code attaches to Python, imports
 the named module/callable, propagates `PyErr`, and checks its return conversion.
 By default it targets the declaration module and function name; use
 `@rust.python_adapter(module="operator", name="neg")` to route explicitly.
+An optional `on_error=handler` names a local synchronous, non-generic,
+zero-argument `@rust.fn` returning `None`. The handler runs natively once after any
+adapter import, attribute lookup, call, or return extraction fails and immediately
+before the same `PyErr` propagates. It may perform handled native work (for example,
+write bounded telemetry), but validation rejects reachable Python or panic effects
+so the observer cannot replace the original exception. Inspection exposes the
+resolved `error_hook` symbol.
 `rust.println(value)` remains native. The Python effect propagates through ordinary
 calls, inherent methods, concrete and dynamic trait dispatch, custom operators,
 and function-pointer targets. Result-aware inherent methods may call Python;

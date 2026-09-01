@@ -503,6 +503,11 @@ def _render_expression(
             "multiply": "*",
             "divide": "/",
             "remainder": "%",
+            "bit_and": "&",
+            "bit_or": "|",
+            "bit_xor": "^",
+            "shift_left": "<<",
+            "shift_right": ">>",
             "and": "&&",
             "or": "||",
         }[expression.operator]
@@ -547,7 +552,7 @@ def _render_expression(
                 + ("," if len(rendered_arguments) == 1 else "")
                 + ")"
             )
-            return (
+            attached = (
                 "Python::attach(|py| -> PyResult<"
                 f"{expression.type_ref.render()}> {{ "
                 "let __cw_python_module = PyModule::import(py, "
@@ -557,8 +562,15 @@ def _render_expression(
                 "let __cw_python_result = __cw_python_callable.call1("
                 f"{call_tuple})?; "
                 f"__cw_python_result.extract::<{expression.type_ref.render()}>() "
-                "})?"
+                "})"
             )
+            if expression.python_error_hook is not None:
+                attached += (
+                    ".inspect_err(|_| { "
+                    f"__cw_native_{expression.python_error_hook}(); "
+                    "})"
+                )
+            return f"{attached}?"
         if expression.parameter_types is not None:
             rendered_arguments = [
                 (

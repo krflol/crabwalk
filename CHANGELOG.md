@@ -4,6 +4,8 @@ All notable Crabwalk changes are recorded here.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-09-01
+
 ### Added
 
 - `CompiledSource.artifacts()` exposes generated Rust, Cargo manifest/lock, build
@@ -27,6 +29,11 @@ All notable Crabwalk changes are recorded here.
 - `@rust.fn(release_gil=True)` provides an audited opt-in for long-running native
   calls with owned/shared inputs when conservative external effects would otherwise
   keep the GIL attached.
+- Integral `&`, `|`, `^`, `<<`, and `>>` expressions and augmented assignments
+  lower for Rust integer types with source-level rejection for non-integral values.
+- `@rust.python_adapter(..., on_error=handler)` can run one zero-argument native
+  observer immediately before an import, call, or return-conversion `PyErr`
+  propagates, while preserving the original Python exception.
 
 ### Changed
 
@@ -53,6 +60,9 @@ All notable Crabwalk changes are recorded here.
   contract without an unsafe cast.
 - Compiler analysis, target reuse, and native loading no longer conflate distinct
   Python installations that happen to share one project tree.
+- Native borrowed-return calls preserve their `Ref`/named-`Borrow` identity,
+  automatically borrow compatible owned locals, reborrow existing shared
+  expressions, and infer the unique returned collection lifetime when possible.
 
 ## [1.1.0] - 2026-08-30
 

@@ -58,6 +58,37 @@ def validate_package_ir(ir: PackageIR) -> None:
         }
         for expression in expressions:
             _validate_closure_contract(expression)
+            if (
+                isinstance(expression, CrateCallIR)
+                and expression.python_error_hook is not None
+            ):
+                hook = functions.get(expression.python_error_hook)
+                if hook is None:
+                    raise AssertionError("resolved Python adapter error hook is absent")
+                forbidden = {
+                    Effect.PYTHON_RUNTIME,
+                    Effect.MAY_PANIC,
+                }.intersection(hook.effects)
+                if forbidden:
+                    rendered = ", ".join(
+                        effect.value for effect in sorted(forbidden, key=str)
+                    )
+                    raise CrabwalkCompilationError(
+                        Diagnostic(
+                            "CRAB238",
+                            "Python adapter error hook cannot preserve PyErr",
+                            (
+                                f"{hook.qualified_name} has {rendered} effects; an "
+                                "on_error hook must complete natively without Python "
+                                "or panic before the original exception propagates."
+                            ),
+                            expression.span,
+                            (
+                                "Use a zero-argument native handler whose fallible "
+                                "operations are handled without unwrap or expect."
+                            ),
+                        )
+                    )
             closure = _worker_closure(expression)
             closures = (() if closure is None else (closure,)) + _parallel_closures(
                 expression
@@ -924,6 +955,8 @@ def _dispatch_targets(expression: object) -> tuple[str, ...]:
         return (expression.target,)
     if isinstance(expression, BinaryIR) and expression.target_symbol is not None:
         return (expression.target_symbol,)
+    if isinstance(expression, CrateCallIR) and expression.python_error_hook is not None:
+        return (expression.python_error_hook,)
     return ()
 
 

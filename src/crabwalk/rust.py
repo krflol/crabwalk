@@ -828,12 +828,15 @@ def python_adapter(
     effects: list[RustEffect] | tuple[RustEffect, ...] = (),
     module: str | None = None,
     name: str | None = None,
+    on_error: object | None = None,
 ) -> _F | Callable[[_F], _F]:
     """Declare an ordinary Python callable available to compiled Rust code.
 
     The Python function remains directly callable. Static Crabwalk calls use its
     annotated signature, reacquire the GIL, validate the returned value through
-    PyO3, and propagate Python exceptions without an interpreted fallback.
+    PyO3, and propagate Python exceptions without an interpreted fallback. A local
+    native ``on_error`` hook may observe a failed boundary immediately before the
+    original ``PyErr`` propagates.
     """
 
     if not all(isinstance(value, RustEffect) for value in effects):
@@ -848,6 +851,12 @@ def python_adapter(
         not isinstance(name, str) or not name or not name.isidentifier()
     ):
         raise TypeError("rust.python_adapter name must be an identifier")
+    if on_error is not None and (
+        not callable(on_error) or not getattr(on_error, "__name__", "")
+    ):
+        raise TypeError(
+            "rust.python_adapter on_error must name a zero-argument @rust.fn handler"
+        )
     if Pure in effects or PythonRuntime in effects:
         raise TypeError(
             "rust.python_adapter always has PythonRuntime semantics; declare only "
@@ -865,6 +874,9 @@ def python_adapter(
                 "effects": (PythonRuntime, MayPanic, *effects),
                 "module": module,
                 "name": name or value.__name__,
+                "on_error": (
+                    None if on_error is None else getattr(on_error, "__name__")
+                ),
             },
         )
         return value

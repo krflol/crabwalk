@@ -48,7 +48,7 @@ def test_book_foundation_types_and_bindings_lower_to_real_rust(
     ir = analyze_path(source)
     generated = generate_project(ir, "_crabwalk_book_foundations")
 
-    assert ir.schema_version == 28
+    assert ir.schema_version == 29
     first_value = ir.functions[0].body[1]
     shadowed_value = ir.functions[0].body[2]
     assert isinstance(first_value, LetIR)

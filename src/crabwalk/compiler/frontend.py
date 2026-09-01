@@ -162,6 +162,7 @@ from .types import (
     IteratorIndexing,
     IteratorItemMode,
     IteratorType,
+    LifetimeReferenceType,
     OwnershipType,
 )
 
@@ -201,6 +202,9 @@ _PRIMITIVES.update(
         "PathBuf": TypeRef("PathBuf"),
         "TextColumn": TypeRef("TextColumn"),
     }
+)
+_INTEGRAL_BINARY_OPERATORS = frozenset(
+    {"bit_and", "bit_or", "bit_xor", "shift_left", "shift_right"}
 )
 _GENERIC_ARITY = {
     "Arc": 1,
@@ -373,21 +377,24 @@ def analyze_path(
         )
         for node in enum_nodes
     }
-    signatures = {
-        declaration.name: _bind_signature_identity(
-            _analyze_signature(
-                declaration,
-                source_path,
-                domain_types,
-                crates,
-                enums,
-                traits,
-            ),
-            identity,
-            mangle_item(identity, declaration.name, namespace="fn"),
-        )
-        for declaration in declarations
-    }
+    signatures = _resolve_python_error_hooks(
+        {
+            declaration.name: _bind_signature_identity(
+                _analyze_signature(
+                    declaration,
+                    source_path,
+                    domain_types,
+                    crates,
+                    enums,
+                    traits,
+                ),
+                identity,
+                mangle_item(identity, declaration.name, namespace="fn"),
+            )
+            for declaration in declarations
+        },
+        source_path,
+    )
     functions = tuple(
         _FunctionLowerer(
             declaration,
@@ -415,7 +422,7 @@ def analyze_path(
     source_graph = single_file_source_graph(source_path)
     return assign_package_identities(
         PackageIR(
-            schema_version=28,
+            schema_version=29,
             module_name=identity,
             source_path=str(source_path),
             source_hash=source_graph.compiler_input_hash,
@@ -1080,21 +1087,24 @@ def _analyze_regular_package(
         module_domain_structs[name] = domain_structs
         module_domain_enums[name] = domain_enums
         module_domain_traits[name] = domain_traits
-        module.signatures = {
-            declaration.name: _bind_signature_identity(
-                _analyze_signature(
-                    declaration,
-                    module.path,
-                    domain_types,
-                    visible_crates,
-                    domain_enums,
-                    domain_traits,
-                ),
-                name,
-                _package_rust_symbol(name, declaration.name),
-            )
-            for declaration in module.declarations.values()
-        }
+        module.signatures = _resolve_python_error_hooks(
+            {
+                declaration.name: _bind_signature_identity(
+                    _analyze_signature(
+                        declaration,
+                        module.path,
+                        domain_types,
+                        visible_crates,
+                        domain_enums,
+                        domain_traits,
+                    ),
+                    name,
+                    _package_rust_symbol(name, declaration.name),
+                )
+                for declaration in module.declarations.values()
+            },
+            module.path,
+        )
 
     for module in modules.values():
         module.traits = {
@@ -1219,7 +1229,7 @@ def _analyze_regular_package(
         source_paths.append(str(module.path))
     return assign_package_identities(
         PackageIR(
-            schema_version=28,
+            schema_version=29,
             module_name=package_name,
             source_path=str(package_root / "__init__.py"),
             source_hash=source_graph.compiler_input_hash,
@@ -1517,7 +1527,12 @@ class _FunctionLowerer(PatternLoweringMixin):
             if value.method_for is not None and value.trait_symbol is not None
         )
         self.parameter_ownership = {
-            value.name: value.type_ref.ownership for value in self.signature.parameters
+            value.name: (
+                "Ref"
+                if isinstance(value.type_ref, LifetimeReferenceType)
+                else value.type_ref.ownership
+            )
+            for value in self.signature.parameters
         }
         self.path = path
         self.write_counts = _assignment_counts(node)
@@ -1668,6 +1683,70 @@ class _FunctionLowerer(PatternLoweringMixin):
             "Create a new binding before the consuming operation or reinitialize it.",
         )
 
+    def _require_borrowed_return(
+        self,
+        node: ast.expr,
+        value: ExpressionIR,
+    ) -> None:
+        """Prove that a returned shared reference originates in a borrowed input."""
+
+        expected = self.signature.return_type
+        if value.type_ref.underlying != expected.underlying:
+            _require_type(
+                value.type_ref.underlying, expected.underlying, self.path, node
+            )
+        place = _place_from_ast(node)
+        parameter = next(
+            (
+                candidate
+                for candidate in self.signature.parameters
+                if place is not None and candidate.name == place.root
+            ),
+            None,
+        )
+        if isinstance(expected, LifetimeReferenceType):
+            value_matches = (
+                isinstance(value.type_ref, LifetimeReferenceType)
+                and expected.lifetime_name == value.type_ref.lifetime_name
+            )
+            parameter_matches = (
+                parameter is not None
+                and isinstance(parameter.type_ref, LifetimeReferenceType)
+                and expected.lifetime_name == parameter.type_ref.lifetime_name
+                and expected.underlying == parameter.type_ref.underlying
+            )
+            if value_matches or parameter_matches:
+                return
+            _fail(
+                "CRAB183",
+                "Returned borrow uses a different lifetime",
+                (
+                    f"Expected lifetime '{expected.lifetime_name}', found "
+                    f"{value.type_ref.display()}."
+                ),
+                self.path,
+                node,
+            )
+        if _is_shared_borrow_type(value.type_ref):
+            return
+        if (
+            parameter is not None
+            and _is_shared_borrow_type(parameter.type_ref)
+            and parameter.type_ref.underlying == expected.underlying
+        ):
+            return
+        _fail(
+            "CRAB183",
+            "Borrowed return has no matching input lifetime",
+            (
+                f"{expected.display()} must return a compatible borrowed parameter "
+                "or another expression whose borrow lifetime is explicit."
+            ),
+            self.path,
+            node,
+            "Use rust.Borrow[a, T] on the source parameter and return, or return an owned value.",
+        )
+
     def _lower_block(
         self,
         nodes: list[ast.stmt],
@@ -1704,11 +1783,20 @@ class _FunctionLowerer(PatternLoweringMixin):
                     self.path,
                     node,
                 )
-            semantic_return_type = self.signature.return_type.underlying
-            value = self._lower_expression(
-                node.value, environment, semantic_return_type
-            )
-            _require_type(value.type_ref, semantic_return_type, self.path, node.value)
+            if _is_shared_borrow_type(self.signature.return_type):
+                value = self._lower_expression(node.value, environment)
+                self._require_borrowed_return(node.value, value)
+            else:
+                semantic_return_type = self.signature.return_type.underlying
+                value = self._lower_expression(
+                    node.value, environment, semantic_return_type
+                )
+                _require_type(
+                    value.type_ref,
+                    semantic_return_type,
+                    self.path,
+                    node.value,
+                )
             return ReturnIR(value, SourceSpan.from_ast(self.path, node))
 
         if isinstance(node, ast.Assign):
@@ -2005,7 +2093,10 @@ class _FunctionLowerer(PatternLoweringMixin):
             operator = _binary_operator(node.op, self.path, expression=node)
             if operator in {"and", "or"}:
                 _unsupported(node, self.path)
-            _require_numeric(augmented_type, self.path, node)
+            if operator in _INTEGRAL_BINARY_OPERATORS:
+                _require_integer(augmented_type, self.path, node)
+            else:
+                _require_numeric(augmented_type, self.path, node)
             value = BinaryIR(
                 operator,  # type: ignore[arg-type]
                 NameIR(
@@ -2559,6 +2650,8 @@ class _FunctionLowerer(PatternLoweringMixin):
                     span,
                     operator_signature.rust_symbol,
                 )
+            if operator in _INTEGRAL_BINARY_OPERATORS:
+                _require_integer(left.type_ref, self.path, node.left)
             right = self._lower_expression(node.right, environment, left.type_ref)
             _require_type(right.type_ref, left.type_ref, self.path, node.right)
             return BinaryIR(
@@ -2912,7 +3005,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                 self.path,
                 node,
             )
-        semantic_return_type = return_type.underlying
+        semantic_return_type = _call_result_type(return_type)
         call_type = (
             TypeRef("Future", (semantic_return_type,))
             if signature.is_async
@@ -2929,6 +3022,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                 signature.external_effects,
                 signature.name,
                 tuple(resolved_parameter_types),
+                signature.python_error_hook,
             )
         return CallIR(
             signature.rust_symbol,
@@ -3060,7 +3154,9 @@ class _FunctionLowerer(PatternLoweringMixin):
         value = self._lower_expression(
             node,
             environment,
-            parameter_type.underlying,
+            None
+            if _is_reference_wrapper(parameter_type)
+            else parameter_type.underlying,
         )
         return self._apply_call_ownership(node, value, parameter_type)
 
@@ -3070,7 +3166,27 @@ class _FunctionLowerer(PatternLoweringMixin):
         value: ExpressionIR,
         parameter_type: TypeRef,
     ) -> ExpressionIR:
-        if parameter_type.rust_name == "Ref":
+        if _is_reference_wrapper(parameter_type):
+            _require_type(
+                value.type_ref.underlying,
+                parameter_type.underlying,
+                self.path,
+                node,
+            )
+            place = _place_from_ast(node)
+            source_parameter = next(
+                (
+                    candidate
+                    for candidate in self.signature.parameters
+                    if place is not None and candidate.name == place.root
+                ),
+                None,
+            )
+            if _is_shared_borrow_type(value.type_ref) or (
+                source_parameter is not None
+                and _is_shared_borrow_type(source_parameter.type_ref)
+            ):
+                return value
             return BorrowIR(
                 "shared",
                 value,
@@ -4131,7 +4247,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                         )
                     )
             arguments = tuple(lowered_method_arguments)
-            result = inherent.return_type.underlying
+            result = _call_result_type(inherent.return_type)
             if expected is not None:
                 _require_type(result, expected, self.path, node)
             required = _receiver_access_for_ownership(
@@ -5672,7 +5788,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                 node,
                 "Use a lambda to borrow, clone, or otherwise convert the adapter value.",
             )
-        result_type = signature.return_type.underlying
+        result_type = _call_result_type(signature.return_type)
         if expected_result is not None:
             _require_type(result_type, expected_result, self.path, node)
         parameter = "__cw_function_item_argument"
@@ -5690,6 +5806,7 @@ class _FunctionLowerer(PatternLoweringMixin):
                 signature.external_effects,
                 signature.name,
                 (declared_parameter,),
+                signature.python_error_hook,
             )
             if signature.external_path is not None
             else CallIR(
@@ -6492,6 +6609,121 @@ def _bind_signature_identity(
     )
 
 
+def _resolve_python_error_hooks(
+    signatures: dict[str, _Signature],
+    path: Path,
+) -> dict[str, _Signature]:
+    resolved: dict[str, _Signature] = {}
+    for name, signature in signatures.items():
+        hook_name = signature.python_error_hook
+        if hook_name is None:
+            resolved[name] = signature
+            continue
+        hook = signatures.get(hook_name)
+        if (
+            hook is None
+            or hook.external_path is not None
+            or hook.parameters
+            or hook.return_type != UNIT
+            or hook.is_async
+            or hook.type_parameters
+            or hook.method_name is not None
+        ):
+            _fail(
+                "CRAB232",
+                "Invalid Python adapter error hook",
+                (
+                    f"'{hook_name}' must be a local synchronous, non-generic, "
+                    "zero-argument @rust.fn returning None."
+                ),
+                path,
+                signature.node.decorator_list[0],
+                "Define the native handler in this module and pass it as on_error=handler.",
+            )
+        resolved[name] = replace(signature, python_error_hook=hook.rust_symbol)
+    return resolved
+
+
+def _relate_implicit_borrowed_return(
+    parameters: tuple[ParameterIR, ...],
+    return_type: TypeRef,
+    type_parameters: tuple[TypeParameterIR, ...],
+    *,
+    exported: bool,
+    method_name: str | None,
+    path: Path,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> tuple[tuple[ParameterIR, ...], TypeRef, tuple[TypeParameterIR, ...]]:
+    """Give an otherwise ambiguous shared return one explicit input lifetime."""
+
+    if exported or return_type.ownership != "Ref":
+        return parameters, return_type, type_parameters
+    borrowed_indexes = tuple(
+        index
+        for index, parameter in enumerate(parameters)
+        if _is_shared_borrow_type(parameter.type_ref)
+        or parameter.type_ref.ownership == "Mut"
+    )
+    if len(borrowed_indexes) <= 1:
+        return parameters, return_type, type_parameters
+    candidates = tuple(
+        index
+        for index in borrowed_indexes
+        if _is_shared_borrow_type(parameters[index].type_ref)
+        and parameters[index].type_ref.underlying == return_type.underlying
+    )
+    if len(candidates) != 1:
+        _fail(
+            "CRAB183",
+            "Borrowed return lifetime is ambiguous",
+            (
+                f"{return_type.display()} has {len(candidates)} compatible borrowed "
+                "inputs among multiple references."
+            ),
+            path,
+            node.returns or node,
+            "Use rust.Borrow[a, T] on exactly one source parameter and on the return.",
+        )
+    candidate_index = candidates[0]
+    candidate = parameters[candidate_index]
+    if isinstance(candidate.type_ref, LifetimeReferenceType):
+        return (
+            parameters,
+            LifetimeReferenceType(
+                candidate.type_ref.lifetime_name,
+                return_type.underlying,
+            ),
+            type_parameters,
+        )
+    if method_name is not None and candidate_index == 0:
+        _fail(
+            "CRAB183",
+            "Method receiver return needs an explicit lifetime contract",
+            "A receiver borrow cannot be inferred through the generated native helper when another reference is present.",
+            path,
+            node.returns or node,
+            "Return an owned value or restructure the helper so the returned borrow is a named tail parameter.",
+        )
+    existing_names = {parameter.name for parameter in type_parameters}
+    lifetime_name = "cw_return"
+    suffix = 2
+    while lifetime_name in existing_names:
+        lifetime_name = f"cw_return_{suffix}"
+        suffix += 1
+    span = SourceSpan.from_ast(path, node.returns or node)
+    lifetime = LifetimeReferenceType(lifetime_name, return_type.underlying)
+    rewritten = list(parameters)
+    rewritten[candidate_index] = replace(candidate, type_ref=lifetime)
+    return (
+        tuple(rewritten),
+        lifetime,
+        (
+            *type_parameters,
+            TypeParameterIR(lifetime_name, (), span, is_lifetime=True),
+        ),
+    )
+
+
 def _analyze_signature(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     path: Path,
@@ -6532,7 +6764,7 @@ def _analyze_signature(
             path,
             node,
         )
-    external_path, external_effects = _extern_decorator_metadata(
+    external_path, external_effects, python_error_hook = _extern_decorator_metadata(
         node,
         path,
         crates or {},
@@ -6849,6 +7081,15 @@ def _analyze_signature(
         if node.returns is None
         else _annotation_type(node.returns, path, node, domain_types)
     )
+    parameters, return_type, type_parameters = _relate_implicit_borrowed_return(
+        parameters,
+        return_type,
+        type_parameters,
+        exported=exported,
+        method_name=method_name,
+        path=path,
+        node=node,
+    )
     if (
         (python_adapter or exported)
         and return_type.ownership is None
@@ -7040,6 +7281,7 @@ def _analyze_signature(
         operator_kind=operator_kind,
         external_path=external_path,
         external_effects=external_effects,
+        python_error_hook=python_error_hook,
         release_gil=release_gil,
     )
 
@@ -8135,7 +8377,7 @@ def _extern_decorator_metadata(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     path: Path,
     crates: dict[str, CrateIR],
-) -> tuple[tuple[str, ...] | None, tuple[Effect, ...] | None]:
+) -> tuple[tuple[str, ...] | None, tuple[Effect, ...] | None, str | None]:
     if _is_python_adapter_declaration(node):
         if isinstance(node, ast.AsyncFunctionDef):
             _fail(
@@ -8149,22 +8391,29 @@ def _extern_decorator_metadata(
         additional: tuple[Effect, ...] = ()
         target_module = ""
         target_name = node.name
+        error_hook: str | None = None
         if isinstance(decorator, ast.Call):
             options = {value.arg: value for value in decorator.keywords if value.arg}
-            if decorator.args or set(options) - {"effects", "module", "name"}:
+            if decorator.args or set(options) - {
+                "effects",
+                "module",
+                "name",
+                "on_error",
+            }:
                 _fail(
                     "CRAB232",
                     "Invalid Python adapter declaration",
                     (
                         "Use @rust.python_adapter or "
                         "@rust.python_adapter(module='package.module', "
-                        "name='callable', effects=[...])."
+                        "name='callable', effects=[...], on_error=handler)."
                     ),
                     path,
                     decorator,
                 )
             module_option = options.get("module")
             name_option = options.get("name")
+            error_hook_option = options.get("on_error")
             if module_option is not None:
                 if not (
                     isinstance(module_option.value, ast.Constant)
@@ -8198,6 +8447,16 @@ def _extern_decorator_metadata(
                         name_option.value,
                     )
                 target_name = name_option.value.value
+            if error_hook_option is not None:
+                if not isinstance(error_hook_option.value, ast.Name):
+                    _fail(
+                        "CRAB232",
+                        "Invalid Python adapter error hook",
+                        "on_error must name one local zero-argument @rust.fn handler.",
+                        path,
+                        error_hook_option.value,
+                    )
+                error_hook = error_hook_option.value.id
             effects_option = options.get("effects")
             if effects_option is not None:
                 effects_node = effects_option.value
@@ -8245,9 +8504,10 @@ def _extern_decorator_metadata(
             tuple(
                 dict.fromkeys((Effect.PYTHON_RUNTIME, Effect.MAY_PANIC, *additional))
             ),
+            error_hook,
         )
     if not _is_extern_declaration(node):
-        return None, None
+        return None, None, None
     if isinstance(node, ast.AsyncFunctionDef):
         _fail(
             "CRAB225",
@@ -8366,7 +8626,7 @@ def _extern_decorator_metadata(
             path,
             node,
         )
-    return (*crate_path, *rust_path), effects
+    return (*crate_path, *rust_path), effects, None
 
 
 def _discover_crates(
@@ -8707,7 +8967,11 @@ def _require_type(
     path: Path,
     node: ast.AST,
 ) -> None:
-    if actual != expected:
+    if actual != expected and not (
+        _is_shared_borrow_type(actual)
+        and _is_shared_borrow_type(expected)
+        and actual.underlying == expected.underlying
+    ):
         _fail(
             "CRAB115",
             "Rust type mismatch",
@@ -8715,6 +8979,26 @@ def _require_type(
             path,
             node,
         )
+
+
+def _is_shared_borrow_type(type_ref: TypeRef) -> bool:
+    return (
+        type_ref == STR
+        or type_ref.ownership == "Ref"
+        or isinstance(type_ref, LifetimeReferenceType)
+    )
+
+
+def _is_reference_wrapper(type_ref: TypeRef) -> bool:
+    return type_ref.ownership == "Ref" or isinstance(type_ref, LifetimeReferenceType)
+
+
+def _call_result_type(type_ref: TypeRef) -> TypeRef:
+    """Preserve reference identity while unwrapping owned ABI markers."""
+
+    if _is_shared_borrow_type(type_ref) or type_ref.ownership == "Mut":
+        return type_ref
+    return type_ref.underlying
 
 
 def _contains_generic_type(type_ref: TypeRef) -> bool:
@@ -8789,7 +9073,7 @@ def _is_copy_semantic_type(type_ref: TypeRef) -> bool:
     return (
         type_ref.is_numeric
         or type_ref.rust_name in {"bool", "char", "Str"}
-        or type_ref.ownership == "Ref"
+        or _is_shared_borrow_type(type_ref)
         or (
             type_ref.rust_name == "Option"
             and len(type_ref.arguments) == 1

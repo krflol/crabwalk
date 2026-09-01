@@ -133,6 +133,7 @@ def function_inspection(function: FunctionIR) -> dict[str, object]:
                     else "::".join(value.path)
                 ),
                 "adapter": value.adapter_name,
+                "error_hook": value.python_error_hook,
                 "declared_effects": (
                     [effect.value for effect in value.declared_effects]
                     if value.declared_effects is not None

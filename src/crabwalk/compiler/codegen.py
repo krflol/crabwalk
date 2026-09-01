@@ -34,7 +34,7 @@ from .naming import (
     shared_class_names,
 )
 
-CODEGEN_SCHEMA_VERSION = 45
+CODEGEN_SCHEMA_VERSION = 46
 
 _NATIVE_EXCEPTION_TYPES = (
     (NATIVE_MOVE_ERROR, "__CwNativeMoveError"),

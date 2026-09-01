@@ -5,9 +5,9 @@ aliases:
 type: project
 project: Crabwalk
 status: active
-phase: 1.1.0 release
+phase: 1.1.1 release
 created: 2026-08-21
-updated: 2026-08-30
+updated: 2026-09-01
 tags:
   - project/crabwalk
   - status/active
@@ -18,9 +18,10 @@ tags:
 > [!abstract] Current outcome
 > Crabwalk is a published Apache-2.0 compiler/runtime that lowers an explicit,
 > source-spanned Python subset into inspectable Rust and CPython extensions.
-> Version 1.1.0 delivers the packaging, structured-boundary, sharing, interop,
-> ETL, tooling, and lifecycle tranche. Its immutable tag is the source of every
-> tested, attested, and published release artifact.
+> Version 1.1.1 hardens embedding, external handles, native adapters, channels,
+> integral operators, and borrowed-return composition against real Crabgraph QA.
+> Its immutable tag is the source of every tested, attested, and published release
+> artifact.
 
 ## Sources of truth
 
@@ -38,7 +39,7 @@ tags:
 
 ## Implemented release surface
 
-- package-wide static analysis and source-spanned schema-v26 IR/codegen-v43;
+- package-wide static analysis and source-spanned schema-v29 IR/codegen-v46;
 - deterministic Rust, PyO3, Cargo, source-map, and mixed-wheel generation;
 - typed effects, dispatch propagation, boundary-placement validation, and explicit
   opaque external-crate calls;
@@ -90,7 +91,7 @@ tags:
 
 ## Next architectural milestone
 
-After 1.1.0, stabilize adoption rather than immediately expanding syntax: add PEP
+After 1.1.1, stabilize adoption rather than immediately expanding syntax: add PEP
 660 application-editable support, deepen editor services beyond diagnostics,
 continue extracting the stateful frontend/cross-boundary runtime, and use real
 application telemetry to tune bulk construction and output representations.

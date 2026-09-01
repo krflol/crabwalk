@@ -264,6 +264,11 @@ class BinaryIR:
         "multiply",
         "divide",
         "remainder",
+        "bit_and",
+        "bit_or",
+        "bit_xor",
+        "shift_left",
+        "shift_right",
         "and",
         "or",
     ]
@@ -300,6 +305,7 @@ class CrateCallIR:
     declared_effects: tuple[Effect, ...] | None = None
     adapter_name: str | None = None
     parameter_types: tuple[TypeRef, ...] | None = None
+    python_error_hook: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

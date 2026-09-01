@@ -163,6 +163,9 @@ index, dependency, and provenance policies.
 - No arbitrary Python objects, reflection, generators, dynamic imports, or
   exceptions-as-control-flow inside `@rust.fn`. Synchronous Python calls require a
   typed `@rust.python_adapter`; explicit `module=`/`name=` routing is supported.
+  An adapter may name one native `on_error` observer that runs immediately before
+  the original `PyErr` propagates. The observer must be synchronous, zero-argument,
+  unit-returning, and free of reachable Python or panic effects.
   Python calls remain forbidden in native closures, trait/operator methods,
   workers, and async helpers whose signatures cannot carry `PyResult`.
 - `compile_source` accepts one source or a virtual multi-module mapping and can

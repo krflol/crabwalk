@@ -134,7 +134,12 @@ All ownership arguments are validated before any `Owned` slot is taken. If a lat
 earlier valid handle remains live. Generated Rust repeats this preflight even though
 the Python wrapper normally provides the richer source-linked diagnostic first.
 
-Borrowed returns and retained Python-crossing lifetimes are rejected. Ordinary
+Native-only helpers may return `rust.Ref[T]` when its source input is unambiguous,
+or use matching `rust.Borrow[a, T]` annotations to name the relationship. Calls
+autoborrow compatible owned locals and reborrow existing shared expressions; the
+returned reference remains call-scoped Rust state and can feed another native call
+or a matching annotated local. Borrowed Python return boundaries and retained
+Python-crossing lifetimes are rejected. Ordinary
 `Owned`/`Ref`/`Mut` handles are thread-affine: access from another Python thread
 raises `CrabwalkThreadError`. They are also excluded from `rust.async_call`.
 

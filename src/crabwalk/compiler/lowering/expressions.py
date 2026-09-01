@@ -9,7 +9,18 @@ from typing import Literal
 
 from ..ir import TypeRef
 
-BinaryOperator = Literal["add", "subtract", "multiply", "divide", "remainder"]
+BinaryOperator = Literal[
+    "add",
+    "subtract",
+    "multiply",
+    "divide",
+    "remainder",
+    "bit_and",
+    "bit_or",
+    "bit_xor",
+    "shift_left",
+    "shift_right",
+]
 
 
 def binary_operator(node: ast.operator) -> BinaryOperator | None:
@@ -21,6 +32,11 @@ def binary_operator(node: ast.operator) -> BinaryOperator | None:
         ast.Mult: "multiply",
         ast.Div: "divide",
         ast.Mod: "remainder",
+        ast.BitAnd: "bit_and",
+        ast.BitOr: "bit_or",
+        ast.BitXor: "bit_xor",
+        ast.LShift: "shift_left",
+        ast.RShift: "shift_right",
     }
     return mapping.get(type(node))
 

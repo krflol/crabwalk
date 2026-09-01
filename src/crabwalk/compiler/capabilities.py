@@ -76,6 +76,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "compiler.package-native",
             "compiler.generated-identities",
             "compiler.pattern-identity",
+            "compiler.integral-bitwise",
         ),
     ),
     Capability(
@@ -108,6 +109,7 @@ CAPABILITIES: tuple[Capability, ...] = (
             "ownership.domain-schema",
             "ownership.shared-send-sync",
             "ownership.audited-gil-release",
+            "ownership.borrowed-return-identity",
         ),
     ),
     Capability(
@@ -288,13 +290,14 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Typed Python-call adapters",
         Maturity.BOUNDED,
         "static Python signatures, explicit effects, PyErr propagation, and checked return extraction",
-        "native success/exception/invalid-return plus closure-placement diagnostics",
-        "synchronous calls only; rejected in closures, trait/operator methods, workers, and async helpers",
+        "native success/exception/invalid-return, typed pre-propagation hooks, and closure-placement diagnostics",
+        "synchronous calls only; rejected in closures, trait/operator methods, workers, and async helpers; hooks are zero-argument native functions",
         (
             "python-adapter.success-errors",
             "python-adapter.explicit-target",
             "python-adapter.method-placement",
             "python-adapter.invalid-placement",
+            "python-adapter.error-hook",
         ),
     ),
     Capability(
