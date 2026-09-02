@@ -1,6 +1,6 @@
 """Runtime and distribution compatibility versions."""
 
-__version__ = "1.1.1"
+__version__ = "1.1.2.dev0"
 RUNTIME_ABI_VERSION = 1
 GENERATED_WRAPPER_ABI_VERSION = 1
 RUNTIME_DISTRIBUTION = "crabwalk-lang"
